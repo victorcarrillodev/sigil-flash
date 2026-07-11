@@ -1,5 +1,6 @@
 import { useMemo } from "react";
 import { ImageInfo, Device, RPiModel, FlashProgress, LogEntry, formatSize } from "../App";
+import { BoardSVG } from "./BoardIcons";
 
 interface Props {
   image: ImageInfo | null;
@@ -169,200 +170,6 @@ const MODEL_SPECS: Record<RPiModel, ModelSpec> = {
   }
 };
 
-/* Standard board (Pi 5/4/3/2/1) — detailed top-down PCB illustration */
-function StandardBoardSVG() {
-  return (
-    <svg width="200" height="150" viewBox="0 0 200 150" fill="none" xmlns="http://www.w3.org/2000/svg"
-      style={{ filter: "drop-shadow(0 8px 20px rgba(0,0,0,0.22))" }}>
-      {/* PCB base — deep green */}
-      <rect width="200" height="150" rx="10" fill="#1a5c2e" />
-      {/* PCB surface sheen */}
-      <rect x="2" y="2" width="196" height="146" rx="9" fill="#1e7a3a" />
-      {/* Silkscreen grid lines */}
-      <line x1="0" y1="50" x2="200" y2="50" stroke="#155229" strokeWidth="0.5" />
-      <line x1="0" y1="100" x2="200" y2="100" stroke="#155229" strokeWidth="0.5" />
-      <line x1="70" y1="0" x2="70" y2="150" stroke="#155229" strokeWidth="0.5" />
-      <line x1="140" y1="0" x2="140" y2="150" stroke="#155229" strokeWidth="0.5" />
-      {/* Mounting holes */}
-      <circle cx="10" cy="10" r="4" fill="#0f3d1e" stroke="#c0b060" strokeWidth="1" />
-      <circle cx="190" cy="10" r="4" fill="#0f3d1e" stroke="#c0b060" strokeWidth="1" />
-      <circle cx="10" cy="140" r="4" fill="#0f3d1e" stroke="#c0b060" strokeWidth="1" />
-      <circle cx="190" cy="140" r="4" fill="#0f3d1e" stroke="#c0b060" strokeWidth="1" />
-
-      {/* === PORTS — Right edge === */}
-      {/* USB-A x2 (stacked) */}
-      <rect x="188" y="18" width="14" height="28" rx="2" fill="#2a2f38" stroke="#4a5568" strokeWidth="1" />
-      <rect x="190" y="20" width="10" height="11" rx="1" fill="#111" />
-      <rect x="190" y="33" width="10" height="11" rx="1" fill="#111" />
-      {/* USB-A x2 blue (USB3) */}
-      <rect x="188" y="52" width="14" height="28" rx="2" fill="#2a2f38" stroke="#4a5568" strokeWidth="1" />
-      <rect x="190" y="54" width="10" height="11" rx="1" fill="#1a3a8f" />
-      <rect x="190" y="67" width="10" height="11" rx="1" fill="#1a3a8f" />
-      {/* RJ45 Ethernet */}
-      <rect x="187" y="86" width="15" height="22" rx="2" fill="#333" stroke="#4a5568" strokeWidth="1" />
-      <rect x="189" y="88" width="11" height="18" rx="1" fill="#0a0a0a" />
-      <circle cx="193" cy="107" r="1.5" fill="#f59e0b" />
-      <circle cx="197" cy="107" r="1.5" fill="#10b981" />
-      {/* USB-C Power */}
-      <rect x="189" y="115" width="11" height="8" rx="3" fill="#555" stroke="#888" strokeWidth="0.5" />
-
-      {/* === PORTS — Top edge === */}
-      {/* micro-HDMI x2 */}
-      <rect x="22" y="0" width="14" height="9" rx="2" fill="#111" stroke="#444" strokeWidth="0.5" />
-      <rect x="42" y="0" width="14" height="9" rx="2" fill="#111" stroke="#444" strokeWidth="0.5" />
-      {/* Camera/Display ribbon connectors */}
-      <rect x="62" y="2" width="20" height="6" rx="1" fill="#222" stroke="#555" strokeWidth="0.5" />
-      <rect x="88" y="2" width="20" height="6" rx="1" fill="#222" stroke="#555" strokeWidth="0.5" />
-      {/* USB-C (top) */}
-      <rect x="115" y="1" width="12" height="7" rx="3" fill="#555" stroke="#888" strokeWidth="0.5" />
-      {/* microSD slot */}
-      <rect x="133" y="0" width="18" height="5" rx="1" fill="#888" stroke="#aaa" strokeWidth="0.5" />
-      <rect x="134" y="0.5" width="16" height="3.5" fill="#ccc" opacity="0.4" />
-
-      {/* === PORTS — Bottom edge (GPIO) === */}
-      {[...Array(20)].map((_, i) => (
-        <rect key={i} x={20 + i * 7} y={143} width="5" height="7" rx="0.5"
-          fill={i % 2 === 0 ? "#c0b060" : "#a09050"} />
-      ))}
-      {[...Array(20)].map((_, i) => (
-        <rect key={i + 20} x={20 + i * 7} y={148} width="5" height="7" rx="0.5"
-          fill={i % 2 === 0 ? "#a09050" : "#c0b060"} />
-      ))}
-
-      {/* === MAIN SoC CHIP === */}
-      <rect x="60" y="52" width="48" height="48" rx="4" fill="#0a0f0a" stroke="#2a3a2a" strokeWidth="1.5" />
-      <rect x="64" y="56" width="40" height="40" rx="2" fill="#111811" />
-      {/* SoC die markings */}
-      <text x="84" y="79" fontSize="6" fill="#2a5a2a" fontFamily="monospace" textAnchor="middle">BCM</text>
-      <text x="84" y="87" fontSize="5" fill="#1e4a1e" fontFamily="monospace" textAnchor="middle">2712</text>
-      {/* Chip pins (left) */}
-      {[60,66,72,78,84,90].map((y, i) => <rect key={i} x={55} y={y} width={5} height={3} rx={0.5} fill="#9a8a40" />)}
-      {/* Chip pins (right) */}
-      {[60,66,72,78,84,90].map((y, i) => <rect key={i+6} x={108} y={y} width={5} height={3} rx={0.5} fill="#9a8a40" />)}
-      {/* Chip pins (top) */}
-      {[65,72,79,86,93,100].map((x, i) => <rect key={i+12} x={x} y={47} width={3} height={5} rx={0.5} fill="#9a8a40" />)}
-      {/* Chip pins (bottom) */}
-      {[65,72,79,86,93,100].map((x, i) => <rect key={i+18} x={x} y={100} width={3} height={5} rx={0.5} fill="#9a8a40" />)}
-
-      {/* === RAM chips === */}
-      <rect x="20" y="54" width="28" height="16" rx="2" fill="#111" stroke="#333" strokeWidth="1" />
-      <rect x="22" y="56" width="24" height="12" rx="1" fill="#0a0f12" />
-      <text x="34" y="65" fontSize="5" fill="#334" fontFamily="monospace" textAnchor="middle">LPDDR4X</text>
-      <rect x="20" y="76" width="28" height="16" rx="2" fill="#111" stroke="#333" strokeWidth="1" />
-      <rect x="22" y="78" width="24" height="12" rx="1" fill="#0a0f12" />
-
-      {/* === PMIC / Power chip === */}
-      <rect x="22" y="100" width="22" height="18" rx="2" fill="#1a1010" stroke="#3a2020" strokeWidth="1" />
-      <text x="33" y="111" fontSize="5" fill="#5a3030" fontFamily="monospace" textAnchor="middle">PMIC</text>
-
-      {/* === WiFi/BT module === */}
-      <rect x="120" y="56" width="36" height="28" rx="3" fill="#1a1a2e" stroke="#2a2a4e" strokeWidth="1" />
-      <rect x="122" y="58" width="32" height="24" rx="2" fill="#111122" />
-      <rect x="124" y="60" width="28" height="4" rx="1" fill="#1a2a4a" />
-      <text x="138" y="76" fontSize="5" fill="#2a4a8a" fontFamily="monospace" textAnchor="middle">WiFi/BT</text>
-      {/* WiFi antenna trace */}
-      <path d="M156 68 Q164 62 168 68 Q172 74 168 80" stroke="#2a4a8a" strokeWidth="1" fill="none" />
-      <path d="M158 68 Q164 64 170 68 Q176 74 170 82" stroke="#1a3a7a" strokeWidth="0.5" fill="none" />
-
-      {/* === Capacitors (SMD) === */}
-      {[[120,100],[128,100],[136,100],[120,112],[128,112]].map(([x,y], i) => (
-        <rect key={i} x={x} y={y} width={5} height={8} rx={1} fill="#1a3a1a" stroke="#2a5a2a" strokeWidth="0.5" />
-      ))}
-      {/* Small SMD resistors */}
-      {[[50,110],[50,118],[50,126],[50,134]].map(([x,y], i) => (
-        <rect key={i} x={x} y={y} width={8} height={4} rx={0.5} fill="#222" stroke="#444" strokeWidth="0.5" />
-      ))}
-
-      {/* === Status LEDs === */}
-      <circle cx="170" cy="110" r="3" fill="#10b981" opacity="0.9" style={{ filter: "drop-shadow(0 0 4px #10b981)" }} />
-      <circle cx="170" cy="120" r="3" fill="#e53e6a" opacity="0.8" />
-      <circle cx="170" cy="130" r="3" fill="#f59e0b" opacity="0.7" />
-
-      {/* === GPIO pin labels === */}
-      <text x="100" y="142" fontSize="4" fill="#2a6a2a" fontFamily="monospace" textAnchor="middle">GPIO — 40 pin</text>
-    </svg>
-  );
-}
-
-/* Zero/Pico board — compact narrow PCB */
-function ZeroBoardSVG() {
-  return (
-    <svg width="240" height="90" viewBox="0 0 240 90" fill="none" xmlns="http://www.w3.org/2000/svg"
-      style={{ filter: "drop-shadow(0 8px 20px rgba(0,0,0,0.22))" }}>
-      {/* PCB base */}
-      <rect width="240" height="90" rx="8" fill="#1a5c2e" />
-      <rect x="2" y="2" width="236" height="86" rx="7" fill="#1e7a3a" />
-      {/* Silkscreen lines */}
-      <line x1="0" y1="45" x2="240" y2="45" stroke="#155229" strokeWidth="0.4" />
-      <line x1="80" y1="0" x2="80" y2="90" stroke="#155229" strokeWidth="0.4" />
-      <line x1="160" y1="0" x2="160" y2="90" stroke="#155229" strokeWidth="0.4" />
-      {/* Mounting holes */}
-      <circle cx="9" cy="9" r="3.5" fill="#0f3d1e" stroke="#c0b060" strokeWidth="0.8" />
-      <circle cx="231" cy="9" r="3.5" fill="#0f3d1e" stroke="#c0b060" strokeWidth="0.8" />
-      <circle cx="9" cy="81" r="3.5" fill="#0f3d1e" stroke="#c0b060" strokeWidth="0.8" />
-      <circle cx="231" cy="81" r="3.5" fill="#0f3d1e" stroke="#c0b060" strokeWidth="0.8" />
-
-      {/* GPIO — top edge 40 pins */}
-      {[...Array(20)].map((_, i) => (
-        <rect key={i} x={18 + i * 10} y={0} width={7} height={5} rx={0.5} fill={i % 2 === 0 ? "#c0b060" : "#a09050"} />
-      ))}
-      {[...Array(20)].map((_, i) => (
-        <rect key={i+20} x={18 + i * 10} y={5} width={7} height={5} rx={0.5} fill={i % 2 === 0 ? "#a09050" : "#c0b060"} />
-      ))}
-
-      {/* Main SoC */}
-      <rect x="88" y="24" width="38" height="38" rx="3" fill="#0a0f0a" stroke="#2a3a2a" strokeWidth="1.2" />
-      <rect x="91" y="27" width="32" height="32" rx="2" fill="#111811" />
-      <text x="107" y="45" fontSize="5.5" fill="#2a5a2a" fontFamily="monospace" textAnchor="middle">BCM</text>
-      <text x="107" y="52" fontSize="4.5" fill="#1e4a1e" fontFamily="monospace" textAnchor="middle">2710A1</text>
-      {/* SoC pins */}
-      {[28,34,40,46,52].map((y, i) => <rect key={i} x={83} y={y} width={5} height={2.5} rx={0.5} fill="#9a8a40" />)}
-      {[28,34,40,46,52].map((y, i) => <rect key={i+5} x={126} y={y} width={5} height={2.5} rx={0.5} fill="#9a8a40" />)}
-
-      {/* RAM chip */}
-      <rect x="136" y="28" width="24" height="16" rx="2" fill="#111" stroke="#2a2a2a" strokeWidth="0.8" />
-      <rect x="138" y="30" width="20" height="12" rx="1" fill="#0a0a0a" />
-      <text x="148" y="38" fontSize="4.5" fill="#223" fontFamily="monospace" textAnchor="middle">512MB</text>
-
-      {/* WiFi chip (Zero W only) */}
-      <rect x="136" y="50" width="24" height="16" rx="2" fill="#1a1a2e" stroke="#2a2a4e" strokeWidth="0.8" />
-      <text x="148" y="61" fontSize="4" fill="#2a4a8a" fontFamily="monospace" textAnchor="middle">Wi-Fi</text>
-
-      {/* mini-HDMI */}
-      <rect x="166" y="0" width="18" height="8" rx="1.5" fill="#111" stroke="#444" strokeWidth="0.5" />
-      <rect x="167.5" y="1" width="15" height="6" rx="1" fill="#0a0a0a" />
-
-      {/* Micro USB OTG */}
-      <rect x="190" y="0" width="12" height="7" rx="2.5" fill="#555" stroke="#888" strokeWidth="0.5" />
-
-      {/* Micro USB PWR */}
-      <rect x="208" y="0" width="12" height="7" rx="2.5" fill="#555" stroke="#888" strokeWidth="0.5" />
-
-      {/* Camera connector */}
-      <rect x="18" y="34" width="26" height="6" rx="1" fill="#222" stroke="#555" strokeWidth="0.5" />
-      <rect x="20" y="35" width="22" height="4" fill="#111" opacity="0.8" />
-
-      {/* PMIC */}
-      <rect x="18" y="50" width="18" height="14" rx="1.5" fill="#1a1010" stroke="#3a2020" strokeWidth="0.8" />
-      <text x="27" y="60" fontSize="4" fill="#5a3030" fontFamily="monospace" textAnchor="middle">PMIC</text>
-
-      {/* Status LED */}
-      <circle cx="60" cy="72" r="3" fill="#10b981" opacity="0.9" style={{ filter: "drop-shadow(0 0 4px #10b981)" }} />
-
-      {/* SMD caps */}
-      {[[52,38],[52,46],[62,38],[62,46],[72,38],[72,46]].map(([x,y], i) => (
-        <rect key={i} x={x} y={y} width={6} height={4} rx={0.5} fill="#1a3a1a" stroke="#2a5a2a" strokeWidth="0.4" />
-      ))}
-
-      {/* microSD slot */}
-      <rect x="228" y="28" width="12" height="18" rx="1" fill="#888" stroke="#aaa" strokeWidth="0.5" />
-      <rect x="229" y="29" width="10" height="16" fill="#ccc" opacity="0.3" />
-
-      {/* Bottom GPIO label */}
-      <text x="120" y="88" fontSize="4" fill="#2a6a2a" fontFamily="monospace" textAnchor="middle">GPIO — 40 pin header</text>
-    </svg>
-  );
-}
 
 function formatETA(sec: number): string {
   if (sec <= 0) return "finalizando...";
@@ -468,7 +275,6 @@ export default function CenterPanel({
 }: Props) {
 
   const spec = useMemo(() => MODEL_SPECS[rpiModel], [rpiModel]);
-  const isZero = rpiModel.includes("Zero");
 
   const progressPct = useMemo(() => {
     if (!progress || progress.total_bytes === 0) return 0;
@@ -673,7 +479,7 @@ export default function CenterPanel({
                   height: "180px",
                   overflow: "hidden",
                 }}>
-                  {isZero ? <ZeroBoardSVG /> : <StandardBoardSVG />}
+                  <BoardSVG model={rpiModel} />
                 </div>
 
                 {/* Right of image: name + specs */}

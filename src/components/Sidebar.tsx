@@ -1,7 +1,7 @@
 import ImageSelector from "./ImageSelector";
 import DeviceList from "./DeviceList";
 import { ImageInfo, Device, RPiModel } from "../App";
-
+import { BoardSVG } from "./BoardIcons";
 interface Props {
   image: ImageInfo | null;
   device: Device | null;
@@ -74,30 +74,7 @@ const PI_MODELS_DATA: Record<string, PiModelOption[]> = {
   ]
 };
 
-function PiIcon({ selected }: { selected?: boolean }) {
-  return (
-    <svg width="46" height="34" viewBox="0 0 64 48" fill="none" style={{ transition: "all 0.3s ease" }}>
-      {/* Board Base */}
-      <rect width="64" height="48" rx="6" fill={selected ? "#059669" : "var(--bg-deep)"} />
-      <rect x="2" y="2" width="60" height="44" rx="4" fill="#10b981" opacity={selected ? 0.25 : 0.08} />
-      
-      {/* Ports / Connectors */}
-      <rect x="54" y="6" width="12" height="10" rx="1" fill={selected ? "#34d399" : "#64748b"} />
-      <rect x="54" y="20" width="12" height="10" rx="1" fill={selected ? "#34d399" : "#64748b"} />
-      <rect x="54" y="34" width="12" height="8" rx="1" fill={selected ? "#10b981" : "#475569"} />
-      
-      {/* Main SoC (Broadcom Chip) */}
-      <rect x="22" y="16" width="16" height="16" rx="2" fill={selected ? "#065f46" : "#0f172a"} stroke={selected ? "#34d399" : "#475569"} strokeWidth="1" />
-      <rect x="26" y="20" width="8" height="8" fill={selected ? "#10b981" : "#334155"} opacity="0.6" />
-      
-      {/* RAM Chip */}
-      <rect x="8" y="26" width="10" height="14" rx="1" fill={selected ? "#065f46" : "#1e293b"} />
-      
-      {/* GPIO Pins Header */}
-      <rect x="4" y="4" width="46" height="3" rx="1" fill="#f59e0b" />
-    </svg>
-  );
-}
+
 
 export default function Sidebar({
   image, device, rpiModel, onRpiModelChange, onImageSelected, onImageClear, onDeviceSelect, isFlashing, isDone,
@@ -192,7 +169,16 @@ export default function Sidebar({
                       className={`model-card ${isSelected ? "selected" : ""}`}
                       onClick={() => onRpiModelChange(model.id)}
                     >
-                      <PiIcon selected={isSelected} />
+                      <div style={{
+                        width: "56px", height: "42px",
+                        display: "flex", alignItems: "center", justifyContent: "center",
+                        opacity: isSelected ? 1 : 0.45,
+                        filter: isSelected ? "none" : "grayscale(100%) brightness(0.7)",
+                        transition: "all var(--transition)",
+                        marginBottom: "4px"
+                      }}>
+                        <BoardSVG model={model.id} />
+                      </div>
                       <div className="model-card-title">{model.name}</div>
                       <span className="model-card-badge">{model.bits}</span>
                       <span className="model-card-arch">{model.arch}</span>
