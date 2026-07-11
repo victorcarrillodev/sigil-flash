@@ -392,21 +392,21 @@ export default function CenterPanel({
             </div>
 
             <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "16px", width: "100%", maxWidth: "450px" }}>
-              <div className="card" style={{ padding: "10px", display: "flex", flexDirection: "column", alignItems: "center", background: "var(--bg-deep)" }}>
+              <div className="card" style={{ padding: "14px", display: "flex", flexDirection: "column", alignItems: "center", background: "var(--bg-deep)", gap: "4px" }}>
                 <span style={{ fontSize: "11px", color: "var(--text-muted)", fontWeight: 700 }}>VELOCIDAD</span>
-                <span style={{ fontSize: "16px", fontWeight: 800, color: "var(--accent)", marginTop: "2px" }}>
+                <span style={{ fontSize: "16px", fontWeight: 800, color: "var(--accent)" }}>
                   {progress?.speed_mbps.toFixed(1) || "0.0"} MB/s
                 </span>
               </div>
-              <div className="card" style={{ padding: "10px", display: "flex", flexDirection: "column", alignItems: "center", background: "var(--bg-deep)" }}>
+              <div className="card" style={{ padding: "14px", display: "flex", flexDirection: "column", alignItems: "center", background: "var(--bg-deep)", gap: "4px" }}>
                 <span style={{ fontSize: "11px", color: "var(--text-muted)", fontWeight: 700 }}>TIEMPO RESTANTE</span>
-                <span style={{ fontSize: "16px", fontWeight: 800, color: "var(--text-primary)", marginTop: "2px" }}>
+                <span style={{ fontSize: "16px", fontWeight: 800, color: "var(--text-primary)" }}>
                   {progress ? formatETA(progress.eta_seconds) : "calculando..."}
                 </span>
               </div>
-              <div className="card" style={{ padding: "10px", display: "flex", flexDirection: "column", alignItems: "center", background: "var(--bg-deep)" }}>
+              <div className="card" style={{ padding: "14px", display: "flex", flexDirection: "column", alignItems: "center", background: "var(--bg-deep)", gap: "4px" }}>
                 <span style={{ fontSize: "11px", color: "var(--text-muted)", fontWeight: 700 }}>ESCRITO</span>
-                <span style={{ fontSize: "16px", fontWeight: 800, color: "var(--text-primary)", marginTop: "2px" }}>
+                <span style={{ fontSize: "16px", fontWeight: 800, color: "var(--text-primary)" }}>
                   {progress ? formatSize(progress.bytes_written) : "0 B"}
                 </span>
               </div>
