@@ -27,8 +27,12 @@ export default function Header() {
           width: 38,
           height: 38,
           borderRadius: "12px",
-          background: "var(--surface)",
+          background: "var(--surface-gradient)",
           boxShadow: "var(--shadow-raised-sm)",
+          borderTop: "1px solid var(--border-light)",
+          borderLeft: "1px solid var(--border-light)",
+          borderBottom: "1px solid var(--border-dark)",
+          borderRight: "1px solid var(--border-dark)",
           display: "flex",
           alignItems: "center",
           justifyContent: "center",
@@ -37,23 +41,7 @@ export default function Header() {
           flexShrink: 0,
         }}
       >
-        <svg width="22" height="22" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
-          <path
-            d="M38 8 L46 30 L36 26 L26 54 L34 46 L22 58"
-            stroke="url(#grad)"
-            strokeWidth="5"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            fill="none"
-          />
-          <circle cx="32" cy="32" r="5" fill="url(#grad)" opacity="0.5" />
-          <defs>
-            <linearGradient id="grad" x1="0%" y1="0%" x2="100%" y2="100%">
-              <stop offset="0%" stopColor="#f06292" />
-              <stop offset="100%" stopColor="#c2185b" />
-            </linearGradient>
-          </defs>
-        </svg>
+        <img src="/logo.png" alt="Sigil Logo" width="22" height="22" style={{ pointerEvents: "none", objectFit: "contain" }} />
       </div>
  
       {/* Title */}

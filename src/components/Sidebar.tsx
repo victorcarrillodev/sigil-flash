@@ -291,31 +291,13 @@ export default function Sidebar({
             <span style={{ fontSize: "11px", color: "var(--text-muted)", fontWeight: 500 }}>Acceso remoto desde el primer arranque</span>
           </div>
         </div>
-        <label className="form-checkbox">
-          <input type="checkbox" checked={sshEnabled} onChange={(e) => setSshEnabled(e.target.checked)} style={{ accentColor: "var(--accent)", transform: "scale(1.2)" }} />
+        <label className="neu-switch">
+          <input type="checkbox" checked={sshEnabled} onChange={(e) => setSshEnabled(e.target.checked)} />
+          <span className="neu-switch-slider"></span>
         </label>
       </div>
 
-      {/* Section 7: Final Flash Action */}
-      <div style={{ marginTop: "16px", marginBottom: "16px" }}>
-        <button
-          className="btn-primary"
-          disabled={!canFlash || isFlashing || isDone}
-          onClick={onFlash}
-          style={{
-            width: "100%",
-            height: "48px",
-            fontSize: "16px",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            gap: "8px",
-            boxShadow: canFlash ? "0 0 14px var(--accent-glow)" : "none",
-          }}
-        >
-          ⚡ Escribir en SD
-        </button>
-      </div>
+
       
     </aside>
   );
