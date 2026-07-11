@@ -7,10 +7,20 @@ export default function Header() {
     return (saved === "dark" || saved === "light") ? saved : "light";
   });
 
+  const [style, setStyle] = useState<'neumorphism' | 'glow1' | 'glow2'>(() => {
+    const saved = localStorage.getItem("style");
+    return (saved === "neumorphism" || saved === "glow1" || saved === "glow2") ? saved : "neumorphism";
+  });
+
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme);
     localStorage.setItem("theme", theme);
   }, [theme]);
+
+  useEffect(() => {
+    document.documentElement.setAttribute("data-style", style);
+    localStorage.setItem("style", style);
+  }, [style]);
 
   const toggleTheme = () => {
     setTheme(prev => prev === "light" ? "dark" : "light");
@@ -80,6 +90,86 @@ export default function Header() {
           animation: "pulse-ring 2.5s ease infinite",
         }} />
         <span style={{ fontSize: "11px", fontWeight: 600, color: "var(--text-secondary)" }}>Sistema listo</span>
+      </div>
+
+      {/* Style Selector */}
+      <div style={{
+        display: "flex",
+        alignItems: "center",
+        gap: "4px",
+        background: "var(--bg-deep)",
+        padding: "3px",
+        borderRadius: "14px",
+        boxShadow: "var(--shadow-inset-sm)",
+        border: "1px solid var(--border-dark)",
+        marginRight: "10px",
+      }}>
+        <button
+          onClick={() => setStyle("neumorphism")}
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: "5px",
+            padding: "6px 12px",
+            borderRadius: "10px",
+            border: "none",
+            fontSize: "11px",
+            fontWeight: 700,
+            cursor: "pointer",
+            background: style === "neumorphism" ? "var(--surface)" : "transparent",
+            color: style === "neumorphism" ? "var(--accent)" : "var(--text-secondary)",
+            boxShadow: style === "neumorphism" ? "var(--shadow-raised-sm)" : "none",
+            transition: "all var(--transition)",
+          }}
+          title="Estilo Neumorfismo (Soft 3D)"
+        >
+          <span>⚪</span>
+          <span>Neumorfo</span>
+        </button>
+        <button
+          onClick={() => setStyle("glow1")}
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: "5px",
+            padding: "6px 12px",
+            borderRadius: "10px",
+            border: "none",
+            fontSize: "11px",
+            fontWeight: 700,
+            cursor: "pointer",
+            background: style === "glow1" ? "var(--surface)" : "transparent",
+            color: style === "glow1" ? "var(--accent)" : "var(--text-secondary)",
+            boxShadow: style === "glow1" ? "var(--shadow-raised-sm)" : "none",
+            transition: "all var(--transition)",
+          }}
+          title="Cyber Glow (Anillos concéntricos de la primera imagen)"
+        >
+          <span>🟢</span>
+          <span>Cyber Ring</span>
+        </button>
+        <button
+          onClick={() => setStyle("glow2")}
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: "5px",
+            padding: "6px 12px",
+            borderRadius: "10px",
+            border: "none",
+            fontSize: "11px",
+            fontWeight: 700,
+            cursor: "pointer",
+            background: style === "glow2" ? "var(--surface)" : "transparent",
+            color: style === "glow2" ? "var(--accent)" : "var(--text-secondary)",
+            boxShadow: style === "glow2" ? "var(--shadow-raised-sm)" : "none",
+            transition: "all var(--transition)",
+          }}
+          title="Borde Neon (Efecto glow lineal de la segunda imagen)"
+        >
+          <span>🌟</span>
+          <span>Neon Border</span>
+        </button>
       </div>
 
       {/* Theme selector button */}

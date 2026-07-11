@@ -685,15 +685,15 @@ export default function CenterPanel({
               <p style={{ fontSize: "13px", color: "var(--text-muted)" }}>Estos parámetros se escribirán automáticamente en los archivos de configuración de la SD.</p>
             </div>
 
-            <div style={{ borderBottom: "1px dashed var(--shadow-dark)", paddingBottom: "14px" }}>
-              <label className="form-checkbox">
+            <div style={{ borderBottom: "1px dashed var(--shadow-dark)", paddingBottom: "14px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <span style={{ fontSize: "14px", fontWeight: 600, color: "var(--text-primary)" }}>Habilitar SSH automáticamente al iniciar</span>
+              <label className="neu-switch">
                 <input
                   type="checkbox"
                   checked={sshEnabled}
                   onChange={(e) => setSshEnabled(e.target.checked)}
-                  style={{ accentColor: "var(--accent)" }}
                 />
-                <span style={{ fontSize: "14px", fontWeight: 600, color: "var(--text-primary)" }}>Habilitar SSH automáticamente al iniciar</span>
+                <span className="neu-switch-slider"></span>
               </label>
             </div>
 

@@ -12,8 +12,6 @@ interface Props {
   onDeviceSelect: (dev: Device) => void;
   isFlashing: boolean;
   isDone: boolean;
-  canFlash: boolean;
-  onFlash: () => void;
   sshEnabled: boolean;
   setSshEnabled: (val: boolean) => void;
   username: string;
@@ -78,7 +76,6 @@ const PI_MODELS_DATA: Record<string, PiModelOption[]> = {
 
 export default function Sidebar({
   image, device, rpiModel, onRpiModelChange, onImageSelected, onImageClear, onDeviceSelect, isFlashing, isDone,
-  canFlash, onFlash,
   sshEnabled, setSshEnabled,
   username, setUsername,
   password, setPassword,

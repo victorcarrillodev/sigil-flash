@@ -1,8 +1,4 @@
-/* ============================================================
-   SIGIL FLASH — Design System (Neumorphism) v2
-   ============================================================ */
-
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;600;800;900&family=Outfit:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap');
 
 /* ============================================================
    CSS VARIABLES
@@ -75,7 +71,7 @@
   --space-lg: 24px;
   --space-xl: 32px;
 
-  --font-sans: 'Inter', system-ui, sans-serif;
+  --font-sans: 'Outfit', system-ui, sans-serif;
   --font-mono: 'JetBrains Mono', monospace;
 
   --transition:      0.25s cubic-bezier(0.4,0,0.2,1);
@@ -1046,5 +1042,179 @@ body {
 .app-shell {
   background: transparent;
 }
+
+
+/* ============================================================
+   CYBER GLOW THEME (data-style="glow1")
+   ============================================================ */
+html[data-style="glow1"] {
+  --bg: #030406;
+  --bg-deep: #000000;
+  --surface: #0a0b0e;
+  --surface-gradient: linear-gradient(135deg, #0e1015, #050608);
+  
+  --shadow-dark: rgba(0, 0, 0, 0.98);
+  --shadow-light: rgba(255, 255, 255, 0.005);
+  
+  --border-light: rgba(255, 255, 255, 0.02);
+  --border-dark: rgba(0, 0, 0, 0.8);
+  
+  --text-primary: #eceff4;
+  --text-secondary: #8f9bb3;
+  --text-muted: #434c5e;
+
+  --accent: #ff1a53; /* Hot Cyber Pink */
+  --accent-glow: rgba(255, 26, 83, 0.65);
+
+  --flash: #00ff7f; /* Neon Green */
+  --flash-glow: rgba(0, 255, 127, 0.65);
+}
+
+/* Background Cyber Grid */
+html[data-style="glow1"] body {
+  background-image: none !important;
+  background-color: #030406 !important;
+}
+
+/* Clear all neumorphic border edges */
+html[data-style="glow1"] .card, 
+html[data-style="glow1"] .sidebar, 
+html[data-style="glow1"] .tabs-container,
+html[data-style="glow1"] .app-header {
+  border-top: none !important;
+  border-left: none !important;
+  border-bottom: none !important;
+  border-right: none !important;
+  border: 1px solid rgba(255, 26, 83, 0.45) !important;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.95), 0 0 15px rgba(255, 26, 83, 0.1) !important;
+  background: #07080a !important;
+}
+
+/* Cyber Typography */
+html[data-style="glow1"] h1, 
+html[data-style="glow1"] h2, 
+html[data-style="glow1"] h3,
+html[data-style="glow1"] .donut-pct {
+  font-family: 'Orbitron', sans-serif !important;
+  letter-spacing: 0.08em !important;
+  text-shadow: 0 0 10px var(--accent-glow) !important;
+}
+
+/* Intense Cyber Buttons */
+html[data-style="glow1"] .btn-primary {
+  background: #050608 !important;
+  color: #fff !important;
+  border: none !important;
+  box-shadow: 
+    0 0 0 2px #000, 
+    0 0 0 4px var(--accent), 
+    0 0 20px var(--accent-glow) !important;
+}
+html[data-style="glow1"] .btn-primary:hover {
+  box-shadow: 
+    0 0 0 2px #000, 
+    0 0 0 5px #ff5a79, 
+    0 0 30px var(--accent) !important;
+}
+html[data-style="glow1"] button[onClick*="onFlash"] {
+  background: #050608 !important;
+  color: #fff !important;
+  border: none !important;
+  box-shadow: 
+    0 0 0 2px #000, 
+    0 0 0 4px var(--flash), 
+    0 0 20px var(--flash-glow) !important;
+}
+html[data-style="glow1"] button[onClick*="onFlash"]:hover {
+  box-shadow: 
+    0 0 0 2px #000, 
+    0 0 0 5px #57ffb0, 
+    0 0 30px var(--flash) !important;
+}
+
+
+/* ============================================================
+   NEON BORDER THEME (data-style="glow2")
+   ============================================================ */
+html[data-style="glow2"] {
+  --bg: #030206;
+  --bg-deep: #000000;
+  --surface: rgba(8, 6, 14, 0.85);
+  
+  --shadow-dark: rgba(0, 0, 0, 0.98);
+  --shadow-light: rgba(255, 255, 255, 0.005);
+  
+  --border-light: rgba(255, 255, 255, 0.02);
+  --border-dark: rgba(0, 0, 0, 0.8);
+  
+  --text-primary: #f0edf6;
+  --text-secondary: #9b94b0;
+  --text-muted: #4b435e;
+
+  --accent: #e01e5a; /* Ruby Pink */
+  --accent-glow: rgba(224, 30, 90, 0.55);
+
+  --flash: #00f0d2; /* Cyan */
+  --flash-glow: rgba(0, 240, 210, 0.55);
+}
+
+/* Glassmorphism Background Ambient Orbs */
+html[data-style="glow2"] body {
+  background-image: none !important;
+  background-color: #030206 !important;
+}
+
+/* Fix CSS border clashing with padding-box/border-box gradient trick */
+html[data-style="glow2"] .card, 
+html[data-style="glow2"] .sidebar, 
+html[data-style="glow2"] .tabs-container,
+html[data-style="glow2"] .app-header {
+  border-top: none !important;
+  border-left: none !important;
+  border-bottom: none !important;
+  border-right: none !important;
+  border: 1px solid transparent !important;
+  background: 
+    linear-gradient(#0b0a0f, #0b0a0f) padding-box,
+    linear-gradient(135deg, #7a22e8 0%, #e01e5a 50%, #ff8a00 100%) border-box !important;
+  box-shadow: 
+    0 8px 30px rgba(0, 0, 0, 0.95),
+    0 0 20px rgba(224, 30, 90, 0.08) !important;
+}
+
+/* Inputs under Neon */
+html[data-style="glow2"] .form-input {
+  background: rgba(4, 3, 7, 0.75) !important;
+  border: 1px solid rgba(122, 34, 232, 0.3) !important;
+  box-shadow: none !important;
+}
+html[data-style="glow2"] .form-input:focus {
+  border-color: var(--accent) !important;
+  box-shadow: 0 0 12px var(--accent-glow) !important;
+}
+
+/* Buttons under Neon */
+html[data-style="glow2"] .btn-primary {
+  border: 1px solid transparent !important;
+  background: 
+    linear-gradient(rgba(8, 6, 14, 0.9), rgba(8, 6, 14, 0.9)) padding-box,
+    linear-gradient(135deg, #7a22e8, #e01e5a) border-box !important;
+  box-shadow: 0 5px 15px rgba(224, 30, 90, 0.4) !important;
+}
+html[data-style="glow2"] .btn-primary:hover {
+  box-shadow: 0 7px 22px rgba(224, 30, 90, 0.75) !important;
+  transform: translateY(-1px);
+}
+html[data-style="glow2"] button[onClick*="onFlash"] {
+  border: 1px solid transparent !important;
+  background: 
+    linear-gradient(rgba(8, 6, 14, 0.9), rgba(8, 6, 14, 0.9)) padding-box,
+    linear-gradient(135deg, #00bfa6, #00f0d2) border-box !important;
+  box-shadow: 0 5px 15px rgba(0, 240, 210, 0.4) !important;
+}
+html[data-style="glow2"] button[onClick*="onFlash"]:hover {
+  box-shadow: 0 7px 25px rgba(0, 240, 210, 0.75) !important;
+}
+
 
 

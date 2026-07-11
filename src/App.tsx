@@ -192,8 +192,6 @@ export default function App() {
           onDeviceSelect={setDevice}
           isFlashing={isFlashing}
           isDone={isDone}
-          canFlash={canFlash}
-          onFlash={handleFlashClick}
           sshEnabled={sshEnabled} setSshEnabled={setSshEnabled}
           username={username} setUsername={setUsername}
           password={password} setPassword={setPassword}
