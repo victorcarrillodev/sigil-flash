@@ -637,39 +637,19 @@ export default function CenterPanel({
                     <span style={{ color: "var(--text-muted)", fontWeight: 600 }}>Arquitectura</span>
                     <span style={{ color: "var(--text-primary)", fontWeight: 700 }}>{spec.arch}</span>
                   </div>
-                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: "13px" }}>
-                    <span style={{ color: "var(--text-muted)", fontWeight: 600 }}>Configuración SD</span>
-                    <span style={{ color: "var(--accent)", fontWeight: 700, textAlign: "right", maxWidth: "160px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{spec.firmware}</span>
+                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: "13px", gap: "10px" }}>
+                    <span style={{ color: "var(--text-muted)", fontWeight: 600, flexShrink: 0 }}>Configuración SD</span>
+                    <span style={{ color: "var(--accent)", fontWeight: 700, textAlign: "right", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{spec.firmware}</span>
                   </div>
                 </div>
               </div>
 
-              {/* Flash button — wide green pill */}
+              {/* Flash button — wide green pill (themed via .btn-flash) */}
               <button
+                type="button"
                 disabled={!canFlash}
                 onClick={onFlash}
-                style={{
-                  width: "100%",
-                  padding: "18px 24px",
-                  fontSize: "16px",
-                  fontWeight: 800,
-                  letterSpacing: "0.04em",
-                  border: "none",
-                  borderRadius: "var(--radius-full)",
-                  cursor: canFlash ? "pointer" : "not-allowed",
-                  opacity: canFlash ? 1 : 0.45,
-                  background: "linear-gradient(135deg, var(--flash-light), var(--flash-dark))",
-                  color: "white",
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  gap: "10px",
-                  boxShadow: canFlash
-                    ? "0 4px 20px var(--flash-glow), -2px -2px 8px var(--btn-shadow-light)"
-                    : "none",
-                  transition: "all var(--transition)",
-                  flexShrink: 0,
-                }}
+                className="btn-flash"
               >
                 ⚡ Iniciar Escritura en microSD
               </button>
