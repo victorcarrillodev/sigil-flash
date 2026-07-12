@@ -104,11 +104,6 @@ export default function App() {
             : event.payload.status === "done" ? "success" : "info";
           addLog(event.payload.message, t);
         }
-        if (event.payload.status === "done") {
-          setIsFlashing(false);
-          setStep("done");
-          addLog("¡Flasheo completado exitosamente!", "success");
-        }
         if (event.payload.status === "error") { setIsFlashing(false); }
         if (event.payload.status === "cancelled") {
           setIsFlashing(false);
@@ -142,6 +137,29 @@ export default function App() {
     addLog("Solicitando permisos de administrador...", "warning");
     try {
       await invoke("start_flash", { imagePath: image.path, devicePath: device.path });
+      
+      if (!rpiModel.includes("Pico")) {
+        try {
+          addLog("Inyectando configuración y optimizaciones en la partición boot...", "warning");
+          const config = {
+            hostname,
+            username,
+            password: password || null,
+            wifiSsid: wifiSsid || null,
+            wifiPassword: wifiPassword || null,
+            sshEnabled,
+            rpiModel,
+          };
+          await invoke("save_device_config", { mountPath: device.path, config });
+          addLog("¡Configuración y optimizaciones inyectadas con éxito!", "success");
+        } catch (configErr) {
+          addLog(`Advertencia: No se pudo inyectar la configuración: ${configErr}`, "warning");
+        }
+      }
+
+      setIsFlashing(false);
+      setStep("done");
+      addLog("¡Proceso completado exitosamente!", "success");
     } catch (err) {
       addLog(`Error: ${err}`, "error");
       setIsFlashing(false);

@@ -75,6 +75,11 @@ impl ConfigService {
             tracing::info!("Habilitador de SSH inyectado.");
         }
 
+        // Apply hardware/model optimizations
+        if let Err(e) = apply_model_optimizations(&temp_mount, config.rpi_model.as_deref()) {
+            tracing::error!("Error al aplicar optimizaciones de modelo: {}", e);
+        }
+
         // Safely unmount volume
         let umount_status = Command::new("pkexec")
             .args(["umount", &temp_mount.to_string_lossy()])
@@ -117,6 +122,11 @@ impl ConfigService {
         if config.ssh_enabled {
             let ssh_file_path = temp_mount.join("ssh");
             std::fs::write(ssh_file_path, "")?;
+        }
+
+        // Apply hardware/model optimizations
+        if let Err(e) = apply_model_optimizations(&temp_mount, config.rpi_model.as_deref()) {
+            tracing::error!("Error al aplicar optimizaciones de modelo: {}", e);
         }
 
         let umount_status = Command::new("diskutil")
@@ -168,6 +178,21 @@ impl ConfigService {
             ps_script.push_str("New-Item -Path \"$($letter):\\ssh\" -ItemType File -Force; ");
         }
 
+        // Apply hardware/model optimizations
+        let config_txt_content = get_optimizations_string(config.rpi_model.as_deref());
+        if !config_txt_content.is_empty() {
+            let escaped_txt = config_txt_content.replace("\"", "`\"");
+            ps_script.push_str(&format!(
+                "$configPath = \"$($letter):\\config.txt\";
+                 if (Test-Path $configPath) {{
+                     \"{}\" | Out-File -FilePath $configPath -Append -Encoding utf8;
+                 }} else {{
+                     \"{}\" | Out-File -FilePath $configPath -Encoding utf8;
+                 }}
+                 ", escaped_txt, escaped_txt
+            ));
+        }
+
         let output = Command::new("powershell")
             .args(["-NoProfile", "-Command", &ps_script])
             .output()
@@ -181,4 +206,61 @@ impl ConfigService {
         tracing::info!("Inyección completada exitosamente en Windows.");
         Ok(())
     }
+}
+
+// ============================================================
+// HELPERS FOR MODEL OPTIMIZATIONS
+// ============================================================
+fn get_optimizations_string(rpi_model: Option<&str>) -> String {
+    let Some(model) = rpi_model else { return String::new(); };
+    let mut opts = String::new();
+    opts.push_str("\n\n# --- Sigil Flash Auto-Optimizations ---\n");
+    match model {
+        "Raspberry Pi 5 (64-bit)" => {
+            opts.push_str("arm_64bit=1\n");
+            opts.push_str("dtparam=pciex1_gen=3\n");
+            opts.push_str("gpu_mem=64\n");
+        }
+        "Raspberry Pi 4 (64-bit)" => {
+            opts.push_str("arm_64bit=1\n");
+            opts.push_str("gpu_mem=64\n");
+        }
+        "Raspberry Pi 4 (32-bit)" => {
+            opts.push_str("arm_64bit=0\n");
+            opts.push_str("gpu_mem=64\n");
+        }
+        "Raspberry Pi 3 (64-bit)" | "Raspberry Pi Zero 2 W (64-bit)" => {
+            opts.push_str("arm_64bit=1\n");
+            opts.push_str("gpu_mem=32\n");
+            opts.push_str("max_usb_current=1\n");
+        }
+        "Raspberry Pi 3 (32-bit)" | "Raspberry Pi Zero 2 W (32-bit)" | "Raspberry Pi Zero W (32-bit)" | "Raspberry Pi Zero (32-bit)" | "Raspberry Pi 2" | "Raspberry Pi 1" => {
+            opts.push_str("arm_64bit=0\n");
+            opts.push_str("gpu_mem=16\n");
+            opts.push_str("max_usb_current=1\n");
+        }
+        _ => {}
+    }
+    opts.push_str("# --- End Sigil Flash Auto-Optimizations ---\n");
+    opts
+}
+
+fn apply_model_optimizations(boot_path: &std::path::Path, rpi_model: Option<&str>) -> std::io::Result<()> {
+    let opts = get_optimizations_string(rpi_model);
+    if opts.is_empty() {
+        return Ok(());
+    }
+
+    let config_txt_path = boot_path.join("config.txt");
+    if config_txt_path.exists() {
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&config_txt_path)?;
+        use std::io::Write;
+        file.write_all(opts.as_bytes())?;
+    } else {
+        std::fs::write(&config_txt_path, opts)?;
+    }
+
+    Ok(())
 }
