@@ -6,9 +6,7 @@ use tauri::State;
 
 /// Return engine metadata (`flasher-rs status`).
 #[tauri::command]
-pub async fn engine_status(
-    svc: State<'_, FlasherEngineService>,
-) -> AppResult<EngineResult> {
+pub async fn engine_status(svc: State<'_, FlasherEngineService>) -> AppResult<EngineResult> {
     tracing::info!("engine_status invoked");
     svc.status().await
 }
@@ -60,8 +58,6 @@ pub async fn engine_build_payload(
 
 /// Return the resolved path to the `flasher-rs` binary.
 #[tauri::command]
-pub async fn engine_binary_path(
-    svc: State<'_, FlasherEngineService>,
-) -> AppResult<String> {
+pub async fn engine_binary_path(svc: State<'_, FlasherEngineService>) -> AppResult<String> {
     Ok(svc.engine_bin().to_string_lossy().to_string())
 }

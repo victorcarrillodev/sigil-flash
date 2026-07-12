@@ -111,12 +111,7 @@ impl FlasherEngineService {
         &self.engine_bin
     }
 
-    /// Returns the resolved path to `build-flasher-payload.sh`.
-    pub fn payload_script(&self) -> &Path {
-        &self.payload_script
-    }
 
-    // ── Engine commands ────────────────────────────────────────────────────────
 
     /// Run `flasher-rs status` — no file arguments required.
     pub async fn status(&self) -> AppResult<EngineResult> {
@@ -343,20 +338,14 @@ async fn run_command_capture(mut cmd: Command, was_dry_run: bool) -> AppResult<E
 // ── Hardware root location ─────────────────────────────────────────────────────
 
 /// Compile-time sibling directory (two levels up from Cargo.toml → sigil-OS → sigil-hardware).
-const COMPILE_TIME_SIBLING: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../sigil-hardware"
-);
+const COMPILE_TIME_SIBLING: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../sigil-hardware");
 
 fn locate_hardware_root() -> AppResult<PathBuf> {
     // 1. Environment variable takes highest precedence.
     if let Ok(root) = std::env::var("SIGIL_HARDWARE_ROOT") {
         let path = PathBuf::from(root);
         if path.is_dir() {
-            tracing::info!(
-                "SIGIL_HARDWARE_ROOT resolved: {}",
-                path.display()
-            );
+            tracing::info!("SIGIL_HARDWARE_ROOT resolved: {}", path.display());
             return Ok(path);
         }
     }
@@ -387,7 +376,9 @@ fn is_sha256_hex(s: &str) -> bool {
 /// the argument list.  We use `Command::arg()` which does NOT invoke a shell,
 /// so this is a defence-in-depth guard, not the primary protection.
 fn reject_shell_injection(field: &str, value: &str) -> AppResult<()> {
-    let forbidden = [';', '&', '|', '`', '$', '(', ')', '{', '}', '<', '>', '\n', '\r'];
+    let forbidden = [
+        ';', '&', '|', '`', '$', '(', ')', '{', '}', '<', '>', '\n', '\r',
+    ];
     if forbidden.iter().any(|c| value.contains(*c)) {
         return Err(AppError::Validation(format!(
             "field '{field}' contains disallowed shell characters"
@@ -506,7 +497,8 @@ mod tests {
     fn test_valid_sha256_accepted() {
         let params = EngineParams {
             base_image: "/tmp/img.img.xz".into(),
-            base_image_sha256: "acff736ca7945e3b305f07cda4abdb870910e12634991da69783611756e381b3".into(),
+            base_image_sha256: "acff736ca7945e3b305f07cda4abdb870910e12634991da69783611756e381b3"
+                .into(),
             payload: "/tmp/payload".into(),
             provision: None,
             target_device: None,
@@ -571,7 +563,8 @@ mod tests {
     #[test]
     fn test_sha256_lowercased_in_argv() {
         let mut params = minimal_params(false);
-        params.base_image_sha256 = "ABCDEF1234567890ABCDEF1234567890ABCDEF1234567890ABCDEF1234567890".into();
+        params.base_image_sha256 =
+            "ABCDEF1234567890ABCDEF1234567890ABCDEF1234567890ABCDEF1234567890".into();
         let argv = build_argv("plan", &params).expect("argv");
         let sha_pos = argv
             .iter()

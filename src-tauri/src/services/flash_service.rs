@@ -1,12 +1,12 @@
-use crate::errors::{AppResult, AppError};
+use crate::errors::{AppError, AppResult};
 use crate::models::FlashProgress;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
-use std::time::{Instant, Duration};
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::Mutex;
 
 pub struct FlashService {
     // Stores the active child process spawn handle for cancellation
@@ -31,7 +31,9 @@ impl FlashService {
         let device_p = PathBuf::from(device_path);
 
         if !image_p.exists() {
-            return Err(AppError::Validation("La ruta del archivo de imagen no existe".to_string()));
+            return Err(AppError::Validation(
+                "La ruta del archivo de imagen no existe".to_string(),
+            ));
         }
 
         // 1. Establish progress monitoring file in temp directory
@@ -42,14 +44,17 @@ impl FlashService {
 
         // Initialize progress state
         let image_size = std::fs::metadata(&image_p)?.len();
-        let _ = app.emit("flash-progress", FlashProgress {
-            bytes_written: 0,
-            total_bytes: image_size,
-            speed_mbps: 0.0,
-            eta_seconds: 0.0,
-            status: "running".to_string(),
-            message: "Iniciando proceso de elevación de privilegios...".to_string(),
-        });
+        let _ = app.emit(
+            "flash-progress",
+            FlashProgress {
+                bytes_written: 0,
+                total_bytes: image_size,
+                speed_mbps: 0.0,
+                eta_seconds: 0.0,
+                status: "running".to_string(),
+                message: "Iniciando proceso de elevación de privilegios...".to_string(),
+            },
+        );
 
         // 2. Build command arguments
         let current_exe = std::env::current_exe()?;
@@ -71,7 +76,7 @@ impl FlashService {
             let mut guard = self.active_process.lock().await;
             *guard = Some(child);
         }
-        
+
         // 4. Poll progress file while the child process runs
         let start_time = Instant::now();
         let mut last_bytes = 0u64;
@@ -98,7 +103,7 @@ impl FlashService {
                     if let Ok(progress) = serde_json::from_str::<FlashProgress>(&content) {
                         let elapsed = start_time.elapsed().as_secs_f64();
                         let current_bytes = progress.bytes_written;
-                        
+
                         let speed = if elapsed > 0.0 {
                             (current_bytes as f64 / elapsed) / (1024.0 * 1024.0)
                         } else {
@@ -112,15 +117,18 @@ impl FlashService {
                         };
 
                         last_bytes = current_bytes;
-                        
-                        let _ = app.emit("flash-progress", FlashProgress {
-                            bytes_written: current_bytes,
-                            total_bytes: image_size,
-                            speed_mbps: speed,
-                            eta_seconds: eta,
-                            status: progress.status,
-                            message: progress.message,
-                        });
+
+                        let _ = app.emit(
+                            "flash-progress",
+                            FlashProgress {
+                                bytes_written: current_bytes,
+                                total_bytes: image_size,
+                                speed_mbps: speed,
+                                eta_seconds: eta,
+                                status: progress.status,
+                                message: progress.message,
+                            },
+                        );
                     }
                 }
             }
@@ -134,25 +142,34 @@ impl FlashService {
         }
 
         if success {
-            let _ = app.emit("flash-progress", FlashProgress {
-                bytes_written: image_size,
-                total_bytes: image_size,
-                speed_mbps: 0.0,
-                eta_seconds: 0.0,
-                status: "done".to_string(),
-                message: "Flasheo completado y sincronizado exitosamente.".to_string(),
-            });
+            let _ = app.emit(
+                "flash-progress",
+                FlashProgress {
+                    bytes_written: image_size,
+                    total_bytes: image_size,
+                    speed_mbps: 0.0,
+                    eta_seconds: 0.0,
+                    status: "done".to_string(),
+                    message: "Flasheo completado y sincronizado exitosamente.".to_string(),
+                },
+            );
             Ok(())
         } else {
-            let _ = app.emit("flash-progress", FlashProgress {
-                bytes_written: last_bytes,
-                total_bytes: image_size,
-                speed_mbps: 0.0,
-                eta_seconds: 0.0,
-                status: "error".to_string(),
-                message: "Error de ejecución: proceso de escritura cancelado o fallido".to_string(),
-            });
-            Err(AppError::Flash("El proceso de flasheo terminó con fallos".to_string()))
+            let _ = app.emit(
+                "flash-progress",
+                FlashProgress {
+                    bytes_written: last_bytes,
+                    total_bytes: image_size,
+                    speed_mbps: 0.0,
+                    eta_seconds: 0.0,
+                    status: "error".to_string(),
+                    message: "Error de ejecución: proceso de escritura cancelado o fallido"
+                        .to_string(),
+                },
+            );
+            Err(AppError::Flash(
+                "El proceso de flasheo terminó con fallos".to_string(),
+            ))
         }
     }
 
@@ -173,35 +190,41 @@ async fn spawn_elevated_process(
     args: &[String],
 ) -> AppResult<tokio::process::Child> {
     let _exe_str = exe_path.to_string_lossy();
-    
+
     #[cfg(target_os = "linux")]
     {
         tracing::info!("Elevando privilegios en Linux usando pkexec...");
         let mut cmd = tokio::process::Command::new("pkexec");
         cmd.arg(exe_path);
         cmd.args(args);
-        cmd.spawn().map_err(|e| AppError::Flash(format!("Error iniciando pkexec: {}", e)))
+        cmd.spawn()
+            .map_err(|e| AppError::Flash(format!("Error iniciando pkexec: {}", e)))
     }
 
     #[cfg(target_os = "macos")]
     {
         tracing::info!("Elevando privilegios en macOS usando osascript...");
         let cmd_str = format!("'{}' {}", _exe_str, args.join(" "));
-        let script = format!("do shell script \"{}\" with administrator privileges", cmd_str);
-        
+        let script = format!(
+            "do shell script \"{}\" with administrator privileges",
+            cmd_str
+        );
+
         let mut cmd = tokio::process::Command::new("osascript");
         cmd.args(["-e", &script]);
-        cmd.spawn().map_err(|e| AppError::Flash(format!("Error iniciando osascript: {}", e)))
+        cmd.spawn()
+            .map_err(|e| AppError::Flash(format!("Error iniciando osascript: {}", e)))
     }
 
     #[cfg(target_os = "windows")]
     {
         tracing::info!("Elevando privilegios en Windows usando PowerShell RunAs...");
-        let escaped_args = args.iter()
+        let escaped_args = args
+            .iter()
             .map(|a| format!("'{}'", a))
             .collect::<Vec<String>>()
             .join(", ");
-        
+
         let ps_cmd = format!(
             "Start-Process -FilePath '{}' -ArgumentList {} -Verb RunAs -WindowStyle Hidden -PassThru",
             _exe_str, escaped_args
@@ -209,23 +232,23 @@ async fn spawn_elevated_process(
 
         let mut cmd = tokio::process::Command::new("powershell");
         cmd.args(["-NoProfile", "-Command", &ps_cmd]);
-        cmd.spawn().map_err(|e| AppError::Flash(format!("Error iniciando PowerShell elevated: {}", e)))
+        cmd.spawn()
+            .map_err(|e| AppError::Flash(format!("Error iniciando PowerShell elevated: {}", e)))
     }
 }
 
 /// Raw block-by-block image copier executing under administrative rights.
 /// Periodically saves status to the progress file.
-pub async fn run_raw_flash_cli(
-    src: &str,
-    dest: &str,
-    progress_file: &str,
-) -> AppResult<()> {
+pub async fn run_raw_flash_cli(src: &str, dest: &str, progress_file: &str) -> AppResult<()> {
     // Safety verification check: Block writing to critical mountpoints on Linux/macOS
     #[cfg(unix)]
     {
         let system_disks = ["/dev/sda", "/dev/nvme0n1"]; // Example primary drives
         if system_disks.contains(&dest) {
-            return Err(AppError::Flash(format!("RECHAZADO: Se detectó intento de flashear disco del sistema principal: {}", dest)));
+            return Err(AppError::Flash(format!(
+                "RECHAZADO: Se detectó intento de flashear disco del sistema principal: {}",
+                dest
+            )));
         }
     }
 
@@ -238,27 +261,29 @@ pub async fn run_raw_flash_cli(
         .map_err(|e| AppError::Flash(format!("No se pudo abrir imagen: {}", e)))?;
 
     let total_bytes = src_file.metadata().await?.len();
-    
+
     // Open physical drive for writing (Direct Sync Mode if possible depending on OS)
-    let mut dest_file = File::create(&dest_path)
-        .await
-        .map_err(|e| AppError::Flash(format!("No se pudo abrir unidad física para escritura: {}", e)))?;
+    let mut dest_file = File::create(&dest_path).await.map_err(|e| {
+        AppError::Flash(format!(
+            "No se pudo abrir unidad física para escritura: {}",
+            e
+        ))
+    })?;
 
     let mut buffer = vec![0; 4 * 1024 * 1024]; // 4MB buffer
     let mut bytes_written = 0u64;
 
     while bytes_written < total_bytes {
-        let read_len = src_file.read(&mut buffer)
-            .await
-            .map_err(|e| AppError::Io(e))?;
+        let read_len = src_file.read(&mut buffer).await.map_err(AppError::Io)?;
 
         if read_len == 0 {
             break;
         }
 
-        dest_file.write_all(&buffer[..read_len])
+        dest_file
+            .write_all(&buffer[..read_len])
             .await
-            .map_err(|e| AppError::Io(e))?;
+            .map_err(AppError::Io)?;
 
         bytes_written += read_len as u64;
 
@@ -269,7 +294,10 @@ pub async fn run_raw_flash_cli(
             speed_mbps: 0.0,
             eta_seconds: 0.0,
             status: "running".to_string(),
-            message: format!("Escribiendo bloques a la unidad... {:.1}%", (bytes_written as f64 / total_bytes as f64) * 100.0),
+            message: format!(
+                "Escribiendo bloques a la unidad... {:.1}%",
+                (bytes_written as f64 / total_bytes as f64) * 100.0
+            ),
         };
 
         if let Ok(json) = serde_json::to_string(&progress) {

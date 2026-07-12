@@ -1,5 +1,5 @@
+pub mod config;
 pub mod disks;
 pub mod downloads;
-pub mod flash;
-pub mod config;
 pub mod engine;
+pub mod flash;
