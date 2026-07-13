@@ -79,6 +79,7 @@ pub fn run() {
             commands::engine::engine_apply,
             commands::engine::engine_build_payload,
             commands::engine::engine_binary_path,
+            commands::engine::engine_write_provision,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

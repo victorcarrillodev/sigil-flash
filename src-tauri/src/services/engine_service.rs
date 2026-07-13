@@ -13,6 +13,8 @@
 ///   4. `sudo`, `pkexec`, `losetup`, and `mount` are never invoked.
 use crate::errors::{AppError, AppResult};
 use serde::{Deserialize, Serialize};
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -56,6 +58,24 @@ pub struct EngineParams {
     pub target_device: Option<String>,
     /// Must be `true` for `apply`; also accepted (and enforced) for other commands.
     pub dry_run: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ProvisionDocument {
+    #[serde(rename = "_schema_version")]
+    pub schema_version: String,
+    pub serial_number: String,
+    pub model: String,
+    pub model_version: String,
+    pub batch: String,
+    pub capabilities: ProvisionCapabilities,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ProvisionCapabilities {
+    pub i2s_dac: bool,
 }
 
 // ── Service ───────────────────────────────────────────────────────────────────
@@ -111,7 +131,55 @@ impl FlasherEngineService {
         &self.engine_bin
     }
 
+    /// Validate and atomically save the non-secret manufacturing provision.
+    pub fn write_provision(&self, path: &str, provision: &ProvisionDocument) -> AppResult<String> {
+        validate_provision(provision)?;
+        let destination = PathBuf::from(path);
+        let parent = destination.parent().ok_or_else(|| {
+            AppError::Validation("provision path must have a parent directory".into())
+        })?;
+        if path.trim().is_empty() || !parent.is_dir() {
+            return Err(AppError::Validation(
+                "provision destination directory does not exist".into(),
+            ));
+        }
+        let file_name = destination
+            .file_name()
+            .and_then(|value| value.to_str())
+            .ok_or_else(|| AppError::Validation("provision filename must be UTF-8".into()))?;
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|error| AppError::Internal(format!("system clock before epoch: {error}")))?
+            .as_nanos();
+        let temporary = parent.join(format!(".{file_name}.{}.{nonce}.tmp", std::process::id()));
+        let bytes = serde_json::to_vec_pretty(provision)
+            .map_err(|error| AppError::Internal(format!("serialize provision: {error}")))?;
 
+        let result = (|| -> AppResult<()> {
+            let mut options = OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let mut file = options.open(&temporary).map_err(|error| {
+                AppError::Internal(format!("create provision temporary file: {error}"))
+            })?;
+            file.write_all(&bytes)
+                .and_then(|_| file.write_all(b"\n"))
+                .and_then(|_| file.sync_all())
+                .map_err(|error| AppError::Internal(format!("write provision: {error}")))?;
+            fs::rename(&temporary, &destination)
+                .map_err(|error| AppError::Internal(format!("replace provision: {error}")))?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&temporary);
+        }
+        result?;
+        Ok(destination.to_string_lossy().to_string())
+    }
 
     /// Run `flasher-rs status` — no file arguments required.
     pub async fn status(&self) -> AppResult<EngineResult> {
@@ -372,6 +440,39 @@ fn is_sha256_hex(s: &str) -> bool {
     s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
+fn validate_provision(provision: &ProvisionDocument) -> AppResult<()> {
+    if provision.schema_version != "1.0" {
+        return Err(AppError::Validation("_schema_version must be 1.0".into()));
+    }
+    for (field, value, maximum) in [
+        ("serial_number", provision.serial_number.as_str(), 64_usize),
+        ("model", provision.model.as_str(), 64),
+        ("model_version", provision.model_version.as_str(), 32),
+        ("batch", provision.batch.as_str(), 64),
+    ] {
+        if value.is_empty()
+            || value.len() > maximum
+            || !value
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || " ._+:/-".contains(character))
+        {
+            return Err(AppError::Validation(format!(
+                "{field} must be a non-empty safe string of at most {maximum} characters"
+            )));
+        }
+    }
+    if !provision
+        .serial_number
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || "-_.".contains(character))
+    {
+        return Err(AppError::Validation(
+            "serial_number contains unsupported characters".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Reject strings containing shell meta-characters that could be injected into
 /// the argument list.  We use `Command::arg()` which does NOT invoke a shell,
 /// so this is a defence-in-depth guard, not the primary protection.
@@ -404,6 +505,122 @@ mod tests {
             target_device: None,
             dry_run,
         }
+    }
+
+    fn valid_provision() -> ProvisionDocument {
+        ProvisionDocument {
+            schema_version: "1.0".into(),
+            serial_number: "SIGIL-000001".into(),
+            model: "Sigil-Streamer".into(),
+            model_version: "v1".into(),
+            batch: "2026-01".into(),
+            capabilities: ProvisionCapabilities { i2s_dac: true },
+        }
+    }
+
+    #[test]
+    fn test_provision_json_contains_model_version_and_boolean_i2s() {
+        let json = serde_json::to_value(valid_provision()).expect("serialize");
+        assert_eq!(json["model_version"], "v1");
+        assert_eq!(json["capabilities"]["i2s_dac"], true);
+        assert!(json.get("token").is_none());
+    }
+
+    #[test]
+    fn test_empty_serial_number_is_rejected() {
+        let mut provision = valid_provision();
+        provision.serial_number.clear();
+        assert!(validate_provision(&provision).is_err());
+    }
+
+    #[test]
+    fn test_string_true_i2s_is_rejected_by_typed_contract() {
+        let json = r#"{"_schema_version":"1.0","serial_number":"S1","model":"M","model_version":"v1","batch":"B","capabilities":{"i2s_dac":"true"}}"#;
+        assert!(serde_json::from_str::<ProvisionDocument>(json).is_err());
+    }
+
+    #[test]
+    fn test_write_provision_preserves_path_with_spaces() {
+        let directory =
+            std::env::temp_dir().join(format!("sigil flash provision {}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("fixture directory");
+        let path = directory.join("device provision.json");
+        let service = FlasherEngineService::new_unchecked();
+        let written = service
+            .write_provision(path.to_str().expect("UTF-8 path"), &valid_provision())
+            .expect("write provision");
+        assert_eq!(written, path.to_string_lossy());
+        let document: ProvisionDocument =
+            serde_json::from_slice(&std::fs::read(&path).expect("read saved provision"))
+                .expect("parse saved provision");
+        assert_eq!(document.model_version, "v1");
+        assert!(document.capabilities.i2s_dac);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[tokio::test]
+    #[ignore = "cross-repository dry-run; run explicitly for release validation"]
+    async fn test_complete_tauri_adapter_to_flasher_dry_run() {
+        let service = FlasherEngineService::new().expect("locate built flasher-rs");
+        let directory = std::env::temp_dir().join(format!(
+            "sigil flash complete dry run {}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("fixture directory");
+        let base_image = directory.join("base image.img");
+        let target = directory.join("target fixture.img");
+        let provision_path = directory.join("device provision.json");
+        let payload = directory.join("payload with spaces");
+        std::fs::write(&base_image, []).expect("base image fixture");
+        std::fs::write(&target, []).expect("target fixture");
+        service
+            .write_provision(
+                provision_path.to_str().expect("UTF-8 provision path"),
+                &valid_provision(),
+            )
+            .expect("Tauri provision writer");
+        let payload_result = std::process::Command::new("bash")
+            .arg(&service.payload_script)
+            .arg(&payload)
+            .env("SIGIL_PAYLOAD_ALLOW_DIRTY", "true")
+            .output()
+            .expect("payload builder");
+        assert!(
+            payload_result.status.success(),
+            "payload builder failed: {}",
+            String::from_utf8_lossy(&payload_result.stderr)
+        );
+        let params = EngineParams {
+            base_image: base_image.to_string_lossy().to_string(),
+            base_image_sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+                .into(),
+            payload: payload.to_string_lossy().to_string(),
+            provision: Some(provision_path.to_string_lossy().to_string()),
+            target_device: Some(target.to_string_lossy().to_string()),
+            dry_run: true,
+        };
+        let result = service.apply(&params).await.expect("adapter dry-run");
+        assert!(result.success);
+        assert!(result.was_dry_run);
+        let output = result
+            .lines
+            .iter()
+            .map(|line| line.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        for expected in [
+            "serial_number: SIGIL-000001",
+            "model: Sigil-Streamer",
+            "model_version: v1",
+            "batch: 2026-01",
+            "capabilities.i2s_dac: true",
+        ] {
+            assert!(output.contains(expected), "missing {expected} in {output}");
+        }
+        assert!(!output.contains("fake-device-token"));
+        let _ = std::fs::remove_dir_all(directory);
     }
 
     // ── CLI argument construction ─────────────────────────────────────────────

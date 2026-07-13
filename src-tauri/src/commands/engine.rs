@@ -1,5 +1,7 @@
 use crate::errors::AppResult;
-use crate::services::engine_service::{EngineParams, EngineResult, FlasherEngineService};
+use crate::services::engine_service::{
+    EngineParams, EngineResult, FlasherEngineService, ProvisionDocument,
+};
 use tauri::State;
 
 // ── Tauri commands ─────────────────────────────────────────────────────────────
@@ -60,4 +62,14 @@ pub async fn engine_build_payload(
 #[tauri::command]
 pub async fn engine_binary_path(svc: State<'_, FlasherEngineService>) -> AppResult<String> {
     Ok(svc.engine_bin().to_string_lossy().to_string())
+}
+
+#[tauri::command]
+pub async fn engine_write_provision(
+    path: String,
+    provision: ProvisionDocument,
+    svc: State<'_, FlasherEngineService>,
+) -> AppResult<String> {
+    tracing::info!("writing non-secret provision to operator-selected path");
+    svc.write_provision(&path, &provision)
 }

@@ -1,5 +1,5 @@
-import { useState, useCallback, useRef, useEffect } from "react";
-import { open } from "@tauri-apps/plugin-dialog";
+import { useState, useCallback, useRef, useEffect, useMemo } from "react";
+import { open, save } from "@tauri-apps/plugin-dialog";
 import {
   EngineResult,
   EngineLine,
@@ -9,6 +9,8 @@ import {
   enginePlan,
   engineValidate,
   engineApply,
+  engineWriteProvision,
+  ProvisionDocument,
 } from "../services/engineService";
 
 // ── Local types ───────────────────────────────────────────────────────────────
@@ -70,6 +72,39 @@ export default function EnginePanel() {
   const [provision, setProvision] = useState("");
   const [targetDevice, setTargetDevice] = useState("");
 
+  // Manufacturing identity (never includes credentials).
+  const [serialNumber, setSerialNumber] = useState("");
+  const [productModel, setProductModel] = useState("Sigil-Streamer");
+  const [modelVersion, setModelVersion] = useState("v1");
+  const [batch, setBatch] = useState("");
+  const [i2sDac, setI2sDac] = useState(false);
+  const [savedProvisionJson, setSavedProvisionJson] = useState("");
+
+  const provisionDocument = useMemo<ProvisionDocument>(() => ({
+    _schema_version: "1.0",
+    serial_number: serialNumber.trim(),
+    model: productModel.trim(),
+    model_version: modelVersion.trim(),
+    batch: batch.trim(),
+    capabilities: { i2s_dac: i2sDac },
+  }), [serialNumber, productModel, modelVersion, batch, i2sDac]);
+
+  const provisionJson = useMemo(
+    () => JSON.stringify(provisionDocument, null, 2),
+    [provisionDocument]
+  );
+  const provisionErrors = useMemo(() => {
+    const errors: string[] = [];
+    const safe = /^[A-Za-z0-9][A-Za-z0-9 ._+:/-]{0,63}$/;
+    const serialSafe = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+    if (!serialSafe.test(provisionDocument.serial_number)) errors.push("serial_number es obligatorio y debe usar caracteres seguros.");
+    if (!safe.test(provisionDocument.model)) errors.push("model es obligatorio y debe usar caracteres seguros.");
+    if (!safe.test(provisionDocument.model_version) || provisionDocument.model_version.length > 32) errors.push("model_version es obligatorio (máximo 32 caracteres seguros).");
+    if (!safe.test(provisionDocument.batch)) errors.push("batch es obligatorio y debe usar caracteres seguros.");
+    if (typeof provisionDocument.capabilities.i2s_dac !== "boolean") errors.push("capabilities.i2s_dac debe ser booleano.");
+    return errors;
+  }, [provisionDocument]);
+
   // Execution state
   const [busy, setBusy] = useState(false);
   const [logLines, setLogLines] = useState<LogLine[]>([
@@ -114,7 +149,7 @@ export default function EnginePanel() {
       base_image: baseImage,
       base_image_sha256: sha256.trim().toLowerCase(),
       payload,
-      provision: provision.trim() || null,
+      provision: provision || null,
       target_device: targetDevice.trim() || null,
       dry_run: true,
     }),
@@ -125,8 +160,11 @@ export default function EnginePanel() {
     if (!baseImage) { addLog("ui-error", "Selecciona la imagen base primero."); return false; }
     if (!sha256.trim()) { addLog("ui-error", "Introduce el SHA-256 esperado."); return false; }
     if (!payload) { addLog("ui-error", "Selecciona el directorio del payload."); return false; }
+    if (provisionErrors.length > 0) { addLog("ui-error", provisionErrors[0]); return false; }
+    if (!provision) { addLog("ui-error", "Guarda el provision JSON antes de continuar."); return false; }
+    if (savedProvisionJson !== provisionJson) { addLog("ui-error", "La identidad cambió; vuelve a guardar el provision JSON."); return false; }
     return true;
-  }, [baseImage, sha256, payload, addLog]);
+  }, [baseImage, sha256, payload, provision, provisionErrors, savedProvisionJson, provisionJson, addLog]);
 
   // ── Actions ──────────────────────────────────────────────────────────────────
 
@@ -232,13 +270,28 @@ export default function EnginePanel() {
     if (typeof sel === "string") setPayload(sel);
   }, []);
 
-  const pickProvision = useCallback(async () => {
-    const sel = await open({
-      multiple: false,
+  const saveProvision = useCallback(async () => {
+    if (provisionErrors.length > 0) {
+      addLog("ui-error", provisionErrors.join(" "));
+      return;
+    }
+    const destination = await save({
+      defaultPath: provision || "sigil_provision.json",
       filters: [{ name: "JSON", extensions: ["json"] }],
     });
-    if (typeof sel === "string") setProvision(sel);
-  }, []);
+    if (typeof destination !== "string") return;
+    setBusy(true);
+    try {
+      const writtenPath = await engineWriteProvision(destination, provisionDocument);
+      setProvision(writtenPath);
+      setSavedProvisionJson(provisionJson);
+      addLog("ui-success", `Provision no secreto guardado: ${writtenPath}`);
+    } catch (error) {
+      addLog("ui-error", `No se pudo guardar provision: ${String(error)}`);
+    } finally {
+      setBusy(false);
+    }
+  }, [provisionErrors, provision, provisionDocument, provisionJson, addLog]);
 
   const pickTarget = useCallback(async () => {
     const sel = await open({
@@ -399,26 +452,36 @@ export default function EnginePanel() {
           </div>
         </div>
 
-        {/* Provision JSON */}
-        <div className="form-group">
-          <label className="form-label">Provision JSON (Opcional)</label>
+        {/* Strict manufacturing provision */}
+        <div className="form-group" style={{ gap: 8 }}>
+          <label className="form-label">Identidad de fabricación (Obligatoria)</label>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+            <input id="input-serial-number" className="form-input" value={serialNumber} onChange={(e) => setSerialNumber(e.target.value)} placeholder="serial_number · SIGIL-000001" disabled={busy} />
+            <input id="input-model" className="form-input" value={productModel} onChange={(e) => setProductModel(e.target.value)} placeholder="model · Sigil-Streamer" disabled={busy} />
+            <input id="input-model-version" className="form-input" value={modelVersion} onChange={(e) => setModelVersion(e.target.value)} placeholder="model_version · v1" disabled={busy} />
+            <input id="input-batch" className="form-input" value={batch} onChange={(e) => setBatch(e.target.value)} placeholder="batch · 2026-01" disabled={busy} />
+          </div>
+          <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: "var(--text-primary)" }}>
+            <input id="input-i2s-dac" type="checkbox" checked={i2sDac} onChange={(e) => setI2sDac(e.target.checked)} disabled={busy} />
+            capabilities.i2s_dac (DAC físico declarado)
+          </label>
+          {provisionErrors.length > 0 && (
+            <div style={{ color: "var(--danger)", fontSize: 10 }}>
+              {provisionErrors.map((error) => <div key={error}>• {error}</div>)}
+            </div>
+          )}
+          <label className="form-label">Vista previa del provision</label>
+          <pre id="provision-preview" style={{ margin: 0, padding: 10, maxHeight: 210, overflow: "auto", borderRadius: "var(--radius-sm)", background: "var(--bg-deep)", color: "var(--text-muted)", fontSize: 10, fontFamily: "var(--font-mono)", whiteSpace: "pre-wrap" }}>
+            {provisionJson}
+          </pre>
           <div style={{ display: "flex", gap: 6 }}>
-            <input
-              id="input-provision"
-              type="text"
-              className="form-input"
-              style={{ flex: 1, fontSize: 12 }}
-              value={provision}
-              onChange={(e) => setProvision(e.target.value)}
-              placeholder="/ruta/a/sigil_provision.json"
-              disabled={busy}
-            />
-            <button className="btn btn-secondary" onClick={pickProvision} disabled={busy} style={{ padding: "8px 12px", flexShrink: 0 }}>
-              📂
+            <input id="input-provision" type="text" className="form-input" style={{ flex: 1, fontSize: 12 }} value={provision} readOnly placeholder="Guarda sigil_provision.json" />
+            <button id="btn-save-provision" className="btn btn-secondary" onClick={saveProvision} disabled={busy || provisionErrors.length > 0} style={{ padding: "8px 12px", flexShrink: 0 }}>
+              Guardar JSON
             </button>
           </div>
           <p style={{ fontSize: 10, color: "var(--text-muted)", marginTop: 2 }}>
-            Requiere campos: serial_number, model, batch. Sin credenciales.
+            Solo identidad no secreta. El token nunca se incluye en este archivo.
           </p>
         </div>
 

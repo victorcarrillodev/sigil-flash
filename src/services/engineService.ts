@@ -44,6 +44,19 @@ export interface EngineParams {
   dry_run: boolean;
 }
 
+export interface ProvisionCapabilities {
+  i2s_dac: boolean;
+}
+
+export interface ProvisionDocument {
+  _schema_version: "1.0";
+  serial_number: string;
+  model: string;
+  model_version: string;
+  batch: string;
+  capabilities: ProvisionCapabilities;
+}
+
 // ── Command wrappers ──────────────────────────────────────────────────────────
 
 /** Query engine metadata (flasher-rs status). */
@@ -54,6 +67,13 @@ export async function engineStatus(): Promise<EngineResult> {
 /** Return the resolved absolute path to the flasher-rs binary. */
 export async function engineBinaryPath(): Promise<string> {
   return invoke<string>("engine_binary_path");
+}
+
+export async function engineWriteProvision(
+  path: string,
+  provision: ProvisionDocument
+): Promise<string> {
+  return invoke<string>("engine_write_provision", { path, provision });
 }
 
 /**
