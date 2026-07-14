@@ -578,7 +578,16 @@ fn locate_hardware_root() -> AppResult<PathBuf> {
         }
     }
 
-    // 2. Compile-time sibling path (canonical).
+    // 2. Try child directory (sigil-flash/sigil-hardware)
+    let child_path = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../sigil-hardware"));
+    if let Ok(canonical) = child_path.canonicalize() {
+        if canonical.is_dir() {
+            tracing::info!("hw root via child: {}", canonical.display());
+            return Ok(canonical);
+        }
+    }
+
+    // 3. Compile-time sibling path (canonical).
     let sibling = PathBuf::from(COMPILE_TIME_SIBLING);
     if let Ok(canonical) = sibling.canonicalize() {
         if canonical.is_dir() {
