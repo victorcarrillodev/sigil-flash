@@ -3,5 +3,6 @@ dist/
 src-tauri/target/
 .tauri/
 *.log
+artifacts/secrets/
 .DS_Store
 bun.lockb

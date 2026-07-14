@@ -1,6 +1,6 @@
 use crate::errors::AppResult;
 use crate::services::engine_service::{
-    EngineParams, EngineResult, FlasherEngineService, ProvisionDocument,
+    EngineParams, EngineResult, FlasherEngineService, ProvisionDocument, SecretWriteResult,
 };
 use tauri::State;
 
@@ -11,6 +11,29 @@ use tauri::State;
 pub async fn engine_status(svc: State<'_, FlasherEngineService>) -> AppResult<EngineResult> {
     tracing::info!("engine_status invoked");
     svc.status().await
+}
+
+#[tauri::command]
+pub async fn engine_default_secrets_path(
+    svc: State<'_, FlasherEngineService>,
+) -> AppResult<String> {
+    svc.default_secrets_path()
+}
+
+#[tauri::command]
+pub async fn engine_generate_panel_pin(svc: State<'_, FlasherEngineService>) -> AppResult<String> {
+    svc.generate_panel_pin()
+}
+
+#[tauri::command]
+pub async fn engine_write_secrets(
+    path: String,
+    panel_pin: String,
+    overwrite_confirmed: bool,
+    svc: State<'_, FlasherEngineService>,
+) -> AppResult<SecretWriteResult> {
+    tracing::info!("writing protected manufacturing secret input");
+    svc.write_secrets(&path, &panel_pin, overwrite_confirmed)
 }
 
 /// Run `flasher-rs plan` (dry-run — no writes).

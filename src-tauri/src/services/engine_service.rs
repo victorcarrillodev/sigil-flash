@@ -54,10 +54,29 @@ pub struct EngineParams {
     pub payload: String,
     /// Optional absolute path to `sigil_provision.json`.
     pub provision: Option<String>,
+    /// Optional path to the protected manufacturing secret input.
+    pub secrets: Option<String>,
     /// Optional target path; must be a regular file when dry_run is true.
     pub target_device: Option<String>,
     /// Must be `true` for `apply`; also accepted (and enforced) for other commands.
     pub dry_run: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PanelSecretsDocument {
+    #[serde(rename = "_schema_version")]
+    pub schema_version: String,
+    pub panel_pin: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SecretWriteResult {
+    pub path: String,
+    pub success: bool,
+    pub schema_version: String,
+    pub panel_pin_configured: bool,
+    pub pin_length: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -85,6 +104,8 @@ pub struct FlasherEngineService {
     engine_bin: PathBuf,
     /// Absolute path to `build-flasher-payload.sh`.
     payload_script: PathBuf,
+    /// Default manufacturing secret location, outside Git repositories.
+    secrets_dir: PathBuf,
 }
 
 impl FlasherEngineService {
@@ -103,6 +124,11 @@ impl FlasherEngineService {
             .join("debug")
             .join("flasher-rs");
         let payload_script = hw_root.join("scripts").join("build-flasher-payload.sh");
+        let secrets_dir = hw_root
+            .parent()
+            .ok_or_else(|| AppError::Validation("hardware root has no parent".into()))?
+            .join("artifacts")
+            .join("secrets");
 
         if !engine_bin.exists() {
             return Err(AppError::Validation(format!(
@@ -114,6 +140,7 @@ impl FlasherEngineService {
         Ok(Self {
             engine_bin,
             payload_script,
+            secrets_dir,
         })
     }
 
@@ -123,12 +150,137 @@ impl FlasherEngineService {
         Self {
             engine_bin: PathBuf::from("/dev/null/flasher-rs-not-found"),
             payload_script: PathBuf::from("/dev/null/build-flasher-payload-not-found"),
+            secrets_dir: std::env::temp_dir().join("sigil-artifacts").join("secrets"),
         }
     }
 
     /// Returns the resolved path to the `flasher-rs` binary (for display/tests).
     pub fn engine_bin(&self) -> &Path {
         &self.engine_bin
+    }
+
+    pub fn default_secrets_path(&self) -> AppResult<String> {
+        if !self.secrets_dir.exists() {
+            let mut builder = fs::DirBuilder::new();
+            builder.recursive(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                builder.mode(0o700);
+            }
+            builder.create(&self.secrets_dir).map_err(|error| {
+                AppError::Internal(format!("create manufacturing secrets directory: {error}"))
+            })?;
+        }
+        validate_secret_parent(&self.secrets_dir)?;
+        Ok(self
+            .secrets_dir
+            .join("sigil_secrets.json")
+            .to_string_lossy()
+            .to_string())
+    }
+
+    pub fn generate_panel_pin(&self) -> AppResult<String> {
+        loop {
+            let mut pin = String::with_capacity(8);
+            while pin.len() < 8 {
+                let byte = secure_random_bytes::<1>()?[0];
+                if byte < 250 {
+                    pin.push(char::from(b'0' + (byte % 10)));
+                }
+            }
+            if validate_panel_pin(&pin).is_ok() {
+                return Ok(pin);
+            }
+        }
+    }
+
+    pub fn write_secrets(
+        &self,
+        path: &str,
+        panel_pin: &str,
+        overwrite_confirmed: bool,
+    ) -> AppResult<SecretWriteResult> {
+        validate_panel_pin(panel_pin)?;
+        let destination = PathBuf::from(path);
+        if path.is_empty() {
+            return Err(AppError::Validation("secret path must not be empty".into()));
+        }
+        let parent = destination
+            .parent()
+            .ok_or_else(|| AppError::Validation("secret path must have a parent".into()))?;
+        validate_secret_parent(parent)?;
+        reject_git_controlled_path(parent)?;
+
+        if let Ok(metadata) = fs::symlink_metadata(&destination) {
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err(AppError::Validation(
+                    "secret destination must be a regular non-symlink file".into(),
+                ));
+            }
+            if !overwrite_confirmed {
+                return Err(AppError::Validation(
+                    "secret destination exists; explicit overwrite confirmation required".into(),
+                ));
+            }
+        }
+
+        let document = PanelSecretsDocument {
+            schema_version: "1.0".into(),
+            panel_pin: panel_pin.to_owned(),
+        };
+        let bytes = serde_json::to_vec_pretty(&document)
+            .map_err(|error| AppError::Internal(format!("serialize secret input: {error}")))?;
+        let file_name = destination
+            .file_name()
+            .and_then(|value| value.to_str())
+            .ok_or_else(|| AppError::Validation("secret filename must be UTF-8".into()))?;
+        let nonce = u64::from_ne_bytes(secure_random_bytes::<8>()?);
+        let temporary = parent.join(format!(".{file_name}.{}.{nonce}.tmp", std::process::id()));
+
+        let result = (|| -> AppResult<()> {
+            let mut options = OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let mut file = options.open(&temporary).map_err(|error| {
+                AppError::Internal(format!("create secret temporary file: {error}"))
+            })?;
+            file.write_all(&bytes)
+                .and_then(|_| file.write_all(b"\n"))
+                .and_then(|_| file.sync_all())
+                .map_err(|error| AppError::Internal(format!("write secret input: {error}")))?;
+            fs::rename(&temporary, &destination)
+                .map_err(|error| AppError::Internal(format!("replace secret input: {error}")))?;
+            #[cfg(unix)]
+            {
+                let directory = OpenOptions::new()
+                    .read(true)
+                    .open(parent)
+                    .map_err(|error| {
+                        AppError::Internal(format!("open secret directory: {error}"))
+                    })?;
+                directory.sync_all().map_err(|error| {
+                    AppError::Internal(format!("sync secret directory: {error}"))
+                })?;
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&temporary);
+        }
+        result?;
+
+        Ok(SecretWriteResult {
+            path: destination.to_string_lossy().to_string(),
+            success: true,
+            schema_version: "1.0".into(),
+            panel_pin_configured: true,
+            pin_length: panel_pin.len(),
+        })
     }
 
     /// Validate and atomically save the non-secret manufacturing provision.
@@ -291,6 +443,9 @@ fn build_argv(command: &str, params: &EngineParams) -> AppResult<Vec<String>> {
     if let Some(ref p) = params.provision {
         reject_shell_injection("provision", p)?;
     }
+    if let Some(ref s) = params.secrets {
+        reject_shell_injection("secrets", s)?;
+    }
     if let Some(ref t) = params.target_device {
         reject_shell_injection("target_device", t)?;
     }
@@ -316,6 +471,11 @@ fn build_argv(command: &str, params: &EngineParams) -> AppResult<Vec<String>> {
     if let Some(ref p) = params.provision {
         argv.push("--provision".into());
         argv.push(p.clone());
+    }
+
+    if let Some(ref s) = params.secrets {
+        argv.push("--secrets".into());
+        argv.push(s.clone());
     }
 
     if let Some(ref t) = params.target_device {
@@ -440,6 +600,63 @@ fn is_sha256_hex(s: &str) -> bool {
     s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
+fn secure_random_bytes<const N: usize>() -> AppResult<[u8; N]> {
+    let mut bytes = [0_u8; N];
+    getrandom::fill(&mut bytes).map_err(|error| {
+        AppError::Internal(format!("operating-system RNG unavailable: {error}"))
+    })?;
+    Ok(bytes)
+}
+
+pub fn validate_panel_pin(pin: &str) -> AppResult<()> {
+    if !(6..=12).contains(&pin.len()) || !pin.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(AppError::Validation(
+            "panel PIN must contain exactly 6 to 12 decimal digits".into(),
+        ));
+    }
+    let all_repeated = pin.bytes().all(|byte| byte == pin.as_bytes()[0]);
+    let ascending = "12345678901234567890".contains(pin);
+    let descending = "98765432109876543210".contains(pin);
+    if all_repeated || ascending || descending {
+        return Err(AppError::Validation("panel PIN is too trivial".into()));
+    }
+    Ok(())
+}
+
+fn validate_secret_parent(parent: &Path) -> AppResult<()> {
+    let metadata = fs::symlink_metadata(parent)
+        .map_err(|_| AppError::Validation("secret destination directory does not exist".into()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(AppError::Validation(
+            "secret destination parent must be a regular directory".into(),
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o022 != 0 {
+            return Err(AppError::Validation(
+                "secret destination directory must not be group/world writable".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn reject_git_controlled_path(path: &Path) -> AppResult<()> {
+    let mut current = Some(path);
+    while let Some(candidate) = current {
+        let marker = candidate.join(".git");
+        if marker.is_file() || marker.join("HEAD").is_file() {
+            return Err(AppError::Validation(
+                "secret files must not be stored inside a Git worktree".into(),
+            ));
+        }
+        current = candidate.parent();
+    }
+    Ok(())
+}
+
 fn validate_provision(provision: &ProvisionDocument) -> AppResult<()> {
     if provision.schema_version != "1.0" {
         return Err(AppError::Validation("_schema_version must be 1.0".into()));
@@ -502,6 +719,7 @@ mod tests {
             base_image_sha256: "a".repeat(64),
             payload: "/tmp/payload dir".into(), // path with space
             provision: None,
+            secrets: None,
             target_device: None,
             dry_run,
         }
@@ -524,6 +742,7 @@ mod tests {
         assert_eq!(json["model_version"], "v1");
         assert_eq!(json["capabilities"]["i2s_dac"], true);
         assert!(json.get("token").is_none());
+        assert!(json.get("panel_pin").is_none());
     }
 
     #[test]
@@ -545,6 +764,12 @@ mod tests {
             std::env::temp_dir().join(format!("sigil flash provision {}", std::process::id()));
         let _ = std::fs::remove_dir_all(&directory);
         std::fs::create_dir_all(&directory).expect("fixture directory");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
+                .expect("fixture mode");
+        }
         let path = directory.join("device provision.json");
         let service = FlasherEngineService::new_unchecked();
         let written = service
@@ -559,6 +784,72 @@ mod tests {
         let _ = std::fs::remove_dir_all(directory);
     }
 
+    #[test]
+    fn test_generated_panel_pins_are_valid_and_not_constant() {
+        let service = FlasherEngineService::new_unchecked();
+        let pins = (0..64)
+            .map(|_| service.generate_panel_pin().expect("OS RNG"))
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(pins.len() > 1);
+        assert!(pins.iter().all(|pin| validate_panel_pin(pin).is_ok()));
+    }
+
+    #[test]
+    fn test_panel_pin_policy_rejects_malformed_and_trivial_values() {
+        for pin in [
+            "12345",
+            "1234567890123",
+            "12 4567",
+            "000000",
+            "111111",
+            "123456",
+        ] {
+            assert!(validate_panel_pin(pin).is_err(), "accepted {pin}");
+        }
+        assert!(validate_panel_pin("80427159").is_ok());
+    }
+
+    #[test]
+    fn test_secret_writer_is_atomic_private_and_requires_overwrite_confirmation() {
+        let directory = std::env::temp_dir().join(format!(
+            "sigil manufacturing secrets {}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir_all(&directory).expect("secret directory");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).expect("mode");
+        }
+        let path = directory.join("panel secrets.json");
+        let service = FlasherEngineService::new_unchecked();
+        let result = service
+            .write_secrets(path.to_str().expect("UTF-8"), "80427159", false)
+            .expect("write secrets");
+        assert!(result.success && result.panel_pin_configured);
+        assert_eq!(result.pin_length, 8);
+        assert!(service
+            .write_secrets(path.to_str().expect("UTF-8"), "80427159", false)
+            .is_err());
+        let metadata = fs::symlink_metadata(&path).expect("metadata");
+        assert!(metadata.is_file() && !metadata.file_type().is_symlink());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+        }
+        let parsed: PanelSecretsDocument =
+            serde_json::from_slice(&fs::read(&path).expect("read")).expect("strict document");
+        assert_eq!(parsed.panel_pin, "80427159");
+        assert!(directory.read_dir().expect("read dir").all(|entry| !entry
+            .expect("entry")
+            .file_name()
+            .to_string_lossy()
+            .ends_with(".tmp")));
+        let _ = fs::remove_dir_all(directory);
+    }
+
     #[tokio::test]
     #[ignore = "cross-repository dry-run; run explicitly for release validation"]
     async fn test_complete_tauri_adapter_to_flasher_dry_run() {
@@ -569,9 +860,16 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&directory);
         std::fs::create_dir_all(&directory).expect("fixture directory");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
+                .expect("fixture mode");
+        }
         let base_image = directory.join("base image.img");
         let target = directory.join("target fixture.img");
         let provision_path = directory.join("device provision.json");
+        let secrets_path = directory.join("panel secrets.json");
         let payload = directory.join("payload with spaces");
         std::fs::write(&base_image, []).expect("base image fixture");
         std::fs::write(&target, []).expect("target fixture");
@@ -581,6 +879,13 @@ mod tests {
                 &valid_provision(),
             )
             .expect("Tauri provision writer");
+        service
+            .write_secrets(
+                secrets_path.to_str().expect("UTF-8 secrets path"),
+                "80427159",
+                false,
+            )
+            .expect("Tauri secret writer");
         let payload_result = std::process::Command::new("bash")
             .arg(&service.payload_script)
             .arg(&payload)
@@ -598,11 +903,21 @@ mod tests {
                 .into(),
             payload: payload.to_string_lossy().to_string(),
             provision: Some(provision_path.to_string_lossy().to_string()),
+            secrets: Some(secrets_path.to_string_lossy().to_string()),
             target_device: Some(target.to_string_lossy().to_string()),
             dry_run: true,
         };
         let result = service.apply(&params).await.expect("adapter dry-run");
-        assert!(result.success);
+        assert!(
+            result.success,
+            "dry-run failed: {}",
+            result
+                .lines
+                .iter()
+                .map(|line| line.text.as_str())
+                .collect::<Vec<_>>()
+                .join(" | ")
+        );
         assert!(result.was_dry_run);
         let output = result
             .lines
@@ -620,6 +935,8 @@ mod tests {
             assert!(output.contains(expected), "missing {expected} in {output}");
         }
         assert!(!output.contains("fake-device-token"));
+        assert!(!output.contains("80427159"));
+        assert!(output.contains("panel PIN configured: yes"));
         let _ = std::fs::remove_dir_all(directory);
     }
 
@@ -656,6 +973,7 @@ mod tests {
             base_image_sha256: "b".repeat(64),
             payload: "/payloads/my payload".into(),
             provision: Some("/provision/provision file.json".into()),
+            secrets: Some("/secrets/panel secrets.json".into()),
             target_device: Some("/tmp/target file.img".into()),
             dry_run: true,
         };
@@ -663,6 +981,8 @@ mod tests {
         assert_eq!(argv[0], "plan");
         assert!(argv.contains(&"--provision".to_string()));
         assert!(argv.contains(&"/provision/provision file.json".to_string()));
+        assert!(argv.contains(&"--secrets".to_string()));
+        assert!(argv.contains(&"/secrets/panel secrets.json".to_string()));
         assert!(argv.contains(&"--target-device".to_string()));
         assert!(argv.contains(&"/tmp/target file.img".to_string()));
         assert!(argv.contains(&"--dry-run".to_string()));
@@ -677,6 +997,7 @@ mod tests {
             base_image_sha256: "c".repeat(64),
             payload: "/home/user/sigil payloads/hw payload dir".into(),
             provision: Some("/home/user/my provision/device provision.json".into()),
+            secrets: Some("/home/user/manufacturing secrets/panel secret.json".into()),
             target_device: Some("/tmp/target fixture file.img".into()),
             dry_run: false,
         };
@@ -685,6 +1006,7 @@ mod tests {
         assert!(argv.contains(&"/home/user/my images/test file.img.xz".to_string()));
         assert!(argv.contains(&"/home/user/sigil payloads/hw payload dir".to_string()));
         assert!(argv.contains(&"/home/user/my provision/device provision.json".to_string()));
+        assert!(argv.contains(&"/home/user/manufacturing secrets/panel secret.json".to_string()));
         assert!(argv.contains(&"/tmp/target fixture file.img".to_string()));
     }
 
@@ -718,6 +1040,7 @@ mod tests {
                 .into(),
             payload: "/tmp/payload".into(),
             provision: None,
+            secrets: None,
             target_device: None,
             dry_run: false,
         };

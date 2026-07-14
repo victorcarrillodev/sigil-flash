@@ -80,6 +80,9 @@ pub fn run() {
             commands::engine::engine_build_payload,
             commands::engine::engine_binary_path,
             commands::engine::engine_write_provision,
+            commands::engine::engine_default_secrets_path,
+            commands::engine::engine_generate_panel_pin,
+            commands::engine::engine_write_secrets,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

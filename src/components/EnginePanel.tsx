@@ -10,6 +10,9 @@ import {
   engineValidate,
   engineApply,
   engineWriteProvision,
+  engineDefaultSecretsPath,
+  engineGeneratePanelPin,
+  engineWriteSecrets,
   ProvisionDocument,
 } from "../services/engineService";
 
@@ -70,6 +73,7 @@ export default function EnginePanel() {
   const [sha256, setSha256] = useState("");
   const [payload, setPayload] = useState("");
   const [provision, setProvision] = useState("");
+  const [secretsPath, setSecretsPath] = useState("");
   const [targetDevice, setTargetDevice] = useState("");
 
   // Manufacturing identity (never includes credentials).
@@ -79,6 +83,22 @@ export default function EnginePanel() {
   const [batch, setBatch] = useState("");
   const [i2sDac, setI2sDac] = useState(false);
   const [savedProvisionJson, setSavedProvisionJson] = useState("");
+
+  // Panel access secret. These values are cleared immediately after saving.
+  const [panelPin, setPanelPin] = useState("");
+  const [confirmPanelPin, setConfirmPanelPin] = useState("");
+  const [showPanelPin, setShowPanelPin] = useState(false);
+  const [pinCopied, setPinCopied] = useState(false);
+
+  const pinErrors = useMemo(() => {
+    const errors: string[] = [];
+    if (!/^\d{6,12}$/.test(panelPin)) errors.push("El PIN debe contener exactamente entre 6 y 12 dígitos.");
+    if (panelPin && (/^(\d)\1+$/.test(panelPin) || "12345678901234567890".includes(panelPin) || "98765432109876543210".includes(panelPin))) {
+      errors.push("El PIN es demasiado trivial.");
+    }
+    if (panelPin !== confirmPanelPin) errors.push("La confirmación del PIN no coincide.");
+    return errors;
+  }, [panelPin, confirmPanelPin]);
 
   const provisionDocument = useMemo<ProvisionDocument>(() => ({
     _schema_version: "1.0",
@@ -150,10 +170,11 @@ export default function EnginePanel() {
       base_image_sha256: sha256.trim().toLowerCase(),
       payload,
       provision: provision || null,
+      secrets: secretsPath || null,
       target_device: targetDevice.trim() || null,
       dry_run: true,
     }),
-    [baseImage, sha256, payload, provision, targetDevice]
+    [baseImage, sha256, payload, provision, secretsPath, targetDevice]
   );
 
   const requireParams = useCallback(() => {
@@ -163,8 +184,9 @@ export default function EnginePanel() {
     if (provisionErrors.length > 0) { addLog("ui-error", provisionErrors[0]); return false; }
     if (!provision) { addLog("ui-error", "Guarda el provision JSON antes de continuar."); return false; }
     if (savedProvisionJson !== provisionJson) { addLog("ui-error", "La identidad cambió; vuelve a guardar el provision JSON."); return false; }
+    if (!secretsPath) { addLog("ui-error", "Guarda el secreto de acceso al panel antes de continuar."); return false; }
     return true;
-  }, [baseImage, sha256, payload, provision, provisionErrors, savedProvisionJson, provisionJson, addLog]);
+  }, [baseImage, sha256, payload, provision, secretsPath, provisionErrors, savedProvisionJson, provisionJson, addLog]);
 
   // ── Actions ──────────────────────────────────────────────────────────────────
 
@@ -292,6 +314,66 @@ export default function EnginePanel() {
       setBusy(false);
     }
   }, [provisionErrors, provision, provisionDocument, provisionJson, addLog]);
+
+  const generatePanelPin = useCallback(async () => {
+    if (busy) return;
+    try {
+      const generated = await engineGeneratePanelPin();
+      setPanelPin(generated);
+      setConfirmPanelPin(generated);
+      setPinCopied(false);
+      addLog("ui-info", "PIN seguro generado. Cópialo una sola vez y guárdalo fuera de SIGIL Flash.");
+    } catch (error) {
+      addLog("ui-error", `No se pudo generar el PIN: ${String(error)}`);
+    }
+  }, [busy, addLog]);
+
+  const copyPanelPinOnce = useCallback(async () => {
+    if (!panelPin || pinCopied || pinErrors.length > 0) return;
+    try {
+      await navigator.clipboard.writeText(panelPin);
+      setPinCopied(true);
+      addLog("ui-info", "PIN copiado una vez. El portapapeles es responsabilidad del operador; almacénalo de forma segura.");
+    } catch {
+      addLog("ui-error", "No se pudo copiar el PIN al portapapeles.");
+    }
+  }, [panelPin, pinCopied, pinErrors, addLog]);
+
+  const savePanelSecrets = useCallback(async () => {
+    if (pinErrors.length > 0) {
+      addLog("ui-error", pinErrors[0]);
+      return;
+    }
+    setBusy(true);
+    try {
+      const defaultPath = await engineDefaultSecretsPath();
+      const destination = await save({
+        defaultPath,
+        filters: [{ name: "SIGIL manufacturing secrets", extensions: ["json"] }],
+      });
+      if (typeof destination !== "string") return;
+
+      let result;
+      try {
+        result = await engineWriteSecrets(destination, panelPin, false);
+      } catch (error) {
+        if (!String(error).includes("explicit overwrite confirmation required")) throw error;
+        const confirmed = window.confirm("El archivo secreto ya existe. ¿Reemplazarlo explícitamente?");
+        if (!confirmed) return;
+        result = await engineWriteSecrets(destination, panelPin, true);
+      }
+      setSecretsPath(result.path);
+      addLog("ui-success", `Entrada secreta protegida guardada (${result.pin_length} dígitos): ${result.path}`);
+    } catch (error) {
+      addLog("ui-error", `No se pudo guardar la entrada secreta: ${String(error)}`);
+    } finally {
+      setPanelPin("");
+      setConfirmPanelPin("");
+      setShowPanelPin(false);
+      setPinCopied(false);
+      setBusy(false);
+    }
+  }, [panelPin, pinErrors, addLog]);
 
   const pickTarget = useCallback(async () => {
     const sel = await open({
@@ -482,6 +564,34 @@ export default function EnginePanel() {
           </div>
           <p style={{ fontSize: 10, color: "var(--text-muted)", marginTop: 2 }}>
             Solo identidad no secreta. El token nunca se incluye en este archivo.
+          </p>
+        </div>
+
+        {/* Protected manufacturing secret — deliberately separate from identity. */}
+        <div className="form-group" style={{ gap: 8, padding: 12, border: "1px solid var(--warning)", borderRadius: "var(--radius-md)" }}>
+          <label className="form-label">Acceso local al panel — secreto de fabricación</label>
+          <p style={{ fontSize: 10, color: "var(--warning)", margin: 0 }}>
+            No forma parte de la identidad ni de su vista previa. Debe custodiarse fuera del repositorio.
+          </p>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+            <input id="input-panel-pin" className="form-input" type={showPanelPin ? "text" : "password"} inputMode="numeric" autoComplete="new-password" value={panelPin} onChange={(event) => { setPanelPin(event.target.value); setPinCopied(false); }} placeholder="PIN de 6–12 dígitos" disabled={busy} />
+            <input id="input-panel-pin-confirm" className="form-input" type={showPanelPin ? "text" : "password"} inputMode="numeric" autoComplete="new-password" value={confirmPanelPin} onChange={(event) => setConfirmPanelPin(event.target.value)} placeholder="Confirmar PIN" disabled={busy} />
+          </div>
+          <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 11, color: "var(--text-primary)" }}>
+            <input type="checkbox" checked={showPanelPin} onChange={(event) => setShowPanelPin(event.target.checked)} disabled={busy} />
+            Mostrar PIN temporalmente
+          </label>
+          {panelPin && pinErrors.length > 0 && (
+            <div style={{ color: "var(--danger)", fontSize: 10 }}>{pinErrors.map((error) => <div key={error}>• {error}</div>)}</div>
+          )}
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+            <button id="btn-generate-panel-pin" className="btn btn-secondary" onClick={generatePanelPin} disabled={busy}>Generar PIN seguro</button>
+            <button id="btn-copy-panel-pin" className="btn btn-secondary" onClick={copyPanelPinOnce} disabled={busy || pinCopied || pinErrors.length > 0}>{pinCopied ? "Copiado" : "Copiar una vez"}</button>
+            <button id="btn-save-panel-secrets" className="btn btn-secondary" onClick={savePanelSecrets} disabled={busy || pinErrors.length > 0}>Guardar secreto 0600</button>
+          </div>
+          <input id="input-secrets-path" type="text" className="form-input" value={secretsPath} readOnly placeholder="artifacts/secrets/sigil_secrets.json" />
+          <p style={{ fontSize: 10, color: "var(--text-muted)", margin: 0 }}>
+            Tras guardar, el PIN se elimina de la memoria de esta pantalla. El archivo plaintext es entrada temporal de fabricación.
           </p>
         </div>
 

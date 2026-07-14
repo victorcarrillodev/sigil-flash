@@ -39,6 +39,7 @@ export interface EngineParams {
   base_image_sha256: string;
   payload: string;
   provision: string | null;
+  secrets: string | null;
   target_device: string | null;
   /** Must be true for apply; the Rust backend enforces this unconditionally. */
   dry_run: boolean;
@@ -55,6 +56,14 @@ export interface ProvisionDocument {
   model_version: string;
   batch: string;
   capabilities: ProvisionCapabilities;
+}
+
+export interface SecretWriteResult {
+  path: string;
+  success: boolean;
+  schema_version: "1.0";
+  panel_pin_configured: boolean;
+  pin_length: number;
 }
 
 // ── Command wrappers ──────────────────────────────────────────────────────────
@@ -74,6 +83,26 @@ export async function engineWriteProvision(
   provision: ProvisionDocument
 ): Promise<string> {
   return invoke<string>("engine_write_provision", { path, provision });
+}
+
+export async function engineDefaultSecretsPath(): Promise<string> {
+  return invoke<string>("engine_default_secrets_path");
+}
+
+export async function engineGeneratePanelPin(): Promise<string> {
+  return invoke<string>("engine_generate_panel_pin");
+}
+
+export async function engineWriteSecrets(
+  path: string,
+  panelPin: string,
+  overwriteConfirmed: boolean
+): Promise<SecretWriteResult> {
+  return invoke<SecretWriteResult>("engine_write_secrets", {
+    path,
+    panelPin,
+    overwriteConfirmed,
+  });
 }
 
 /**
