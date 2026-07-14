@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, UnlistenFn } from "@tauri-apps/api/event";
 import Header from "./components/Header";
@@ -72,6 +72,7 @@ export default function App() {
   const [progress, setProgress] = useState<FlashProgress | null>(null);
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [isFlashing, setIsFlashing] = useState(false);
+  const flashRequestActive = useRef(false);
   const [rpiModel, setRpiModel] = useState<RPiModel>("Raspberry Pi 4 (64-bit)");
 
   // Custom visual tab states
@@ -122,13 +123,14 @@ export default function App() {
   };
 
   const handleFlashClick = () => {
-    if (!image || !device) return;
+    if (!image || !device || isFlashing || flashRequestActive.current) return;
     setShowConfirm(true);
   };
 
   const handleConfirmFlash = async () => {
+    if (!image || !device || flashRequestActive.current) return;
+    flashRequestActive.current = true;
     setShowConfirm(false);
-    if (!image || !device) return;
     setStep("flashing");
     setIsFlashing(true);
     setLogs([]);
@@ -158,11 +160,12 @@ export default function App() {
         }
       }
 
-      setIsFlashing(false);
       setStep("done");
       addLog("¡Proceso completado exitosamente!", "success");
     } catch (err) {
       addLog(`Error: ${err}`, "error");
+    } finally {
+      flashRequestActive.current = false;
       setIsFlashing(false);
     }
   };
@@ -193,7 +196,7 @@ export default function App() {
   };
 
   const isDone = step === "done";
-  const canFlash = image !== null && device !== null;
+  const canFlash = image !== null && device !== null && !isFlashing;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100vh", overflow: "hidden" }}>

@@ -91,6 +91,20 @@ pub fn run() {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if args.contains(&"--configure-device".to_string()) {
+        let result = (|| {
+            let device = get_arg_value(&args, "--device")?;
+            let config_file = get_arg_value(&args, "--config-file")?;
+            services::config_service::run_config_writer_cli(&device, &config_file)
+        })();
+
+        if let Err(error) = result {
+            eprintln!("Fallo durante la configuración elevada: {error}");
+            std::process::exit(1);
+        }
+        std::process::exit(0);
+    }
+
     if args.contains(&"--flash-raw".to_string()) {
         let rt = tokio::runtime::Runtime::new().unwrap();
         if let Err(e) = rt.block_on(async {

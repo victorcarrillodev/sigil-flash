@@ -352,16 +352,11 @@ impl FlasherEngineService {
         self.run_engine(&refs, params.dry_run).await
     }
 
-    /// Run `flasher-rs apply --dry-run` with the given parameters.
-    ///
-    /// `--dry-run` is **unconditionally added** regardless of what the caller
-    /// sets in `params.dry_run`; real writes are not supported in Phase 2.
+    /// Allows real writes if `params.dry_run` is false.
     pub async fn apply(&self, params: &EngineParams) -> AppResult<EngineResult> {
-        let mut forced = params.clone();
-        forced.dry_run = true; // safety: always override
-        let argv = build_argv("apply", &forced)?;
+        let argv = build_argv("apply", params)?;
         let refs: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
-        self.run_engine(&refs, true).await
+        self.run_engine(&refs, params.dry_run).await
     }
 
     // ── Payload generation ─────────────────────────────────────────────────────
@@ -450,12 +445,7 @@ fn build_argv(command: &str, params: &EngineParams) -> AppResult<Vec<String>> {
         reject_shell_injection("target_device", t)?;
     }
 
-    // Safety: when apply, enforce dry-run
-    let effective_dry_run = if command == "apply" {
-        true
-    } else {
-        params.dry_run
-    };
+    let effective_dry_run = params.dry_run;
 
     let mut argv: Vec<String> = vec![command.to_string()];
 
@@ -964,13 +954,12 @@ mod tests {
     }
 
     #[test]
-    fn test_build_argv_apply_always_adds_dry_run() {
-        let params = minimal_params(false); // caller says false
+    fn test_build_argv_apply_without_dry_run_allows_real_write() {
+        let params = minimal_params(false);
         let argv = build_argv("apply", &params).expect("argv");
-        // apply must ALWAYS include --dry-run regardless of params.dry_run
         assert!(
-            argv.contains(&"--dry-run".to_string()),
-            "apply must always include --dry-run, got: {:?}",
+            !argv.contains(&"--dry-run".to_string()),
+            "real apply must omit --dry-run, got: {:?}",
             argv
         );
     }
@@ -1095,18 +1084,13 @@ mod tests {
         assert!(build_argv("validate", &params).is_err());
     }
 
-    // ── Non-dry-run prevention ────────────────────────────────────────────────
+    // ── Apply mode selection ──────────────────────────────────────────────────
 
     #[test]
-    fn test_apply_without_dry_run_flag_still_adds_dry_run() {
-        let params = minimal_params(false);
+    fn test_apply_with_dry_run_flag_preserves_dry_run() {
+        let params = minimal_params(true);
         let argv = build_argv("apply", &params).expect("argv");
         assert!(argv.contains(&"--dry-run".to_string()));
-        // Must NOT emit any argv without --dry-run for `apply`
-        assert!(
-            argv.contains(&"--dry-run".to_string()),
-            "apply invariant violated"
-        );
     }
 
     #[test]

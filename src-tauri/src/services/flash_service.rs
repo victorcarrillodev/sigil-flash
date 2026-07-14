@@ -1,8 +1,9 @@
 use crate::errors::{AppError, AppResult};
 use crate::models::FlashProgress;
+use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter};
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -11,12 +12,15 @@ use tokio::sync::Mutex;
 pub struct FlashService {
     // Stores the active child process spawn handle for cancellation
     active_process: Arc<Mutex<Option<tokio::process::Child>>>,
+    // Serializes flash requests inside this application process.
+    operation_lock: Arc<Mutex<()>>,
 }
 
 impl FlashService {
     pub fn new() -> Self {
         Self {
             active_process: Arc::new(Mutex::new(None)),
+            operation_lock: Arc::new(Mutex::new(())),
         }
     }
 
@@ -27,6 +31,13 @@ impl FlashService {
         device_path: &str,
         app: AppHandle,
     ) -> AppResult<()> {
+        let _operation_guard = self.operation_lock.try_lock().map_err(|_| {
+            AppError::Flash(
+                "Ya hay un flasheo en curso. Espera a que termine antes de iniciar otro."
+                    .to_string(),
+            )
+        })?;
+
         let image_p = PathBuf::from(image_path);
         let device_p = PathBuf::from(device_path);
 
@@ -37,10 +48,7 @@ impl FlashService {
         }
 
         // 1. Establish progress monitoring file in temp directory
-        let progress_file = std::env::temp_dir().join("sigil-flash-progress.json");
-        if progress_file.exists() {
-            let _ = std::fs::remove_file(&progress_file);
-        }
+        let progress_file = unique_progress_path();
 
         // Initialize progress state
         let image_size = std::fs::metadata(&image_p)?.len();
@@ -237,6 +245,108 @@ async fn spawn_elevated_process(
     }
 }
 
+fn unique_progress_path() -> PathBuf {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos());
+
+    std::env::temp_dir().join(format!(
+        "sigil-flash-progress-{}-{nonce}.json",
+        std::process::id()
+    ))
+}
+
+/// Prevents independent application instances from writing the same device.
+///
+/// The elevated writer owns this lock for the complete write and post-install
+/// sequence. A PID left behind by a crashed process is reclaimed on the next
+/// attempt.
+#[derive(Debug)]
+struct DeviceWriteLock {
+    path: PathBuf,
+    owner_pid: u32,
+}
+
+impl DeviceWriteLock {
+    fn acquire(device: &str) -> AppResult<Self> {
+        Self::acquire_in(Path::new("/run/lock"), device)
+    }
+
+    fn acquire_in(lock_dir: &Path, device: &str) -> AppResult<Self> {
+        let device_name = Path::new(device)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| {
+                !name.is_empty()
+                    && name.chars().all(|character| {
+                        character.is_ascii_alphanumeric() || "._-".contains(character)
+                    })
+            })
+            .ok_or_else(|| {
+                AppError::Validation(format!(
+                    "Nombre de dispositivo no válido para bloqueo: {device}"
+                ))
+            })?;
+
+        std::fs::create_dir_all(lock_dir)?;
+        let lock_path = lock_dir.join(format!("sigil-flash-{device_name}.lock"));
+        let owner_pid = std::process::id();
+
+        for _ in 0..2 {
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&lock_path)
+            {
+                Ok(mut file) => {
+                    writeln!(file, "{owner_pid}")?;
+                    file.sync_all()?;
+                    return Ok(Self {
+                        path: lock_path,
+                        owner_pid,
+                    });
+                }
+                Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+                    let existing_pid = std::fs::read_to_string(&lock_path)
+                        .ok()
+                        .and_then(|contents| contents.trim().parse::<u32>().ok());
+
+                    if existing_pid.is_some_and(|pid| Path::new(&format!("/proc/{pid}")).exists()) {
+                        return Err(AppError::Flash(format!(
+                            "Ya hay otro proceso escribiendo {device}. Espera a que termine."
+                        )));
+                    }
+
+                    std::fs::remove_file(&lock_path).map_err(|remove_error| {
+                        AppError::Flash(format!(
+                            "No se pudo recuperar el bloqueo de {device}: {remove_error}"
+                        ))
+                    })?;
+                }
+                Err(error) => {
+                    return Err(AppError::Flash(format!(
+                        "No se pudo bloquear {device} para escritura exclusiva: {error}"
+                    )));
+                }
+            }
+        }
+
+        Err(AppError::Flash(format!(
+            "No se pudo obtener el bloqueo exclusivo de {device}."
+        )))
+    }
+}
+
+impl Drop for DeviceWriteLock {
+    fn drop(&mut self) {
+        let still_owned = std::fs::read_to_string(&self.path)
+            .is_ok_and(|contents| contents.trim() == self.owner_pid.to_string());
+        if still_owned {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
 /// Raw block-by-block image copier executing under administrative rights.
 /// Periodically saves status to the progress file.
 pub async fn run_raw_flash_cli(src: &str, dest: &str, progress_file: &str) -> AppResult<()> {
@@ -256,6 +366,7 @@ pub async fn run_raw_flash_cli(src: &str, dest: &str, progress_file: &str) -> Ap
     let src_path = PathBuf::from(src);
     let dest_path = PathBuf::from(dest);
     let prog_path = PathBuf::from(progress_file);
+    let _device_lock = DeviceWriteLock::acquire(dest)?;
 
     let total_bytes = if src.to_lowercase().ends_with(".xz") {
         get_xz_uncompressed_size(src)?
@@ -265,13 +376,19 @@ pub async fn run_raw_flash_cli(src: &str, dest: &str, progress_file: &str) -> Ap
     };
 
     let mut xz_child = None;
-    let mut src_file: std::pin::Pin<Box<dyn tokio::io::AsyncRead + Send>> = if src.to_lowercase().ends_with(".xz") {
+    let mut src_file: std::pin::Pin<Box<dyn tokio::io::AsyncRead + Send>> = if src
+        .to_lowercase()
+        .ends_with(".xz")
+    {
         let mut child = tokio::process::Command::new("xz")
             .args(["-d", "-c", src])
             .stdout(std::process::Stdio::piped())
             .spawn()
             .map_err(|e| AppError::Flash(format!("No se pudo iniciar descompresión xz: {}", e)))?;
-        let stdout = child.stdout.take().ok_or_else(|| AppError::Flash("No se pudo obtener la salida de xz".to_string()))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| AppError::Flash("No se pudo obtener la salida de xz".to_string()))?;
         xz_child = Some(child);
         Box::pin(stdout)
     } else {
@@ -326,9 +443,22 @@ pub async fn run_raw_flash_cli(src: &str, dest: &str, progress_file: &str) -> Ap
 
     // Force synchronization of buffers to physical platter
     dest_file.sync_all().await?;
+    drop(dest_file);
 
     if let Some(mut child) = xz_child {
-        let _ = child.wait().await;
+        let status = child.wait().await.map_err(AppError::Io)?;
+        if !status.success() {
+            return Err(AppError::Flash(
+                "La descompresión xz terminó con errores.".to_string(),
+            ));
+        }
+    }
+
+    if bytes_written != total_bytes {
+        return Err(AppError::Flash(format!(
+            "La imagen quedó incompleta: se escribieron {} de {} bytes.",
+            bytes_written, total_bytes
+        )));
     }
 
     // Report post-install status
@@ -388,7 +518,10 @@ fn get_parent_disk(path: &str) -> String {
                 return path[..pos].to_string();
             }
         }
-    } else if path.starts_with("/dev/sd") || path.starts_with("/dev/hd") || path.starts_with("/dev/vd") {
+    } else if path.starts_with("/dev/sd")
+        || path.starts_with("/dev/hd")
+        || path.starts_with("/dev/vd")
+    {
         let parent = path.trim_end_matches(|c: char| c.is_ascii_digit());
         return parent.to_string();
     } else if path.starts_with("/dev/mmcblk") {
@@ -404,7 +537,7 @@ fn get_parent_disk(path: &str) -> String {
 #[cfg(unix)]
 fn get_system_disks() -> Vec<String> {
     let mut disks = Vec::new();
-    
+
     #[cfg(target_os = "linux")]
     {
         if let Ok(content) = std::fs::read_to_string("/proc/mounts") {
@@ -438,11 +571,11 @@ fn get_system_disks() -> Vec<String> {
             }
         }
     }
-    
+
     if disks.is_empty() {
         disks.push("/dev/nvme0n1".to_string());
     }
-    
+
     disks
 }
 
@@ -457,7 +590,9 @@ pub fn get_xz_uncompressed_size(path: &str) -> AppResult<u64> {
         .map_err(|e| AppError::Flash(format!("No se pudo ejecutar xz: {}", e)))?;
 
     if !output.status.success() {
-        return Err(AppError::Flash(String::from_utf8_lossy(&output.stderr).to_string()));
+        return Err(AppError::Flash(
+            String::from_utf8_lossy(&output.stderr).to_string(),
+        ));
     }
 
     let stdout_str = String::from_utf8_lossy(&output.stdout);
@@ -470,7 +605,9 @@ pub fn get_xz_uncompressed_size(path: &str) -> AppResult<u64> {
         }
     }
 
-    Err(AppError::Flash("No se pudo obtener el tamaño descomprimido del archivo xz.".to_string()))
+    Err(AppError::Flash(
+        "No se pudo obtener el tamaño descomprimido del archivo xz.".to_string(),
+    ))
 }
 
 fn install_sigil_hardware(device: &str) -> AppResult<()> {
@@ -484,31 +621,45 @@ fn install_sigil_hardware(device: &str) -> AppResult<()> {
     let _ = std::process::Command::new("partprobe").arg(device).status();
     std::thread::sleep(std::time::Duration::from_millis(1000));
 
-    let mount_dir = "/tmp/sigil-rootfs";
-    let _ = std::fs::create_dir_all(mount_dir);
+    let mount_dir = std::env::temp_dir().join(format!("sigil-rootfs-{}", std::process::id()));
+    std::fs::create_dir_all(&mount_dir)?;
 
     // Intentar desmontar por si acaso quedó colgado de una ejecución anterior
-    let _ = std::process::Command::new("umount").arg(mount_dir).status();
-
-    println!("Montando partición raíz {} en {}...", part2, mount_dir);
-    let mut mount_status = std::process::Command::new("mount")
-        .args(&[&part2, mount_dir])
+    let _ = std::process::Command::new("umount")
+        .arg(&mount_dir)
         .status();
 
-    // Reintentar hasta 3 veces por si el kernel tarda en registrar las particiones tras el flasheo de bloques raw
-    for i in 1..=3 {
-        if mount_status.is_ok() && mount_status.as_ref().unwrap().success() {
+    println!(
+        "Montando partición raíz {} en {}...",
+        part2,
+        mount_dir.display()
+    );
+    let mut mount_status = std::process::Command::new("mount")
+        .arg(&part2)
+        .arg(&mount_dir)
+        .status();
+
+    // Reintentar hasta 10 veces (20 segundos) por si el kernel tarda en registrar las particiones
+    for i in 1..=10 {
+        if mount_status.as_ref().is_ok_and(|status| status.success()) {
             break;
         }
-        println!("Intento {} de montaje falló o demoró. Esperando y reintentando...", i);
+        println!(
+            "Intento {} de montaje falló o demoró. Esperando y reintentando...",
+            i
+        );
         std::thread::sleep(std::time::Duration::from_millis(2000));
+        let _ = std::process::Command::new("sync").status();
         let _ = std::process::Command::new("partprobe").arg(device).status();
+        std::thread::sleep(std::time::Duration::from_millis(1000));
         mount_status = std::process::Command::new("mount")
-            .args(&[&part2, mount_dir])
+            .arg(&part2)
+            .arg(&mount_dir)
             .status();
     }
 
-    if mount_status.is_err() || !mount_status.unwrap().success() {
+    if !mount_status.is_ok_and(|status| status.success()) {
+        let _ = std::fs::remove_dir(&mount_dir);
         return Err(AppError::Flash(format!(
             "No se pudo montar la partición raíz {}. Verifica que la imagen se haya grabado correctamente y contenga particiones ext4.",
             part2
@@ -516,20 +667,30 @@ fn install_sigil_hardware(device: &str) -> AppResult<()> {
     }
 
     println!("Copiando repositorio sigil-hardware a la microSD...");
-    let opt_dir = format!("{}/opt", mount_dir);
+    let opt_dir = mount_dir.join("opt");
     let _ = std::fs::create_dir_all(&opt_dir);
 
+    let workspace_hw_path =
+        PathBuf::from("/home/ubuntu/Desktop/sigil-OS/sigil-flash/sigil-hardware");
+
     let copy_status = std::process::Command::new("cp")
-        .args(&["-r", "/home/dev-pro/Escritorio/sigil-flash/sigil-hardware", &opt_dir])
+        .arg("-r")
+        .arg(&workspace_hw_path)
+        .arg(&opt_dir)
         .status();
 
-    if copy_status.is_err() || !copy_status.unwrap().success() {
-        let _ = std::process::Command::new("umount").arg(mount_dir).status();
-        return Err(AppError::Flash("Error al copiar los archivos de sigil-hardware a la partición raíz.".to_string()));
+    if !copy_status.is_ok_and(|status| status.success()) {
+        let _ = std::process::Command::new("umount")
+            .arg(&mount_dir)
+            .status();
+        let _ = std::fs::remove_dir(&mount_dir);
+        return Err(AppError::Flash(
+            "Error al copiar los archivos de sigil-hardware a la partición raíz.".to_string(),
+        ));
     }
 
     println!("Configurando el script de primer arranque (firstboot.sh)...");
-    let firstboot_path = format!("{}/usr/local/bin/sigil-firstboot.sh", mount_dir);
+    let firstboot_path = mount_dir.join("usr/local/bin/sigil-firstboot.sh");
     let firstboot_content = r#"#!/bin/bash
 exec > /var/log/sigil-firstboot.log 2>&1
 echo "=== Iniciando instalación de Sigil-Hardware en primer arranque ==="
@@ -558,19 +719,26 @@ reboot
 "#;
 
     if let Err(e) = std::fs::write(&firstboot_path, firstboot_content) {
-        let _ = std::process::Command::new("umount").arg(mount_dir).status();
-        return Err(AppError::Flash(format!("No se pudo escribir el script de primer arranque: {}", e)));
+        let _ = std::process::Command::new("umount")
+            .arg(&mount_dir)
+            .status();
+        let _ = std::fs::remove_dir(&mount_dir);
+        return Err(AppError::Flash(format!(
+            "No se pudo escribir el script de primer arranque: {}",
+            e
+        )));
     }
 
     let _ = std::process::Command::new("chmod")
-        .args(&["+x", &firstboot_path])
+        .arg("+x")
+        .arg(&firstboot_path)
         .status();
 
     println!("Configurando rc.local para la ejecución en el primer encendido...");
-    let rc_local_path = format!("{}/etc/rc.local", mount_dir);
-    let rc_local_orig = format!("{}/etc/rc.local.orig", mount_dir);
+    let rc_local_path = mount_dir.join("etc/rc.local");
+    let rc_local_orig = mount_dir.join("etc/rc.local.orig");
 
-    if std::path::Path::new(&rc_local_path).exists() {
+    if rc_local_path.exists() {
         let _ = std::fs::copy(&rc_local_path, &rc_local_orig);
     }
 
@@ -580,24 +748,88 @@ exit 0
 "#;
 
     if let Err(e) = std::fs::write(&rc_local_path, rc_local_content) {
-        let _ = std::process::Command::new("umount").arg(mount_dir).status();
-        return Err(AppError::Flash(format!("No se pudo configurar /etc/rc.local: {}", e)));
+        let _ = std::process::Command::new("umount")
+            .arg(&mount_dir)
+            .status();
+        let _ = std::fs::remove_dir(&mount_dir);
+        return Err(AppError::Flash(format!(
+            "No se pudo configurar /etc/rc.local: {}",
+            e
+        )));
     }
 
     let _ = std::process::Command::new("chmod")
-        .args(&["+x", &rc_local_path])
+        .arg("+x")
+        .arg(&rc_local_path)
         .status();
 
     println!("Desmontando partición raíz...");
     let umount_status = std::process::Command::new("umount")
-        .arg(mount_dir)
+        .arg(&mount_dir)
         .status();
 
-    if umount_status.is_err() || !umount_status.unwrap().success() {
-        return Err(AppError::Flash("Fallo al desmontar la partición de la microSD de manera segura.".to_string()));
+    if !umount_status.is_ok_and(|status| status.success()) {
+        return Err(AppError::Flash(
+            "Fallo al desmontar la partición de la microSD de manera segura.".to_string(),
+        ));
     }
 
-    let _ = std::fs::remove_dir(mount_dir);
+    let _ = std::fs::remove_dir(&mount_dir);
     println!("Instalación de sigil-hardware en la microSD preparada con éxito.");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn isolated_lock_dir(test_name: &str) -> PathBuf {
+        let path =
+            std::env::temp_dir().join(format!("sigil-flash-{test_name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).expect("create isolated lock directory");
+        path
+    }
+
+    #[test]
+    fn device_write_lock_should_reject_second_writer_for_same_device() {
+        let lock_dir = isolated_lock_dir("reject-second-writer");
+        let _first = DeviceWriteLock::acquire_in(&lock_dir, "/dev/test-card")
+            .expect("first writer should acquire lock");
+
+        let error = DeviceWriteLock::acquire_in(&lock_dir, "/dev/test-card")
+            .expect_err("second writer should be rejected");
+
+        assert!(error
+            .to_string()
+            .contains("Ya hay otro proceso escribiendo"));
+        let _ = std::fs::remove_dir_all(lock_dir);
+    }
+
+    #[test]
+    fn device_write_lock_should_allow_writer_after_previous_lock_is_dropped() {
+        let lock_dir = isolated_lock_dir("allow-after-drop");
+        let first = DeviceWriteLock::acquire_in(&lock_dir, "/dev/test-card")
+            .expect("first writer should acquire lock");
+        drop(first);
+
+        let second = DeviceWriteLock::acquire_in(&lock_dir, "/dev/test-card");
+
+        assert!(second.is_ok(), "lock was not released: {second:?}");
+        drop(second);
+        let _ = std::fs::remove_dir_all(lock_dir);
+    }
+
+    #[test]
+    fn device_write_lock_should_reclaim_stale_pid_file() {
+        let lock_dir = isolated_lock_dir("reclaim-stale-lock");
+        let lock_path = lock_dir.join("sigil-flash-test-card.lock");
+        std::fs::write(&lock_path, u32::MAX.to_string()).expect("write stale lock");
+
+        let lock = DeviceWriteLock::acquire_in(&lock_dir, "/dev/test-card");
+
+        assert!(lock.is_ok(), "stale lock was not reclaimed: {lock:?}");
+        drop(lock);
+        let _ = std::fs::remove_dir_all(lock_dir);
+    }
 }

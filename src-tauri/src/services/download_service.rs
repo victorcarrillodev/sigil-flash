@@ -140,7 +140,7 @@ impl DownloadService {
             // Non-blocking async file write
             file.write_all(&chunk)
                 .await
-                .map_err(|e| AppError::Io(e))?;
+                .map_err(AppError::Io)?;
 
             bytes_written += chunk.len() as u64;
 

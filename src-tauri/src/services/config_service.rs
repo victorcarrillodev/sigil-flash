@@ -1,6 +1,8 @@
-use crate::models::DeviceConfig;
 use crate::errors::{AppResult, AppError};
+use crate::models::DeviceConfig;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub struct ConfigService;
 
@@ -40,73 +42,28 @@ impl ConfigService {
     // ============================================================
     #[cfg(target_os = "linux")]
     async fn write_config_linux(&self, device_path: &str, config: &DeviceConfig) -> AppResult<()> {
-        // Boot is normally the first partition
-        let partition = if device_path.contains("mmcblk") || device_path.contains("loop") {
-            format!("{}p1", device_path)
-        } else {
-            format!("{}1", device_path)
-        };
+        let config_path = write_private_config_file(config)?;
+        let current_exe = std::env::current_exe()?;
 
-        let temp_mount = std::env::temp_dir().join("sigil-boot-mount");
-        std::fs::create_dir_all(&temp_mount)?;
-
-        tracing::info!("Ejecutando mount para la partición: {} en {}", partition, temp_mount.display());
-
-        // Perform mount with elevated root permissions
-        let mount_status = Command::new("pkexec")
-            .args(["mount", &partition, &temp_mount.to_string_lossy()])
+        let status_result = tokio::process::Command::new("pkexec")
+            .arg(current_exe)
+            .arg("--configure-device")
+            .arg("--device")
+            .arg(device_path)
+            .arg("--config-file")
+            .arg(&config_path)
             .status()
-            .map_err(|e| AppError::Config(format!("Fallo al ejecutar pkexec mount: {}", e)))?;
+            .await;
 
-        if !mount_status.success() {
-            return Err(AppError::Config(format!("Error montando la partición de arranque {}", partition)));
-        }
+        let _ = std::fs::remove_file(&config_path);
+        let status = status_result.map_err(|error| {
+            AppError::Config(format!("No se pudo iniciar la configuración elevada: {error}"))
+        })?;
 
-        // Write configuration structure
-        let config_file_path = temp_mount.join("device-config.json");
-        let json_data = serde_json::to_string_pretty(config)?;
-        std::fs::write(&config_file_path, json_data)?;
-        tracing::info!("Archivo device-config.json inyectado exitosamente.");
-
-        // Inyectamos sigil_provision.json para la identidad requerida por el instalador
-        let serial = config.serial_number.as_deref().unwrap_or("SS-UNKNOWN");
-        let provision_json = serde_json::json!({
-            "_schema_version": "1.0",
-            "serial_number": serial,
-            "model": "Sigil-Streamer",
-            "model_version": "v1",
-            "batch": "batch-01",
-            "capabilities": {
-                "i2s_dac": false
-            }
-        });
-        let provision_file_path = temp_mount.join("sigil_provision.json");
-        let provision_data = serde_json::to_string_pretty(&provision_json)?;
-        std::fs::write(&provision_file_path, provision_data)?;
-        tracing::info!("Archivo sigil_provision.json inyectado exitosamente.");
-
-        // If SSH is enabled, create empty trigger file
-        if config.ssh_enabled {
-            let ssh_file_path = temp_mount.join("ssh");
-            std::fs::write(ssh_file_path, "")?;
-            tracing::info!("Habilitador de SSH inyectado.");
-        }
-
-        // Apply hardware/model optimizations
-        if let Err(e) = apply_model_optimizations(&temp_mount, config.rpi_model.as_deref()) {
-            tracing::error!("Error al aplicar optimizaciones de modelo: {}", e);
-        }
-
-        // Safely unmount volume
-        let umount_status = Command::new("pkexec")
-            .args(["umount", &temp_mount.to_string_lossy()])
-            .status()
-            .map_err(|e| AppError::Config(format!("Fallo al ejecutar pkexec umount: {}", e)))?;
-
-        let _ = std::fs::remove_dir(&temp_mount);
-
-        if !umount_status.success() {
-            return Err(AppError::Config("Fallo al desmontar volumen BOOT de forma limpia".to_string()));
+        if !status.success() {
+            return Err(AppError::Config(
+                "El proceso elevado no pudo inyectar la configuración en BOOT.".to_string(),
+            ));
         }
 
         Ok(())
@@ -256,6 +213,139 @@ impl ConfigService {
     }
 }
 
+/// Entry point used by the elevated helper process on Linux.
+pub fn run_config_writer_cli(device_path: &str, config_file: &str) -> AppResult<()> {
+    #[cfg(target_os = "linux")]
+    {
+        let json = std::fs::read_to_string(config_file).map_err(|error| {
+            AppError::Config(format!("No se pudo leer la configuración temporal: {error}"))
+        })?;
+        let config: DeviceConfig = serde_json::from_str(&json)?;
+        write_config_linux_privileged(device_path, &config)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (device_path, config_file);
+        Err(AppError::Config(
+            "El escritor elevado de configuración solo está disponible en Linux.".to_string(),
+        ))
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn write_private_config_file(config: &DeviceConfig) -> AppResult<PathBuf> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos());
+    let path = std::env::temp_dir().join(format!(
+        "sigil-device-config-{}-{nonce}.json",
+        std::process::id()
+    ));
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)?;
+
+    if let Err(error) = serde_json::to_writer_pretty(&file, config) {
+        let _ = std::fs::remove_file(&path);
+        return Err(error.into());
+    }
+    file.sync_all()?;
+    Ok(path)
+}
+
+#[cfg(target_os = "linux")]
+fn linux_boot_partition(device_path: &str) -> String {
+    if device_path.contains("mmcblk")
+        || device_path.contains("nvme")
+        || device_path.contains("loop")
+    {
+        format!("{device_path}p1")
+    } else {
+        format!("{device_path}1")
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn write_config_linux_privileged(
+    device_path: &str,
+    config: &DeviceConfig,
+) -> AppResult<()> {
+    let partition = linux_boot_partition(device_path);
+    let temp_mount = std::env::temp_dir().join(format!(
+        "sigil-boot-mount-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&temp_mount)?;
+
+    tracing::info!(
+        "Montando partición BOOT {} en {}",
+        partition,
+        temp_mount.display()
+    );
+    let mount_status = Command::new("mount")
+        .arg(&partition)
+        .arg(&temp_mount)
+        .status()
+        .map_err(|error| AppError::Config(format!("No se pudo ejecutar mount: {error}")))?;
+
+    if !mount_status.success() {
+        let _ = std::fs::remove_dir(&temp_mount);
+        return Err(AppError::Config(format!(
+            "No se pudo montar la partición de arranque {partition}."
+        )));
+    }
+
+    let write_result = write_linux_boot_files(&temp_mount, config);
+    let umount_result = Command::new("umount")
+        .arg(&temp_mount)
+        .status()
+        .map_err(|error| AppError::Config(format!("No se pudo ejecutar umount: {error}")));
+    let _ = std::fs::remove_dir(&temp_mount);
+
+    write_result?;
+    if !umount_result?.success() {
+        return Err(AppError::Config(
+            "Fallo al desmontar volumen BOOT de forma limpia.".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn write_linux_boot_files(boot_path: &Path, config: &DeviceConfig) -> AppResult<()> {
+    let json_data = serde_json::to_string_pretty(config)?;
+    std::fs::write(boot_path.join("device-config.json"), json_data)?;
+
+    let serial = config.serial_number.as_deref().unwrap_or("SS-UNKNOWN");
+    let provision_json = serde_json::json!({
+        "_schema_version": "1.0",
+        "serial_number": serial,
+        "model": "Sigil-Streamer",
+        "model_version": "v1",
+        "batch": "batch-01",
+        "capabilities": {
+            "i2s_dac": false
+        }
+    });
+    std::fs::write(
+        boot_path.join("sigil_provision.json"),
+        serde_json::to_string_pretty(&provision_json)?,
+    )?;
+
+    if config.ssh_enabled {
+        std::fs::write(boot_path.join("ssh"), "")?;
+    }
+
+    apply_model_optimizations(boot_path, config.rpi_model.as_deref())?;
+    Ok(())
+}
+
 // ============================================================
 // HELPERS FOR MODEL OPTIMIZATIONS
 // ============================================================
@@ -311,4 +401,84 @@ fn apply_model_optimizations(boot_path: &std::path::Path, rpi_model: Option<&str
     }
 
     Ok(())
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+
+    fn sample_config() -> DeviceConfig {
+        DeviceConfig {
+            hostname: "sigil-test".to_string(),
+            username: "sigil".to_string(),
+            password: None,
+            wifi_ssid: Some("Test WiFi".to_string()),
+            wifi_password: Some("test-password".to_string()),
+            ssh_enabled: true,
+            rpi_model: Some("Raspberry Pi 4 (64-bit)".to_string()),
+            serial_number: Some("SS-TEST-001".to_string()),
+        }
+    }
+
+    fn isolated_boot_dir(test_name: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "sigil-config-{test_name}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).expect("create isolated boot directory");
+        path
+    }
+
+    #[test]
+    fn linux_boot_partition_should_use_numeric_suffix_for_sd_device() {
+        assert_eq!(linux_boot_partition("/dev/sdc"), "/dev/sdc1");
+    }
+
+    #[test]
+    fn linux_boot_partition_should_use_p_suffix_for_mmc_device() {
+        assert_eq!(linux_boot_partition("/dev/mmcblk0"), "/dev/mmcblk0p1");
+    }
+
+    #[test]
+    fn linux_boot_partition_should_use_p_suffix_for_nvme_device() {
+        assert_eq!(linux_boot_partition("/dev/nvme1n1"), "/dev/nvme1n1p1");
+    }
+
+    #[test]
+    fn write_linux_boot_files_should_serialize_device_config() {
+        let boot_dir = isolated_boot_dir("device-config");
+
+        write_linux_boot_files(&boot_dir, &sample_config()).expect("write boot files");
+        let written: DeviceConfig = serde_json::from_str(
+            &std::fs::read_to_string(boot_dir.join("device-config.json"))
+                .expect("read device config"),
+        )
+        .expect("parse device config");
+
+        assert_eq!(written.hostname, "sigil-test");
+        let _ = std::fs::remove_dir_all(boot_dir);
+    }
+
+    #[test]
+    fn write_linux_boot_files_should_create_ssh_trigger_when_enabled() {
+        let boot_dir = isolated_boot_dir("ssh-trigger");
+
+        write_linux_boot_files(&boot_dir, &sample_config()).expect("write boot files");
+
+        assert!(boot_dir.join("ssh").is_file());
+        let _ = std::fs::remove_dir_all(boot_dir);
+    }
+
+    #[test]
+    fn write_linux_boot_files_should_include_provision_serial_number() {
+        let boot_dir = isolated_boot_dir("provision-serial");
+
+        write_linux_boot_files(&boot_dir, &sample_config()).expect("write boot files");
+        let provision = std::fs::read_to_string(boot_dir.join("sigil_provision.json"))
+            .expect("read provision file");
+
+        assert!(provision.contains("SS-TEST-001"));
+        let _ = std::fs::remove_dir_all(boot_dir);
+    }
 }

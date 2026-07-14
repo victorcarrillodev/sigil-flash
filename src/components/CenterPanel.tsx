@@ -343,7 +343,7 @@ function DonutGauge({
 }
 
 export default function CenterPanel({
-  image, device, rpiModel, progress, logs, isFlashing, isDone, onFlash, onCancel, onReset,
+  image, device, rpiModel, progress, logs, isFlashing, isDone, canFlash, onFlash, onCancel, onReset,
   activeTab, setActiveTab,
   sshEnabled, setSshEnabled,
   username, setUsername,
@@ -873,12 +873,12 @@ export default function CenterPanel({
               {/* Flash button — wide green pill (themed via .btn-flash) */}
               <button
                 type="button"
-                disabled={true}
+                disabled={!canFlash || isFlashing}
                 onClick={onFlash}
                 className="btn-flash"
-                title="La escritura real está deshabilitada hasta que el motor la soporte. Usa la pestaña Motor SIGIL para el dry-run."
+                title={canFlash ? "Escribir imagen a la tarjeta SD" : "Selecciona una imagen y un dispositivo"}
               >
-                ⚡ Iniciar Escritura (Deshabilitado)
+                ⚡ Iniciar Escritura
               </button>
 
             </div>

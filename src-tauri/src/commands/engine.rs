@@ -56,16 +56,13 @@ pub async fn engine_validate(
     svc.validate(&params).await
 }
 
-/// Run `flasher-rs apply --dry-run` (always dry-run; unconditionally enforced).
-///
-/// Returns an error if the caller tries to omit --dry-run in the params, which
-/// is an additional documentation-level guard — the service already overrides it.
+/// Run `flasher-rs apply`, honoring the requested dry-run mode.
 #[tauri::command]
 pub async fn engine_apply(
     params: EngineParams,
     svc: State<'_, FlasherEngineService>,
 ) -> AppResult<EngineResult> {
-    tracing::info!("engine_apply invoked (dry-run enforced)");
+    tracing::info!(dry_run = params.dry_run, "engine_apply invoked");
     svc.apply(&params).await
 }
 
