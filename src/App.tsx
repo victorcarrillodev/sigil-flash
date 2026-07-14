@@ -75,7 +75,7 @@ export default function App() {
   const [rpiModel, setRpiModel] = useState<RPiModel>("Raspberry Pi 4 (64-bit)");
 
   // Custom visual tab states
-  const [activeTab, setActiveTab] = useState<"vista-previa" | "ssh" | "historial">("vista-previa");
+  const [activeTab, setActiveTab] = useState<"vista-previa" | "ssh" | "historial" | "motor">("vista-previa");
 
   // Custom OS configuration states
   const [sshEnabled, setSshEnabled] = useState(true);

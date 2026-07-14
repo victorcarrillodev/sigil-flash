@@ -1,16 +1,17 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod commands;
 mod errors;
 mod logging;
 mod models;
 mod services;
-mod commands;
 
+use services::config_service::ConfigService;
 use services::disk_service::DiskService;
 use services::download_service::DownloadService;
+use services::engine_service::FlasherEngineService;
 use services::flash_service::FlashService;
-use services::config_service::ConfigService;
 use services::verification_service::VerificationService;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -20,7 +21,10 @@ pub fn run() {
     let _log_guard = match logging::init_logging() {
         Ok(guard) => guard,
         Err(e) => {
-            eprintln!("Fallo crítico de arranque. No se pudieron iniciar los logs: {}", e);
+            eprintln!(
+                "Fallo crítico de arranque. No se pudieron iniciar los logs: {}",
+                e
+            );
             std::process::exit(1);
         }
     };
@@ -34,6 +38,21 @@ pub fn run() {
     let config_service = ConfigService::new();
     let verification_service = VerificationService::new();
 
+    // 2b. Instantiate flasher-rs engine adapter
+    let engine_service = match FlasherEngineService::new() {
+        Ok(svc) => {
+            tracing::info!("FlasherEngineService ready: {}", svc.engine_bin().display());
+            svc
+        }
+        Err(e) => {
+            tracing::error!("FlasherEngineService init failed: {e}");
+            // Non-fatal: the UI will surface the error when engine commands are invoked.
+            // We still need a value; create one that will fail on first use.
+            // unwrap_or_else with a dummy path handled via AppError::Validation later.
+            FlasherEngineService::new_unchecked()
+        }
+    };
+
     // 3. Start Tauri runtime and register commands/services
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -43,6 +62,7 @@ pub fn run() {
         .manage(flash_service)
         .manage(config_service)
         .manage(verification_service)
+        .manage(engine_service)
         .invoke_handler(tauri::generate_handler![
             commands::disks::list_devices,
             commands::flash::get_image_info,
@@ -52,7 +72,17 @@ pub fn run() {
             commands::downloads::cancel_download,
             commands::downloads::verify_image,
             commands::config::save_device_config,
-            commands::flash::get_hardware_size,
+            // flasher-rs engine adapter commands
+            commands::engine::engine_status,
+            commands::engine::engine_plan,
+            commands::engine::engine_validate,
+            commands::engine::engine_apply,
+            commands::engine::engine_build_payload,
+            commands::engine::engine_binary_path,
+            commands::engine::engine_write_provision,
+            commands::engine::engine_default_secrets_path,
+            commands::engine::engine_generate_panel_pin,
+            commands::engine::engine_write_secrets,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -78,9 +108,13 @@ fn main() {
 }
 
 fn get_arg_value(args: &[String], flag: &str) -> Result<String, crate::errors::AppError> {
-    let pos = args.iter().position(|a| a == flag)
-        .ok_or_else(|| crate::errors::AppError::Validation(format!("Parámetro requerido faltante: {}", flag)))?;
-    args.get(pos + 1)
-        .cloned()
-        .ok_or_else(|| crate::errors::AppError::Validation(format!("Valor requerido faltante para parámetro: {}", flag)))
+    let pos = args.iter().position(|a| a == flag).ok_or_else(|| {
+        crate::errors::AppError::Validation(format!("Parámetro requerido faltante: {}", flag))
+    })?;
+    args.get(pos + 1).cloned().ok_or_else(|| {
+        crate::errors::AppError::Validation(format!(
+            "Valor requerido faltante para parámetro: {}",
+            flag
+        ))
+    })
 }

@@ -1,11 +1,11 @@
-use crate::errors::{AppResult, AppError};
+use crate::errors::{AppError, AppResult};
 use crate::models::FlashProgress;
+use sha2::{Digest, Sha256};
 use std::path::Path;
-use sha2::{Sha256, Digest};
+use std::time::Instant;
+use tauri::{AppHandle, Emitter};
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
-use tauri::{AppHandle, Emitter};
-use std::time::Instant;
 
 pub struct VerificationService;
 
@@ -22,11 +22,12 @@ impl VerificationService {
         expected_hash: Option<&str>,
         app: AppHandle,
     ) -> AppResult<String> {
-        tracing::info!("Iniciando verificación SHA-256 para el archivo: {}", file_path.display());
+        tracing::info!(
+            "Iniciando verificación SHA-256 para el archivo: {}",
+            file_path.display()
+        );
 
-        let mut file = File::open(file_path)
-            .await
-            .map_err(|e| AppError::Io(e))?;
+        let mut file = File::open(file_path).await.map_err(AppError::Io)?;
 
         let metadata = file.metadata().await?;
         let total_bytes = metadata.len();
@@ -39,19 +40,20 @@ impl VerificationService {
         let mut last_emit = Instant::now();
 
         // Emit initial verification event
-        let _ = app.emit("download-progress", FlashProgress {
-            bytes_written: 0,
-            total_bytes,
-            speed_mbps: 0.0,
-            eta_seconds: 0.0,
-            status: "verifying".to_string(),
-            message: "Iniciando cálculo de integridad SHA-256...".to_string(),
-        });
+        let _ = app.emit(
+            "download-progress",
+            FlashProgress {
+                bytes_written: 0,
+                total_bytes,
+                speed_mbps: 0.0,
+                eta_seconds: 0.0,
+                status: "verifying".to_string(),
+                message: "Iniciando cálculo de integridad SHA-256...".to_string(),
+            },
+        );
 
         loop {
-            let len = file.read(&mut buffer)
-                .await
-                .map_err(|e| AppError::Io(e))?;
+            let len = file.read(&mut buffer).await.map_err(AppError::Io)?;
 
             if len == 0 {
                 break;
@@ -77,14 +79,17 @@ impl VerificationService {
                 };
 
                 let pct = (bytes_read as f64 / total_bytes as f64) * 100.0;
-                let _ = app.emit("download-progress", FlashProgress {
-                    bytes_written: bytes_read,
-                    total_bytes,
-                    speed_mbps: speed,
-                    eta_seconds: eta,
-                    status: "verifying".to_string(),
-                    message: format!("Verificando integridad... ({:.1}%)", pct),
-                });
+                let _ = app.emit(
+                    "download-progress",
+                    FlashProgress {
+                        bytes_written: bytes_read,
+                        total_bytes,
+                        speed_mbps: speed,
+                        eta_seconds: eta,
+                        status: "verifying".to_string(),
+                        message: format!("Verificando integridad... ({:.1}%)", pct),
+                    },
+                );
                 last_emit = now;
             }
         }
@@ -94,41 +99,50 @@ impl VerificationService {
 
         if let Some(expected) = expected_hash {
             if hash_result.eq_ignore_ascii_case(expected.trim()) {
-                let _ = app.emit("download-progress", FlashProgress {
-                    bytes_written: total_bytes,
-                    total_bytes,
-                    speed_mbps: 0.0,
-                    eta_seconds: 0.0,
-                    status: "done".to_string(),
-                    message: "Verificación de firma SHA-256 exitosa.".to_string(),
-                });
+                let _ = app.emit(
+                    "download-progress",
+                    FlashProgress {
+                        bytes_written: total_bytes,
+                        total_bytes,
+                        speed_mbps: 0.0,
+                        eta_seconds: 0.0,
+                        status: "done".to_string(),
+                        message: "Verificación de firma SHA-256 exitosa.".to_string(),
+                    },
+                );
                 Ok(hash_result)
             } else {
-                let _ = app.emit("download-progress", FlashProgress {
-                    bytes_written: bytes_read,
-                    total_bytes,
-                    speed_mbps: 0.0,
-                    eta_seconds: 0.0,
-                    status: "error".to_string(),
-                    message: format!(
-                        "La firma SHA-256 no coincide. Esperada: {}, Calculada: {}",
-                        expected, hash_result
-                    ),
-                });
+                let _ = app.emit(
+                    "download-progress",
+                    FlashProgress {
+                        bytes_written: bytes_read,
+                        total_bytes,
+                        speed_mbps: 0.0,
+                        eta_seconds: 0.0,
+                        status: "error".to_string(),
+                        message: format!(
+                            "La firma SHA-256 no coincide. Esperada: {}, Calculada: {}",
+                            expected, hash_result
+                        ),
+                    },
+                );
                 Err(AppError::Validation(format!(
                     "Integridad comprometida: la firma calculada {} no coincide con la esperada {}",
                     hash_result, expected
                 )))
             }
         } else {
-            let _ = app.emit("download-progress", FlashProgress {
-                bytes_written: total_bytes,
-                total_bytes,
-                speed_mbps: 0.0,
-                eta_seconds: 0.0,
-                status: "done".to_string(),
-                message: format!("Firma calculada: {}", hash_result),
-            });
+            let _ = app.emit(
+                "download-progress",
+                FlashProgress {
+                    bytes_written: total_bytes,
+                    total_bytes,
+                    speed_mbps: 0.0,
+                    eta_seconds: 0.0,
+                    status: "done".to_string(),
+                    message: format!("Firma calculada: {}", hash_result),
+                },
+            );
             Ok(hash_result)
         }
     }

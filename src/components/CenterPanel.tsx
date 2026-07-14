@@ -2,6 +2,7 @@ import { useMemo, useRef, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { ImageInfo, Device, RPiModel, FlashProgress, LogEntry, formatSize } from "../App";
 import { BoardSVG } from "./BoardIcons";
+import EnginePanel from "./EnginePanel";
 
 interface Props {
   image: ImageInfo | null;
@@ -16,8 +17,8 @@ interface Props {
   onCancel: () => void;
   onReset: () => void;
 
-  activeTab: "vista-previa" | "ssh" | "historial";
-  setActiveTab: (tab: "vista-previa" | "ssh" | "historial") => void;
+  activeTab: "vista-previa" | "ssh" | "historial" | "motor";
+  setActiveTab: (tab: "vista-previa" | "ssh" | "historial" | "motor") => void;
 
   sshEnabled: boolean;
   setSshEnabled: (val: boolean) => void;
@@ -342,7 +343,7 @@ function DonutGauge({
 }
 
 export default function CenterPanel({
-  image, device, rpiModel, progress, logs, isFlashing, isDone, canFlash, onFlash, onCancel, onReset,
+  image, device, rpiModel, progress, logs, isFlashing, isDone, onFlash, onCancel, onReset,
   activeTab, setActiveTab,
   sshEnabled, setSshEnabled,
   username, setUsername,
@@ -505,6 +506,13 @@ export default function CenterPanel({
             disabled={isFlashing}
           >
             Historial
+          </button>
+          <button
+            className={`tab-button ${activeTab === "motor" ? "active" : ""}`}
+            onClick={() => setActiveTab("motor")}
+            disabled={isFlashing}
+          >
+            Motor SIGIL
           </button>
         </div>
 
@@ -865,11 +873,12 @@ export default function CenterPanel({
               {/* Flash button — wide green pill (themed via .btn-flash) */}
               <button
                 type="button"
-                disabled={!canFlash}
+                disabled={true}
                 onClick={onFlash}
                 className="btn-flash"
+                title="La escritura real está deshabilitada hasta que el motor la soporte. Usa la pestaña Motor SIGIL para el dry-run."
               >
-                ⚡ Iniciar Escritura en microSD
+                ⚡ Iniciar Escritura (Deshabilitado)
               </button>
 
             </div>
@@ -957,7 +966,7 @@ export default function CenterPanel({
               </div>
             </div>
           </div>
-        ) : (
+        ) : activeTab === "historial" ? (
           /* TAB 3: HISTORIAL */
           <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
             <span style={{ fontSize: "12px", fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.05em" }}>
@@ -984,7 +993,12 @@ export default function CenterPanel({
               ))}
             </div>
           </div>
-        )}
+        ) : activeTab === "motor" ? (
+          /* TAB 4: MOTOR SIGIL */
+          <div style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column" }}>
+            <EnginePanel />
+          </div>
+        ) : null}
 
       </div>
 
