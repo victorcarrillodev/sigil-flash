@@ -68,6 +68,7 @@ pub fn run() {
             commands::flash::get_image_info,
             commands::flash::start_flash,
             commands::flash::cancel_flash,
+            commands::flash::get_hardware_size,
             commands::downloads::start_download,
             commands::downloads::cancel_download,
             commands::downloads::verify_image,

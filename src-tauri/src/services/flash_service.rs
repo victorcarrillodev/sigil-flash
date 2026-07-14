@@ -243,10 +243,11 @@ pub async fn run_raw_flash_cli(src: &str, dest: &str, progress_file: &str) -> Ap
     // Safety verification check: Block writing to critical mountpoints on Linux/macOS
     #[cfg(unix)]
     {
-        let system_disks = ["/dev/sda", "/dev/nvme0n1"]; // Example primary drives
-        if system_disks.contains(&dest) {
+        let system_disks = get_system_disks();
+        let dest_parent = get_parent_disk(dest);
+        if system_disks.contains(&dest_parent) {
             return Err(AppError::Flash(format!(
-                "RECHAZADO: Se detectó intento de flashear disco del sistema principal: {}",
+                "RECHAZADO: Se detectó intento de flashear disco del sistema principal o partición del mismo: {}",
                 dest
             )));
         }
@@ -256,11 +257,29 @@ pub async fn run_raw_flash_cli(src: &str, dest: &str, progress_file: &str) -> Ap
     let dest_path = PathBuf::from(dest);
     let prog_path = PathBuf::from(progress_file);
 
-    let mut src_file = File::open(&src_path)
-        .await
-        .map_err(|e| AppError::Flash(format!("No se pudo abrir imagen: {}", e)))?;
+    let total_bytes = if src.to_lowercase().ends_with(".xz") {
+        get_xz_uncompressed_size(src)?
+    } else {
+        let metadata = std::fs::metadata(&src_path)?;
+        metadata.len()
+    };
 
-    let total_bytes = src_file.metadata().await?.len();
+    let mut xz_child = None;
+    let mut src_file: std::pin::Pin<Box<dyn tokio::io::AsyncRead + Send>> = if src.to_lowercase().ends_with(".xz") {
+        let mut child = tokio::process::Command::new("xz")
+            .args(["-d", "-c", src])
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| AppError::Flash(format!("No se pudo iniciar descompresión xz: {}", e)))?;
+        let stdout = child.stdout.take().ok_or_else(|| AppError::Flash("No se pudo obtener la salida de xz".to_string()))?;
+        xz_child = Some(child);
+        Box::pin(stdout)
+    } else {
+        let file = File::open(&src_path)
+            .await
+            .map_err(|e| AppError::Flash(format!("No se pudo abrir imagen: {}", e)))?;
+        Box::pin(file)
+    };
 
     // Open physical drive for writing (Direct Sync Mode if possible depending on OS)
     let mut dest_file = File::create(&dest_path).await.map_err(|e| {
