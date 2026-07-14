@@ -9,7 +9,7 @@ interface Props {
   onClear: () => void;
 }
 
-const ACCEPTED_EXTENSIONS = ["img", "iso", "bin"];
+const ACCEPTED_EXTENSIONS = ["img", "iso", "bin", "xz"];
 
 export default function ImageSelector({ image, onImageSelected, onClear }: Props) {
   const [dragging, setDragging] = useState(false);
@@ -54,7 +54,7 @@ export default function ImageSelector({ image, onImageSelected, onClear }: Props
 
     const ext = file.name.split(".").pop()?.toLowerCase() ?? "";
     if (!ACCEPTED_EXTENSIONS.includes(ext)) {
-      setError(`Formato no soportado: .${ext}. Usa .img, .iso, o .bin`);
+      setError(`Formato no soportado: .${ext}. Usa .img, .iso, .bin o .xz`);
       return;
     }
 
@@ -144,7 +144,7 @@ export default function ImageSelector({ image, onImageSelected, onClear }: Props
         >
           <span style={{ fontSize: 14 }}>{dragging ? "📥" : "📂"}</span>
           <span style={{ fontSize: "11px", fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-            {dragging ? "¡Suelta aquí!" : "Seleccionar imagen (.img, .iso, .bin)..."}
+            {dragging ? "¡Suelta aquí!" : "Seleccionar imagen (.img, .iso, .bin, .xz)..."}
           </span>
         </div>
       )}

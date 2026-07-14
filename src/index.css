@@ -541,6 +541,10 @@ body {
 .form-input:focus {
   border-color: var(--accent);
 }
+.form-input::placeholder {
+  color: var(--text-muted);
+  opacity: 0.55;
+}
 .neu-switch {
   position: relative;
   display: inline-block;

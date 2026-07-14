@@ -1,6 +1,6 @@
 use crate::models::ImageInfo;
 use crate::errors::AppResult;
-use crate::services::flash_service::FlashService;
+use crate::services::flash_service::{FlashService, get_xz_uncompressed_size};
 use tauri::{State, AppHandle};
 
 #[tauri::command]
@@ -13,10 +13,17 @@ pub async fn get_image_info(path: String) -> AppResult<ImageInfo> {
         .unwrap_or("unknown")
         .to_string();
 
+    let mut size = metadata.len();
+    if path.to_lowercase().ends_with(".xz") {
+        if let Ok(uncompressed) = get_xz_uncompressed_size(&path) {
+            size = uncompressed;
+        }
+    }
+
     Ok(ImageInfo {
         path,
         name,
-        size: metadata.len(),
+        size,
         sha256: None,
     })
 }

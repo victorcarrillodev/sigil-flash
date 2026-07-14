@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useMemo, useRef, useEffect, useState } from "react";
 import { ImageInfo, Device, RPiModel, FlashProgress, LogEntry, formatSize } from "../App";
 import { BoardSVG } from "./BoardIcons";
 
@@ -173,27 +173,41 @@ const MODEL_SPECS: Record<RPiModel, ModelSpec> = {
 
 function formatETA(sec: number): string {
   if (sec <= 0) return "finalizando...";
-  if (sec < 60) return `${sec}s`;
-  const m = Math.floor(sec / 60);
-  const s = sec % 60;
+  const roundedSec = Math.round(sec);
+  if (roundedSec < 60) return `${roundedSec}s`;
+  const m = Math.floor(roundedSec / 60);
+  const s = roundedSec % 60;
   return `${m}m ${s}s`;
 }
 
-function DonutGauge({ pct, sublabel }: { pct: number; sublabel: string }) {
+function DonutGauge({ 
+  pct, 
+  sublabel, 
+  deviceBytes, 
+  imageSize 
+}: { 
+  pct: number; 
+  sublabel: string; 
+  deviceBytes: number; 
+  imageSize: number; 
+}) {
   const R = 45;
   const circ = 2 * Math.PI * R;
-  const filled = (pct / 100) * circ;
-  const empty = circ - filled;
 
-  const color =
-    pct > 90 ? "var(--danger)" :
-    pct > 70 ? "var(--warning)" :
-               "var(--accent)";
+  const hasData = deviceBytes > 0 && imageSize > 0;
+  
+  const bootBytes = 512 * 1024 * 1024;
+  const effectiveBoot = Math.min(imageSize, bootBytes);
+  const systemBytes = Math.max(0, imageSize - effectiveBoot);
+  const freeBytes = Math.max(0, deviceBytes - imageSize);
 
-  const glowColor =
-    pct > 90 ? "var(--danger-shadow)" :
-    pct > 70 ? "rgba(245,158,11,0.3)" :
-               "var(--accent-glow)";
+  const pctBoot = hasData ? (effectiveBoot / deviceBytes) * 100 : 0;
+  const pctSystem = hasData ? (systemBytes / deviceBytes) * 100 : 0;
+  const pctFree = hasData ? (freeBytes / deviceBytes) * 100 : 100;
+
+  const filledBoot = (pctBoot / 100) * circ;
+  const filledSystem = (pctSystem / 100) * circ;
+  const filledFree = (pctFree / 100) * circ;
 
   const pctClass = pct > 0 ? "text-primary" : "text-muted";
 
@@ -203,50 +217,74 @@ function DonutGauge({ pct, sublabel }: { pct: number; sublabel: string }) {
       alignItems: "center",
       justifyContent: "center",
       position: "relative",
-      width: 110,
-      height: 110,
+      width: 165,
+      height: 165,
       flexShrink: 0,
     }}>
       <svg width="100%" height="100%" viewBox="0 0 100 100" style={{ transform: "rotate(-90deg)" }}>
+        {/* Círculo base gris */}
         <circle
           cx="50"
           cy="50"
           r={R}
           fill="transparent"
           stroke="var(--bg-deep)"
-          strokeWidth="8"
-          style={{ transition: "stroke var(--transition)" }}
+          strokeWidth="9"
         />
-        <circle
-          cx="50"
-          cy="50"
-          r={R}
-          fill="transparent"
-          stroke={color}
-          strokeWidth="8"
-          strokeDasharray={`${filled} ${empty}`}
-          strokeLinecap="round"
-          style={{
-            strokeDashoffset: 0,
-            transition: "all 0.4s ease-out",
-            filter: `drop-shadow(0 0 4px ${glowColor})`,
-            opacity: pct > 0 ? 0.35 : 0,
-          }}
-        />
-        <circle
-          cx="50"
-          cy="50"
-          r={R}
-          fill="transparent"
-          stroke={color}
-          strokeWidth="8"
-          strokeDasharray={`${filled} ${empty}`}
-          strokeLinecap="round"
-          style={{
-            strokeDashoffset: 0,
-            transition: "all 0.4s ease-out",
-          }}
-        />
+        {hasData ? (
+          <>
+            {/* Segmento 3: Libre (Gris Apagado) */}
+            <circle
+              cx="50"
+              cy="50"
+              r={R}
+              fill="transparent"
+              stroke="#475569"
+              strokeWidth="9"
+              strokeDasharray={`${filledFree} ${circ - filledFree}`}
+              strokeDashoffset={-(filledBoot + filledSystem)}
+              strokeLinecap="round"
+              style={{ transition: "all 0.4s ease-out" }}
+            />
+            {/* Segmento 2: System (Magenta) */}
+            <circle
+              cx="50"
+              cy="50"
+              r={R}
+              fill="transparent"
+              stroke="var(--accent)"
+              strokeWidth="9"
+              strokeDasharray={`${filledSystem} ${circ - filledSystem}`}
+              strokeDashoffset={-filledBoot}
+              strokeLinecap="round"
+              style={{ transition: "all 0.4s ease-out" }}
+            />
+            {/* Segmento 1: Boot (Cian) */}
+            <circle
+              cx="50"
+              cy="50"
+              r={R}
+              fill="transparent"
+              stroke="var(--info)"
+              strokeWidth="9"
+              strokeDasharray={`${filledBoot} ${circ - filledBoot}`}
+              strokeDashoffset={0}
+              strokeLinecap="round"
+              style={{ transition: "all 0.4s ease-out" }}
+            />
+          </>
+        ) : (
+          /* Si no hay datos, mostramos un círculo vacío */
+          <circle
+            cx="50"
+            cy="50"
+            r={R}
+            fill="transparent"
+            stroke="var(--text-muted)"
+            strokeWidth="3"
+            opacity="0.2"
+          />
+        )}
       </svg>
 
       <div style={{
@@ -256,8 +294,8 @@ function DonutGauge({ pct, sublabel }: { pct: number; sublabel: string }) {
         alignItems: "center",
         justifyContent: "center",
       }}>
-        <span className={pctClass} style={{ fontSize: 18, fontWeight: 800 }}>{pct}%</span>
-        <span style={{ fontSize: 9, color: "var(--text-muted)", fontWeight: 600, textTransform: "uppercase" }}>{sublabel}</span>
+        <span className={pctClass} style={{ fontSize: 28, fontWeight: 800 }}>{pct}%</span>
+        <span style={{ fontSize: 11, color: "var(--text-muted)", fontWeight: 600, textTransform: "uppercase" }}>{sublabel}</span>
       </div>
     </div>
   );
@@ -273,6 +311,27 @@ export default function CenterPanel({
   wifiSsid, setWifiSsid,
   wifiPassword, setWifiPassword
 }: Props) {
+
+  const consoleRef = useRef<HTMLDivElement | null>(null);
+  const [elapsed, setElapsed] = useState(0);
+
+  useEffect(() => {
+    if (consoleRef.current) {
+      consoleRef.current.scrollTop = consoleRef.current.scrollHeight;
+    }
+  }, [logs]);
+
+  useEffect(() => {
+    let timer: any;
+    if (isFlashing) {
+      setElapsed(0);
+      const startTime = Date.now();
+      timer = setInterval(() => {
+        setElapsed(Math.round((Date.now() - startTime) / 1000));
+      }, 1000);
+    }
+    return () => clearInterval(timer);
+  }, [isFlashing]);
 
   const spec = useMemo(() => MODEL_SPECS[rpiModel], [rpiModel]);
 
@@ -391,22 +450,28 @@ export default function CenterPanel({
               </p>
             </div>
 
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "16px", width: "100%", maxWidth: "450px" }}>
-              <div className="card" style={{ padding: "14px", display: "flex", flexDirection: "column", alignItems: "center", background: "var(--bg-deep)", gap: "4px" }}>
-                <span style={{ fontSize: "11px", color: "var(--text-muted)", fontWeight: 700 }}>VELOCIDAD</span>
-                <span style={{ fontSize: "16px", fontWeight: 800, color: "var(--accent)" }}>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: "16px", width: "100%", maxWidth: "580px" }}>
+              <div className="card" style={{ padding: "14px", display: "flex", flexDirection: "column", alignItems: "center", background: "var(--bg-deep)", gap: "4px", minWidth: 0 }}>
+                <span style={{ fontSize: "11px", color: "var(--text-muted)", fontWeight: 700, whiteSpace: "nowrap" }}>VELOCIDAD</span>
+                <span style={{ fontSize: "16px", fontWeight: 800, color: "var(--accent)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
                   {progress?.speed_mbps.toFixed(1) || "0.0"} MB/s
                 </span>
               </div>
-              <div className="card" style={{ padding: "14px", display: "flex", flexDirection: "column", alignItems: "center", background: "var(--bg-deep)", gap: "4px" }}>
-                <span style={{ fontSize: "11px", color: "var(--text-muted)", fontWeight: 700 }}>TIEMPO RESTANTE</span>
-                <span style={{ fontSize: "16px", fontWeight: 800, color: "var(--text-primary)" }}>
+              <div className="card" style={{ padding: "14px", display: "flex", flexDirection: "column", alignItems: "center", background: "var(--bg-deep)", gap: "4px", minWidth: 0 }}>
+                <span style={{ fontSize: "11px", color: "var(--text-muted)", fontWeight: 700, whiteSpace: "nowrap" }}>TIEMPO RESTANTE</span>
+                <span style={{ fontSize: "16px", fontWeight: 800, color: "var(--text-primary)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
                   {progress ? formatETA(progress.eta_seconds) : "calculando..."}
                 </span>
               </div>
-              <div className="card" style={{ padding: "14px", display: "flex", flexDirection: "column", alignItems: "center", background: "var(--bg-deep)", gap: "4px" }}>
-                <span style={{ fontSize: "11px", color: "var(--text-muted)", fontWeight: 700 }}>ESCRITO</span>
-                <span style={{ fontSize: "16px", fontWeight: 800, color: "var(--text-primary)" }}>
+              <div className="card" style={{ padding: "14px", display: "flex", flexDirection: "column", alignItems: "center", background: "var(--bg-deep)", gap: "4px", minWidth: 0 }}>
+                <span style={{ fontSize: "11px", color: "var(--text-muted)", fontWeight: 700, whiteSpace: "nowrap" }}>TRANSCURRIDO</span>
+                <span style={{ fontSize: "16px", fontWeight: 800, color: "var(--text-primary)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                  {formatETA(elapsed)}
+                </span>
+              </div>
+              <div className="card" style={{ padding: "14px", display: "flex", flexDirection: "column", alignItems: "center", background: "var(--bg-deep)", gap: "4px", minWidth: 0 }}>
+                <span style={{ fontSize: "11px", color: "var(--text-muted)", fontWeight: 700, whiteSpace: "nowrap" }}>ESCRITO</span>
+                <span style={{ fontSize: "16px", fontWeight: 800, color: "var(--text-primary)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
                   {progress ? formatSize(progress.bytes_written) : "0 B"}
                 </span>
               </div>
@@ -430,7 +495,7 @@ export default function CenterPanel({
                 ¡Escritura completada con éxito!
               </h3>
               <p style={{ fontSize: "12px", color: "var(--text-muted)", marginTop: "6px", maxWidth: "340px" }}>
-                Ya puedes retirar la tarjeta microSD de forma segura e insertarla en tu Raspberry Pi para encenderla.
+                Proceso finalizado con éxito en <strong>{formatETA(elapsed)}</strong>. Ya puedes retirar la tarjeta microSD de forma segura e insertarla en tu Raspberry Pi para encenderla.
               </p>
             </div>
             <button className="btn btn-primary" onClick={onReset} style={{ padding: "10px 24px" }}>
@@ -452,16 +517,16 @@ export default function CenterPanel({
               display: "flex",
               flexDirection: "column",
               gap: "16px",
-              flex: "0 0 55%",
-              maxWidth: "55%",
+              flex: "0 0 58%",
+              maxWidth: "58%",
             }}>
 
               {/* Card 1: RPi illustration + model name + specs */}
               <div className="card" style={{
                 display: "flex",
                 flexDirection: "row",
-                alignItems: "center",
-                gap: "20px",
+                alignItems: "stretch",
+                gap: "24px",
                 padding: "20px",
                 flex: "0 0 auto",
               }}>
@@ -474,16 +539,15 @@ export default function CenterPanel({
                   display: "flex",
                   alignItems: "center",
                   justifyContent: "center",
-                  flexShrink: 0,
-                  width: "200px",
-                  height: "180px",
+                  flex: "1 1 50%",
+                  height: "240px",
                   overflow: "hidden",
                 }}>
                   <BoardSVG model={rpiModel} />
                 </div>
 
                 {/* Right of image: name + specs */}
-                <div style={{ display: "flex", flexDirection: "column", gap: "10px", flex: 1, minWidth: 0 }}>
+                <div style={{ display: "flex", flexDirection: "column", gap: "10px", flex: "1 1 50%", minWidth: 0, justifyContent: "center" }}>
                   <h2 style={{
                     fontSize: "22px",
                     fontWeight: 800,
@@ -519,27 +583,32 @@ export default function CenterPanel({
               <div className="card" style={{
                 display: "flex",
                 alignItems: "center",
-                gap: "20px",
+                gap: "24px",
                 padding: "20px",
                 flex: 1,
               }}>
-                <DonutGauge pct={usagePct} sublabel={usagePct === 0 ? "SD" : "usado"} />
+                <DonutGauge 
+                  pct={usagePct} 
+                  sublabel={usagePct === 0 ? "SD" : "usado"} 
+                  deviceBytes={deviceBytes} 
+                  imageSize={image ? image.size : 0} 
+                />
 
-                <div style={{ display: "flex", flexDirection: "column", gap: "8px", flex: 1 }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: "13px" }}>
-                    <span style={{ color: "var(--text-muted)", fontWeight: 600 }}>microSD:</span>
-                    <span style={{ color: "var(--text-primary)", fontWeight: 700 }}>
+                <div style={{ display: "flex", flexDirection: "column", gap: "8px", flex: 1, minWidth: 0 }}>
+                  <div style={{ display: "flex", gap: "8px", fontSize: "13px" }}>
+                    <span style={{ color: "var(--text-muted)", fontWeight: 600, minWidth: "115px", flexShrink: 0 }}>microSD:</span>
+                    <span style={{ color: "var(--text-primary)", fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                       {device ? `${device.size} — ${device.name}` : "No seleccionada"}
                     </span>
                   </div>
-                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: "13px" }}>
-                    <span style={{ color: "var(--text-muted)", fontWeight: 600 }}>Imagen:</span>
-                    <span style={{ color: "var(--text-primary)", fontWeight: 700 }}>
+                  <div style={{ display: "flex", gap: "8px", fontSize: "13px" }}>
+                    <span style={{ color: "var(--text-muted)", fontWeight: 600, minWidth: "115px", flexShrink: 0 }}>Imagen:</span>
+                    <span style={{ color: "var(--text-primary)", fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                       {image ? `${image.name} (${formatSize(image.size)})` : "No seleccionada"}
                     </span>
                   </div>
-                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: "13px", alignItems: "center", paddingTop: "6px", borderTop: "1px dashed var(--shadow-dark)" }}>
-                    <span style={{ color: "var(--text-muted)", fontWeight: 600 }}>Compatibilidad:</span>
+                  <div style={{ display: "flex", gap: "8px", fontSize: "13px", alignItems: "center", paddingTop: "6px" }}>
+                    <span style={{ color: "var(--text-muted)", fontWeight: 600, minWidth: "115px", flexShrink: 0 }}>Compatibilidad:</span>
                     <span style={{
                       fontSize: "12px",
                       fontWeight: 800,
@@ -553,6 +622,33 @@ export default function CenterPanel({
                         : "—"}
                     </span>
                   </div>
+
+                  {image && device && deviceBytes > 0 && (
+                    <div style={{ display: "flex", flexDirection: "column", gap: "6px", marginTop: "8px", borderTop: "1px dashed var(--border-dark)", paddingTop: "8px" }}>
+                      <span style={{ fontSize: "11px", fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.02em" }}>Distribución de espacio estimada</span>
+                      
+                      <div style={{ display: "flex", height: "8px", borderRadius: "4px", overflow: "hidden", background: "var(--bg-deep)", boxShadow: "var(--shadow-inset-sm)" }}>
+                        <div style={{ width: `${(Math.min(deviceBytes, 512 * 1024 * 1024) / deviceBytes) * 100}%`, background: "var(--info)" }} title="Partición Boot" />
+                        <div style={{ width: `${(Math.max(0, Math.min(deviceBytes - 512 * 1024 * 1024, image.size - 512 * 1024 * 1024)) / deviceBytes) * 100}%`, background: "var(--accent)" }} title="Sistema Raíz (System)" />
+                        <div style={{ flex: 1, background: "#475569" }} title="Espacio Libre (Paquetes / Usuario)" />
+                      </div>
+
+                      <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "8px", fontSize: "10px", marginTop: "2px" }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: "4px" }}>
+                          <span style={{ width: "6px", height: "6px", borderRadius: "50%", background: "var(--info)", display: "inline-block" }}></span>
+                          <span style={{ color: "var(--text-secondary)", whiteSpace: "nowrap" }}>Boot: 512 MB</span>
+                        </div>
+                        <div style={{ display: "flex", alignItems: "center", gap: "4px" }}>
+                          <span style={{ width: "6px", height: "6px", borderRadius: "50%", background: "var(--accent)", display: "inline-block" }}></span>
+                          <span style={{ color: "var(--text-secondary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>System: {formatSize(Math.max(0, image.size - 512 * 1024 * 1024))}</span>
+                        </div>
+                        <div style={{ display: "flex", alignItems: "center", gap: "4px" }}>
+                          <span style={{ width: "6px", height: "6px", borderRadius: "50%", background: "#475569", display: "inline-block" }}></span>
+                          <span style={{ color: "var(--text-secondary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>Libre: {formatSize(Math.max(0, deviceBytes - image.size))}</span>
+                        </div>
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div>
 
@@ -563,7 +659,8 @@ export default function CenterPanel({
               display: "flex",
               flexDirection: "column",
               gap: "16px",
-              flex: 1,
+              flex: "0 0 42%",
+              maxWidth: "42%",
               minWidth: 0,
             }}>
 
@@ -685,7 +782,7 @@ export default function CenterPanel({
                   className="form-input"
                   value={username}
                   onChange={(e) => setUsername(e.target.value)}
-                  placeholder="ej. pi"
+                  placeholder="Introduce el nombre de usuario"
                 />
               </div>
               <div className="form-group">
@@ -695,7 +792,7 @@ export default function CenterPanel({
                   className="form-input"
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
-                  placeholder="••••••••"
+                  placeholder="Introduce la contraseña del usuario"
                 />
               </div>
             </div>
@@ -707,7 +804,7 @@ export default function CenterPanel({
                 className="form-input"
                 value={hostname}
                 onChange={(e) => setHostname(e.target.value)}
-                placeholder="ej. raspberrypi"
+                placeholder="Introduce el nombre del dispositivo"
               />
             </div>
 
@@ -724,7 +821,7 @@ export default function CenterPanel({
                   className="form-input"
                   value={wifiSsid}
                   onChange={(e) => setWifiSsid(e.target.value)}
-                  placeholder="Nombre de red wifi"
+                  placeholder="Introduce el nombre de la red Wi-Fi (SSID)"
                 />
               </div>
               <div className="form-group">
@@ -734,7 +831,7 @@ export default function CenterPanel({
                   className="form-input"
                   value={wifiPassword}
                   onChange={(e) => setWifiPassword(e.target.value)}
-                  placeholder="••••••••"
+                  placeholder="Introduce la contraseña de la red Wi-Fi"
                 />
               </div>
             </div>
@@ -773,7 +870,7 @@ export default function CenterPanel({
       {/* Bottom Panel: Log de sistema (Console Terminal) */}
       <div className="card" style={{
         padding: "16px",
-        height: "150px",
+        height: "220px",
         display: "flex",
         flexDirection: "column",
         gap: "6px",
@@ -788,20 +885,23 @@ export default function CenterPanel({
             {logs.length} entradas
           </span>
         </div>
-        <div style={{
-          flex: 1,
-          background: "var(--bg-deep)",
-          boxShadow: "var(--shadow-inset)",
-          borderRadius: "var(--radius-md)",
-          padding: "10px",
-          fontFamily: "var(--font-mono)",
-          fontSize: "12px",
-          overflowY: "auto",
-          display: "flex",
-          flexDirection: "column",
-          gap: "4px",
-          color: "#34d399",
-        }}>
+        <div 
+          ref={consoleRef}
+          style={{
+            flex: 1,
+            background: "var(--bg-deep)",
+            boxShadow: "var(--shadow-inset)",
+            borderRadius: "var(--radius-md)",
+            padding: "10px",
+            fontFamily: "var(--font-mono)",
+            fontSize: "12px",
+            overflowY: "auto",
+            display: "flex",
+            flexDirection: "column",
+            gap: "4px",
+            color: "#34d399",
+          }}
+        >
           {logs.length === 0 ? (
             <span style={{ color: "var(--text-muted)", fontStyle: "italic" }}>Consola inactiva. Esperando escritura...</span>
           ) : (

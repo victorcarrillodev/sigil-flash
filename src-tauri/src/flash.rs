@@ -135,10 +135,17 @@ pub async fn get_image_info(path: String) -> Result<ImageInfo, String> {
         .unwrap_or("unknown")
         .to_string();
 
+    let mut size = metadata.len();
+    if path.to_lowercase().ends_with(".xz") {
+        if let Ok(uncompressed) = get_xz_uncompressed_size(&path) {
+            size = uncompressed;
+        }
+    }
+
     Ok(ImageInfo {
         path,
         name,
-        size: metadata.len(),
+        size,
     })
 }
 
@@ -184,10 +191,20 @@ pub async fn start_flash(
         }
     }
 
+    let is_xz = image_path.to_lowercase().ends_with(".xz");
+
     // Get image size for progress tracking
-    let image_size = std::fs::metadata(&image_path)
-        .map(|m| m.len())
-        .unwrap_or(0);
+    let image_size = if is_xz {
+        get_xz_uncompressed_size(&image_path).unwrap_or_else(|_| {
+            std::fs::metadata(&image_path)
+                .map(|m| m.len())
+                .unwrap_or(0)
+        })
+    } else {
+        std::fs::metadata(&image_path)
+            .map(|m| m.len())
+            .unwrap_or(0)
+    };
 
     // Emit initial progress
     let _ = app.emit(
@@ -203,12 +220,20 @@ pub async fn start_flash(
     );
 
     // Build dd command via pkexec for privilege escalation
-    // We write a small shell script to run dd with progress output
-    let dd_cmd = format!(
-        "dd bs=4M if={} of={} status=progress oflag=sync 2>&1",
-        shell_escape(&image_path),
-        shell_escape(&device_path)
-    );
+    // If it's a .xz file, decompress on the fly using xzcat
+    let dd_cmd = if is_xz {
+        format!(
+            "xzcat {} | dd bs=4M of={} status=progress oflag=sync 2>&1",
+            shell_escape(&image_path),
+            shell_escape(&device_path)
+        )
+    } else {
+        format!(
+            "dd bs=4M if={} of={} status=progress oflag=sync 2>&1",
+            shell_escape(&image_path),
+            shell_escape(&device_path)
+        )
+    };
 
     let mut child = Command::new("pkexec")
         .args(["sh", "-c", &dd_cmd])
@@ -411,6 +436,30 @@ fn parse_dd_progress(line: &str) -> Option<(u64, f64)> {
     };
 
     Some((bytes, speed))
+}
+
+/// Get uncompressed size of a .xz file using xz --robot -l
+fn get_xz_uncompressed_size(path: &str) -> Result<u64, String> {
+    let output = Command::new("xz")
+        .args(["--robot", "-l", path])
+        .output()
+        .map_err(|e| format!("No se pudo ejecutar xz: {e}"))?;
+
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).to_string());
+    }
+
+    let stdout_str = String::from_utf8_lossy(&output.stdout);
+    for line in stdout_str.lines() {
+        let parts: Vec<&str> = line.split('\t').collect();
+        if parts.first() == Some(&"totals") && parts.len() >= 5 {
+            if let Ok(size) = parts[4].parse::<u64>() {
+                return Ok(size);
+            }
+        }
+    }
+
+    Err("No se pudo obtener el tamaño descomprimido del archivo xz.".to_string())
 }
 
 /// Basic shell escaping for paths (wraps in single quotes)

@@ -79,11 +79,11 @@ export default function App() {
 
   // Custom OS configuration states
   const [sshEnabled, setSshEnabled] = useState(true);
-  const [username, setUsername] = useState("pi");
-  const [password, setPassword] = useState("raspberry");
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
   const [pinPanel, setPinPanel] = useState("");
   const [logPassword, setLogPassword] = useState("");
-  const [hostname, setHostname] = useState("raspberrypi");
+  const [hostname, setHostname] = useState("");
   const [serialNumber, setSerialNumber] = useState("");
   const [wifiSsid, setWifiSsid] = useState("");
   const [wifiPassword, setWifiPassword] = useState("");

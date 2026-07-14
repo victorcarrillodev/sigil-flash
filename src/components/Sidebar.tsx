@@ -205,19 +205,19 @@ export default function Sidebar({
         <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
           <div className="form-group">
             <label className="form-label">USUARIO</label>
-            <input type="text" className="form-input" value={username} onChange={(e) => setUsername(e.target.value)} placeholder="victor" />
+            <input type="text" className="form-input" value={username} onChange={(e) => setUsername(e.target.value)} placeholder="Introduce el nombre de usuario" />
           </div>
           <div className="form-group">
             <label className="form-label">CONTRASEÑA</label>
-            <input type="password" className="form-input" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="••••••••" />
+            <input type="password" className="form-input" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Introduce la contraseña" />
           </div>
           <div className="form-group">
             <label className="form-label">PIN DEL PANEL</label>
-            <input type="password" className="form-input" value={pinPanel} onChange={(e) => setPinPanel(e.target.value)} placeholder="4821" />
+            <input type="password" className="form-input" value={pinPanel} onChange={(e) => setPinPanel(e.target.value)} placeholder="Introduce el PIN del panel" />
           </div>
           <div className="form-group">
             <label className="form-label">CONTRASEÑA DE LOGS</label>
-            <input type="password" className="form-input" value={logPassword} onChange={(e) => setLogPassword(e.target.value)} placeholder="••••••••" />
+            <input type="password" className="form-input" value={logPassword} onChange={(e) => setLogPassword(e.target.value)} placeholder="Introduce la contraseña de logs" />
           </div>
         </div>
       </div>
@@ -239,11 +239,11 @@ export default function Sidebar({
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px" }}>
           <div className="form-group">
             <label className="form-label">HOSTNAME</label>
-            <input type="text" className="form-input" value={hostname} onChange={(e) => setHostname(e.target.value)} placeholder="sigil-device-1" />
+            <input type="text" className="form-input" value={hostname} onChange={(e) => setHostname(e.target.value)} placeholder="Introduce el nombre del dispositivo" />
           </div>
           <div className="form-group">
             <label className="form-label">NÚMERO DE SERIE</label>
-            <input type="text" className="form-input" value={serialNumber} onChange={(e) => setSerialNumber(e.target.value)} placeholder="SIGIL-000001" />
+            <input type="text" className="form-input" value={serialNumber} onChange={(e) => setSerialNumber(e.target.value)} placeholder="Introduce el número de serie" />
           </div>
         </div>
       </div>
@@ -265,11 +265,11 @@ export default function Sidebar({
         <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
           <div className="form-group">
             <label className="form-label">NOMBRE DE RED (SSID)</label>
-            <input type="text" className="form-input" value={wifiSsid} onChange={(e) => setWifiSsid(e.target.value)} placeholder="MiRedWiFi" />
+            <input type="text" className="form-input" value={wifiSsid} onChange={(e) => setWifiSsid(e.target.value)} placeholder="Introduce el SSID de la red Wi-Fi" />
           </div>
           <div className="form-group">
             <label className="form-label">CONTRASEÑA WI-FI</label>
-            <input type="password" className="form-input" value={wifiPassword} onChange={(e) => setWifiPassword(e.target.value)} placeholder="••••••••" />
+            <input type="password" className="form-input" value={wifiPassword} onChange={(e) => setWifiPassword(e.target.value)} placeholder="Introduce la contraseña de la red Wi-Fi" />
           </div>
         </div>
       </div>

@@ -41,7 +41,14 @@ impl FlashService {
         }
 
         // Initialize progress state
-        let image_size = std::fs::metadata(&image_p)?.len();
+        let is_xz = image_path.to_lowercase().ends_with(".xz");
+        let image_size = if is_xz {
+            get_xz_uncompressed_size(image_path).unwrap_or_else(|_| {
+                std::fs::metadata(&image_p).map(|m| m.len()).unwrap_or(0)
+            })
+        } else {
+            std::fs::metadata(&image_p)?.len()
+        };
         let _ = app.emit("flash-progress", FlashProgress {
             bytes_written: 0,
             total_bytes: image_size,
@@ -223,8 +230,8 @@ pub async fn run_raw_flash_cli(
     // Safety verification check: Block writing to critical mountpoints on Linux/macOS
     #[cfg(unix)]
     {
-        let system_disks = ["/dev/sda", "/dev/nvme0n1"]; // Example primary drives
-        if system_disks.contains(&dest) {
+        let system_disks = get_system_disks();
+        if system_disks.contains(&dest.to_string()) {
             return Err(AppError::Flash(format!("RECHAZADO: Se detectó intento de flashear disco del sistema principal: {}", dest)));
         }
     }
@@ -233,11 +240,36 @@ pub async fn run_raw_flash_cli(
     let dest_path = PathBuf::from(dest);
     let prog_path = PathBuf::from(progress_file);
 
-    let mut src_file = File::open(&src_path)
-        .await
-        .map_err(|e| AppError::Flash(format!("No se pudo abrir imagen: {}", e)))?;
+    let is_xz = src.to_lowercase().ends_with(".xz");
+    
+    let total_bytes = if is_xz {
+        get_xz_uncompressed_size(src)?
+    } else {
+        let file = File::open(&src_path)
+            .await
+            .map_err(|e| AppError::Flash(format!("No se pudo abrir imagen: {}", e)))?;
+        file.metadata().await?.len()
+    };
 
-    let total_bytes = src_file.metadata().await?.len();
+    let mut xz_child = if is_xz {
+        let child = tokio::process::Command::new("xzcat")
+            .arg(&src_path)
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| AppError::Flash(format!("No se pudo iniciar xzcat: {}", e)))?;
+        Some(child)
+    } else {
+        None
+    };
+
+    let mut src_reader: Box<dyn tokio::io::AsyncRead + Unpin + Send> = if let Some(ref mut child) = xz_child {
+        Box::new(child.stdout.take().ok_or_else(|| AppError::Flash("No se pudo abrir stdout de xzcat".to_string()))?)
+    } else {
+        let file = File::open(&src_path)
+            .await
+            .map_err(|e| AppError::Flash(format!("No se pudo abrir imagen: {}", e)))?;
+        Box::new(file)
+    };
     
     // Open physical drive for writing (Direct Sync Mode if possible depending on OS)
     let mut dest_file = File::create(&dest_path)
@@ -248,7 +280,7 @@ pub async fn run_raw_flash_cli(
     let mut bytes_written = 0u64;
 
     while bytes_written < total_bytes {
-        let read_len = src_file.read(&mut buffer)
+        let read_len = src_reader.read(&mut buffer)
             .await
             .map_err(|e| AppError::Io(e))?;
 
@@ -280,6 +312,10 @@ pub async fn run_raw_flash_cli(
     // Force synchronization of buffers to physical platter
     dest_file.sync_all().await?;
 
+    if let Some(mut child) = xz_child {
+        let _ = child.wait().await;
+    }
+
     let final_progress = FlashProgress {
         bytes_written: total_bytes,
         total_bytes,
@@ -293,4 +329,102 @@ pub async fn run_raw_flash_cli(
     }
 
     Ok(())
+}
+
+// ============================================================
+// HELPERS FOR SAFETY & DYNAMIC SYSTEM DISK DETECTION
+// ============================================================
+
+#[cfg(unix)]
+fn get_parent_disk(path: &str) -> String {
+    let path = path.trim();
+    if path.starts_with("/dev/nvme") {
+        if let Some(pos) = path.rfind('p') {
+            if pos > "/dev/nvme".len() {
+                return path[..pos].to_string();
+            }
+        }
+    } else if path.starts_with("/dev/sd") || path.starts_with("/dev/hd") || path.starts_with("/dev/vd") {
+        let parent = path.trim_end_matches(|c: char| c.is_ascii_digit());
+        return parent.to_string();
+    } else if path.starts_with("/dev/mmcblk") {
+        if let Some(pos) = path.rfind('p') {
+            if pos > "/dev/mmcblk".len() {
+                return path[..pos].to_string();
+            }
+        }
+    }
+    path.to_string()
+}
+
+#[cfg(unix)]
+fn get_system_disks() -> Vec<String> {
+    let mut disks = Vec::new();
+    
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(content) = std::fs::read_to_string("/proc/mounts") {
+            for line in content.lines() {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() >= 2 && parts[1] == "/" {
+                    let source = parts[0];
+                    if source.starts_with("/dev/") {
+                        let parent = get_parent_disk(source);
+                        disks.push(parent);
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(output) = std::process::Command::new("df").arg("/").output() {
+            if output.status.success() {
+                let stdout_str = String::from_utf8_lossy(&output.stdout);
+                for line in stdout_str.lines().skip(1) {
+                    let parts: Vec<&str> = line.split_whitespace().collect();
+                    if let Some(source) = parts.first() {
+                        if source.starts_with("/dev/") {
+                            let parent = get_parent_disk(source);
+                            disks.push(parent);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    if disks.is_empty() {
+        disks.push("/dev/nvme0n1".to_string());
+    }
+    
+    disks
+}
+
+// ============================================================
+// HELPERS FOR COMPRESSED IMAGES (.XZ)
+// ============================================================
+
+pub fn get_xz_uncompressed_size(path: &str) -> AppResult<u64> {
+    let output = std::process::Command::new("xz")
+        .args(["--robot", "-l", path])
+        .output()
+        .map_err(|e| AppError::Flash(format!("No se pudo ejecutar xz: {}", e)))?;
+
+    if !output.status.success() {
+        return Err(AppError::Flash(String::from_utf8_lossy(&output.stderr).to_string()));
+    }
+
+    let stdout_str = String::from_utf8_lossy(&output.stdout);
+    for line in stdout_str.lines() {
+        let parts: Vec<&str> = line.split('\t').collect();
+        if parts.first() == Some(&"totals") && parts.len() >= 5 {
+            if let Ok(size) = parts[4].parse::<u64>() {
+                return Ok(size);
+            }
+        }
+    }
+
+    Err(AppError::Flash("No se pudo obtener el tamaño descomprimido del archivo xz.".to_string()))
 }
