@@ -149,6 +149,7 @@ export default function App() {
             wifiPassword: wifiPassword || null,
             sshEnabled,
             rpiModel,
+            serialNumber: serialNumber || null,
           };
           await invoke("save_device_config", { mountPath: device.path, config });
           addLog("¡Configuración y optimizaciones inyectadas con éxito!", "success");

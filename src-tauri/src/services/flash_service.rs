@@ -476,9 +476,22 @@ fn install_sigil_hardware(device: &str) -> AppResult<()> {
     let _ = std::process::Command::new("umount").arg(mount_dir).status();
 
     println!("Montando partición raíz {} en {}...", part2, mount_dir);
-    let mount_status = std::process::Command::new("mount")
+    let mut mount_status = std::process::Command::new("mount")
         .args(&[&part2, mount_dir])
         .status();
+
+    // Reintentar hasta 3 veces por si el kernel tarda en registrar las particiones tras el flasheo de bloques raw
+    for i in 1..=3 {
+        if mount_status.is_ok() && mount_status.as_ref().unwrap().success() {
+            break;
+        }
+        println!("Intento {} de montaje falló o demoró. Esperando y reintentando...", i);
+        std::thread::sleep(std::time::Duration::from_millis(2000));
+        let _ = std::process::Command::new("partprobe").arg(device).status();
+        mount_status = std::process::Command::new("mount")
+            .args(&[&part2, mount_dir])
+            .status();
+    }
 
     if mount_status.is_err() || !mount_status.unwrap().success() {
         return Err(AppError::Flash(format!(
@@ -520,10 +533,8 @@ loginctl enable-linger sigil || true
 if [ -f /etc/rc.local.orig ]; then
     mv /etc/rc.local.orig /etc/rc.local
 else
-    cat << 'EOF' > /etc/rc.local
-#!/bin/sh -e
-exit 0
-EOF
+    echo '#!/bin/sh -e' > /etc/rc.local
+    echo 'exit 0' >> /etc/rc.local
     chmod +x /etc/rc.local
 fi
 

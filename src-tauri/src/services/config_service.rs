@@ -68,6 +68,23 @@ impl ConfigService {
         std::fs::write(&config_file_path, json_data)?;
         tracing::info!("Archivo device-config.json inyectado exitosamente.");
 
+        // Inyectamos sigil_provision.json para la identidad requerida por el instalador
+        let serial = config.serial_number.as_deref().unwrap_or("SS-UNKNOWN");
+        let provision_json = serde_json::json!({
+            "_schema_version": "1.0",
+            "serial_number": serial,
+            "model": "Sigil-Streamer",
+            "model_version": "v1",
+            "batch": "batch-01",
+            "capabilities": {
+                "i2s_dac": false
+            }
+        });
+        let provision_file_path = temp_mount.join("sigil_provision.json");
+        let provision_data = serde_json::to_string_pretty(&provision_json)?;
+        std::fs::write(&provision_file_path, provision_data)?;
+        tracing::info!("Archivo sigil_provision.json inyectado exitosamente.");
+
         // If SSH is enabled, create empty trigger file
         if config.ssh_enabled {
             let ssh_file_path = temp_mount.join("ssh");
@@ -119,6 +136,22 @@ impl ConfigService {
         let json_data = serde_json::to_string_pretty(config)?;
         std::fs::write(&config_file_path, json_data)?;
 
+        // Inyectamos sigil_provision.json para la identidad requerida por el instalador
+        let serial = config.serial_number.as_deref().unwrap_or("SS-UNKNOWN");
+        let provision_json = serde_json::json!({
+            "_schema_version": "1.0",
+            "serial_number": serial,
+            "model": "Sigil-Streamer",
+            "model_version": "v1",
+            "batch": "batch-01",
+            "capabilities": {
+                "i2s_dac": false
+            }
+        });
+        let provision_file_path = temp_mount.join("sigil_provision.json");
+        let provision_data = serde_json::to_string_pretty(&provision_json)?;
+        let _ = std::fs::write(&provision_file_path, provision_data);
+
         if config.ssh_enabled {
             let ssh_file_path = temp_mount.join("ssh");
             std::fs::write(ssh_file_path, "")?;
@@ -157,6 +190,19 @@ impl ConfigService {
 
         let json_escaped = serde_json::to_string(config)?.replace("\"", "`\"");
         
+        let serial = config.serial_number.as_deref().unwrap_or("SS-UNKNOWN");
+        let provision_json = serde_json::json!({
+            "_schema_version": "1.0",
+            "serial_number": serial,
+            "model": "Sigil-Streamer",
+            "model_version": "v1",
+            "batch": "batch-01",
+            "capabilities": {
+                "i2s_dac": false
+            }
+        });
+        let provision_escaped = serde_json::to_string(&provision_json)?.replace("\"", "`\"");
+
         let mut ps_script = format!(
             "$part = Get-Partition -DiskNumber {} -PartitionNumber 1; ", drive_number
         );
@@ -171,7 +217,9 @@ impl ConfigService {
              }
              $dest = \"$($letter):\\device-config.json\";
              \"{}\" | Out-File -FilePath $dest -Encoding utf8;
-             ", drive_number, json_escaped
+             $prov = \"$($letter):\\sigil_provision.json\";
+             \"{}\" | Out-File -FilePath $prov -Encoding utf8;
+             ", drive_number, json_escaped, provision_escaped
         );
 
         if config.ssh_enabled {

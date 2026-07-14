@@ -47,4 +47,6 @@ pub struct DeviceConfig {
     pub ssh_enabled: bool,
     #[serde(rename = "rpiModel")]
     pub rpi_model: Option<String>,
+    #[serde(rename = "serialNumber")]
+    pub serial_number: Option<String>,
 }
