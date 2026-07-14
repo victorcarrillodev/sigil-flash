@@ -1,0 +1,120 @@
+{
+  "comment": "Source → destination mapping for Sigil OS payload",
+  "version": "2.0",
+  "source_base": "sigil-hardware",
+  "entries": [
+    {
+      "source": "panel/*.py",
+      "destination": "/home/sigil/",
+      "type": "file",
+      "owner": "sigil:sigil",
+      "mode": "644",
+      "description": "Flask application files"
+    },
+    {
+      "source": "panel/templates/",
+      "destination": "/home/sigil/templates/",
+      "type": "directory",
+      "owner": "sigil:sigil",
+      "mode": "755",
+      "description": "Jinja2 HTML templates"
+    },
+    {
+      "source": "panel/static/",
+      "destination": "/home/sigil/static/",
+      "type": "directory",
+      "owner": "sigil:sigil",
+      "mode": "755",
+      "description": "Static assets (CSS, JS)"
+    },
+    {
+      "source": "scripts/*.sh",
+      "destination": "/usr/local/bin/",
+      "type": "file",
+      "owner": "root:root",
+      "mode": "755",
+      "executable": true,
+      "description": "System shell scripts"
+    },
+    {
+      "source": "services/*.service",
+      "destination": "/etc/systemd/system/",
+      "type": "file",
+      "owner": "root:root",
+      "mode": "644",
+      "description": "Systemd service units"
+    },
+    {
+      "source": "conf/bluetooth-main.conf",
+      "destination": "/etc/bluetooth/main.conf",
+      "type": "file",
+      "owner": "root:root",
+      "mode": "644",
+      "description": "BlueZ configuration"
+    },
+    {
+      "source": "conf/pulse-daemon.conf",
+      "destination": "/etc/pulse/daemon.conf",
+      "type": "file",
+      "owner": "root:root",
+      "mode": "644",
+      "description": "PulseAudio daemon config"
+    },
+    {
+      "source": "conf/dnsmasq.conf",
+      "destination": "/etc/dnsmasq.conf",
+      "type": "file",
+      "owner": "root:root",
+      "mode": "644",
+      "description": "DHCP server for AP mode"
+    },
+    {
+      "source": "conf/hostapd.conf",
+      "destination": "/etc/hostapd/hostapd.conf",
+      "type": "file",
+      "owner": "root:root",
+      "mode": "644",
+      "description": "WiFi AP configuration"
+    },
+    {
+      "source": "conf/sigil-network.sudoers",
+      "destination": "/etc/sudoers.d/sigil-network",
+      "type": "file",
+      "owner": "root:root",
+      "mode": "440",
+      "description": "Sudo rules for panel"
+    },
+    {
+      "source": "conf/99-sigil-mac-fixed.conf",
+      "destination": "/etc/NetworkManager/conf.d/99-sigil-mac-fixed.conf",
+      "type": "file",
+      "owner": "root:root",
+      "mode": "644",
+      "description": "Disable MAC randomization"
+    },
+    {
+      "source": "conf/audio.conf",
+      "destination": "/etc/sigil/audio.conf",
+      "type": "file",
+      "owner": "root:root",
+      "mode": "600",
+      "description": "Audio system configuration"
+    },
+    {
+      "source": "conf/security.conf",
+      "destination": "/etc/sigil/security.conf",
+      "type": "file",
+      "owner": "root:root",
+      "mode": "600",
+      "description": "Security configuration"
+    },
+    {
+      "source": "conf/wifi-fallback.conf",
+      "destination": "/etc/sigil/wifi-fallback.conf",
+      "type": "file",
+      "owner": "root:root",
+      "mode": "644",
+      "description": "WiFi fallback hysteresis and connectivity probe configuration"
+    }
+  ]
+}

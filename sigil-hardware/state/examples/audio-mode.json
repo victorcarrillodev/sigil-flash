@@ -1,0 +1,13 @@
+{
+  "_schema_version": "1.0",
+  "mode": "RADIO",
+  "desired_mode": "RADIO",
+  "reason": "server_available",
+  "since": "2026-07-09T10:00:00Z",
+  "internet_available": true,
+  "cache_status": "COMPLETE",
+  "active_playlist_version": "sha256:8f14e45f",
+  "last_transition_at": "2026-07-09T09:55:00Z",
+  "transition_count": 3,
+  "last_error": null
+}

@@ -1,0 +1,48 @@
+{
+  "_schema_version": "1.0",
+  "active_cache": {
+    "playlist_id": "pl_abc123",
+    "version_hash": "sha256:8f14e45f",
+    "downloaded_at": "2026-07-09T10:05:00Z",
+    "expires_at": "2026-07-16T10:05:00Z",
+    "tracks_count": 50,
+    "total_size_bytes": 524288000,
+    "last_verified_at": "2026-07-09T10:05:00Z",
+    "last_hash_check": "sha256:abc123",
+    "integrity_verified": true
+  },
+  "staging_cache": {
+    "playlist_id": null,
+    "version_hash": null,
+    "download_started_at": null,
+    "progress_percent": 0,
+    "tracks_downloaded": 0,
+    "tracks_total": 0
+  },
+  "statistics": {
+    "total_sync_operations": 150,
+    "successful_syncs": 145,
+    "failed_syncs": 5,
+    "last_successful_sync": "2026-07-09T10:05:00Z",
+    "last_failed_sync": null,
+    "bytes_downloaded_total": 78643200000,
+    "bandwidth_saved_by_skipping": 52428800000
+  },
+  "expiration_warning_sent": false,
+  "expiration_warning_at": null,
+  "meta": {
+    "deeply": {
+      "nested": {
+        "key": "found-it"
+      }
+    }
+  },
+  "array_field": [1, 2, 3],
+  "empty_array": [],
+  "empty_object": {},
+  "number_field": 42,
+  "string_field": "hello world",
+  "bool_true": true,
+  "bool_false": false,
+  "null_field": null
+}

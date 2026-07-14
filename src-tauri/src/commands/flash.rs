@@ -46,3 +46,31 @@ pub async fn cancel_flash(
     tracing::info!("Comando de cancelación de flasheo invocado.");
     flash_service.cancel_flash().await
 }
+
+#[tauri::command]
+pub async fn get_hardware_size() -> AppResult<u64> {
+    let path = "/home/dev-pro/Escritorio/sigil-flash/sigil-hardware";
+    let mut total_size = 0;
+    
+    fn dir_size(dir: &std::path::Path) -> std::io::Result<u64> {
+        let mut size = 0;
+        if dir.is_dir() {
+            for entry in std::fs::read_dir(dir)? {
+                let entry = entry?;
+                let path = entry.path();
+                if path.is_dir() {
+                    size += dir_size(&path)?;
+                } else {
+                    size += entry.metadata()?.len();
+                }
+            }
+        }
+        Ok(size)
+    }
+    
+    if let Ok(size) = dir_size(std::path::Path::new(path)) {
+        total_size = size;
+    }
+    
+    Ok(total_size)
+}

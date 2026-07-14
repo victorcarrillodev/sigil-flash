@@ -1,0 +1,34 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "schema-playlist-active.json",
+  "title": "Active Playlist",
+  "description": "Currently active playlist being used for LOCAL playback",
+  "type": "object",
+  "required": ["_schema_version", "playlist_id", "version_hash", "tracks"],
+  "properties": {
+    "_schema_version": { "const": "1.0" },
+    "playlist_id": { "type": "string" },
+    "version_hash": { "type": "string" },
+    "source": { "type": "string" },
+    "created_at": { "type": "string", "format": "date-time" },
+    "downloaded_at": { "type": "string", "format": "date-time" },
+    "tracks": {
+      "type": "array",
+      "minItems": 0,
+      "items": {
+        "type": "object",
+        "required": ["id", "url", "filename", "sha256"],
+        "properties": {
+          "id": { "type": "string" },
+          "url": { "type": "string" },
+          "filename": { "type": "string" },
+          "sha256": { "type": "string" },
+          "duration_seconds": { "type": "integer", "minimum": 0 },
+          "title": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

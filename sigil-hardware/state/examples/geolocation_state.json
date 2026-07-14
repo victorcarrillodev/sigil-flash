@@ -1,0 +1,9 @@
+{
+  "_schema_version": "1.0",
+  "device_id": "10000000abcdef",
+  "last_attempt_time": 1770739200,
+  "last_success_time": 1770739200,
+  "last_result": "success",
+  "last_http_status": 200,
+  "last_ap_count": 12
+}

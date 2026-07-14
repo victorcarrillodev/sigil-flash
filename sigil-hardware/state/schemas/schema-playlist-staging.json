@@ -1,0 +1,45 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "schema-playlist-staging.json",
+  "title": "Staging Playlist",
+  "description": "Playlist being downloaded to staging/ (includes download progress)",
+  "type": "object",
+  "required": ["_schema_version", "playlist_id", "version_hash"],
+  "properties": {
+    "_schema_version": { "const": "1.0" },
+    "playlist_id": { "type": "string" },
+    "version_hash": { "type": "string" },
+    "source": { "type": "string" },
+    "created_at": { "type": "string", "format": "date-time" },
+    "download_status": {
+      "type": "object",
+      "properties": {
+        "total_tracks": { "type": "integer", "minimum": 0 },
+        "downloaded_tracks": { "type": "integer", "minimum": 0 },
+        "verified_tracks": { "type": "integer", "minimum": 0 },
+        "failed_tracks": { "type": "array", "items": { "type": "string" } },
+        "progress_percent": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "started_at": { "type": "string", "format": "date-time" }
+      },
+      "additionalProperties": false
+    },
+    "tracks": {
+      "type": "array",
+      "minItems": 0,
+      "items": {
+        "type": "object",
+        "required": ["id", "url", "filename", "sha256"],
+        "properties": {
+          "id": { "type": "string" },
+          "url": { "type": "string" },
+          "filename": { "type": "string" },
+          "sha256": { "type": "string" },
+          "duration_seconds": { "type": "integer", "minimum": 0 },
+          "title": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

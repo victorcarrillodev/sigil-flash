@@ -1,0 +1,69 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "schema-audio-mode.json",
+  "title": "Audio Mode State",
+  "description": "Current audio playback mode for Sigil device — written by audio-manager, read by audio-player",
+  "type": "object",
+  "required": [
+    "_schema_version",
+    "mode",
+    "desired_mode",
+    "reason",
+    "since",
+    "internet_available",
+    "cache_status",
+    "active_playlist_version",
+    "last_transition_at",
+    "transition_count"
+  ],
+  "properties": {
+    "_schema_version": { "const": "1.0" },
+    "mode": {
+      "type": "string",
+      "enum": [
+        "RADIO",
+        "LOCAL",
+        "TRANSITION_TO_LOCAL",
+        "TRANSITION_TO_RADIO",
+        "BLOCKED_NO_CACHE",
+        "BLOCKED_NO_SINK",
+        "BLOCKED_LEGACY",
+        "ERROR"
+      ]
+    },
+    "desired_mode": {
+      "type": "string",
+      "enum": ["RADIO", "LOCAL"]
+    },
+    "reason": {
+      "type": "string",
+      "enum": [
+        "server_available",
+        "server_unreachable",
+        "network_lost",
+        "internet_restored",
+        "cache_ready",
+        "cache_empty",
+        "no_sink",
+        "no_audio_output",
+        "legacy_active",
+        "manual_switch",
+        "playlist_updated",
+        "recovery_timer_expired",
+        "startup",
+        "error"
+      ]
+    },
+    "since": { "type": "string", "format": "date-time" },
+    "internet_available": { "type": "boolean" },
+    "cache_status": {
+      "type": "string",
+      "enum": ["COMPLETE", "PARTIAL", "EMPTY", "EXPIRED", "UNKNOWN"]
+    },
+    "active_playlist_version": { "type": ["string", "null"] },
+    "last_transition_at": { "type": ["string", "null"], "format": "date-time" },
+    "transition_count": { "type": "integer", "minimum": 0 },
+    "last_error": { "type": ["string", "null"] }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,14 @@
+{
+  "_schema_version": "1.0",
+  "preferred_device": {
+    "mac": "AA:BB:CC:DD:EE:FF",
+    "name": "JBL Flip 5",
+    "paired_at": "2026-06-15T08:00:00Z",
+    "last_connected": "2026-07-09T12:00:00Z"
+  },
+  "connection_status": {
+    "connected": true,
+    "profile": "A2DP",
+    "since": "2026-07-09T10:30:00Z"
+  }
+}

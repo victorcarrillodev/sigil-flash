@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Panel de control Sigil — conecta altavoces Bluetooth y WiFi.">
+  <meta name="theme-color" content="#0d0f14">
+  <title>Sigil</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+
+  <!-- ── Header ─────────────────────────────────────────────────────────── -->
+  <header class="page-header">
+    <div class="page-logo">
+      <div class="page-logo-icon">🎵</div>
+      <h1 class="page-title">Sigil</h1>
+      <button id="diag-toggle" class="btn-icon" title="Diagnóstico">⚙️</button>
+    </div>
+    <p class="page-subtitle">Conecta tus altavoces e Internet desde aquí.</p>
+  </header>
+
+  <!-- ── Música en reproducción ────────────────────────────────────────── -->
+  <section class="card music-card" aria-labelledby="music-heading" id="music-section">
+    <div class="card-header">
+      <span class="card-header-icon">🎸</span>
+      <h2 class="card-title" id="music-heading">Reproducción Actual</h2>
+    </div>
+    <div class="music-player" id="music-player">
+      <div class="music-disc" id="music-disc">🎵</div>
+      <div class="music-info">
+        <div class="music-track" id="music-track">Sin reproducción</div>
+        <div class="music-speaker" id="music-speaker">
+          <span class="speaker-dot" id="speaker-dot"></span>
+          <span id="speaker-label">Bocina no conectada</span>
+        </div>
+      </div>
+      <button class="btn-next" id="music-next-btn" title="Siguiente pista" disabled>⏭</button>
+    </div>
+  </section>
+
+  <!-- ── Bluetooth ──────────────────────────────────────────────────────── -->
+  <section class="card" aria-labelledby="bt-heading">
+    <div class="card-header">
+      <span class="card-header-icon">🔊</span>
+      <h2 class="card-title" id="bt-heading">Tus Altavoces Bluetooth</h2>
+    </div>
+
+    <button id="scanBtBtn" class="btn-primary">
+      📡 Buscar altavoces cercanos
+    </button>
+    <span id="bt-status" class="scan-label"></span>
+
+    <div id="bt-table">
+      {% for d in bt_devices %}
+      <div class="device-row" id="bt-row-{{ d.mac | replace(':', '') }}">
+        <div class="device-info">
+          <div class="device-icon {{ 'active' if d.connected else 'saved' }}">
+            {{ '✅' if d.connected else '🔊' }}
+          </div>
+          <div>
+            <div class="device-name">{{ d.name }}</div>
+            <div class="device-status {{ 'active' if d.connected else '' }}">
+              {{ 'Conectado ahora' if d.connected else 'Guardado' }}
+            </div>
+          </div>
+        </div>
+        <div class="device-actions">
+          {% if d.connected %}
+            <button class="btn-disconnect disconnect-bt-btn" data-mac="{{ d.mac }}">Desconectar</button>
+          {% else %}
+            <button class="btn-outline connect-bt-btn" data-mac="{{ d.mac }}">Conectar</button>
+          {% endif %}
+          <button class="btn-danger remove-bt-btn" data-mac="{{ d.mac }}" title="Eliminar">🗑</button>
+        </div>
+      </div>
+      {% else %}
+      <div class="no-devices">No hay altavoces guardados.<br>Pulsa <strong>Buscar</strong> para agregar uno.</div>
+      {% endfor %}
+    </div>
+
+    <div id="bt-result" class="result-msg" role="status" aria-live="polite"></div>
+  </section>
+
+  <!-- ── WiFi ───────────────────────────────────────────────────────────── -->
+  <section class="card" aria-labelledby="wifi-heading">
+    <div class="card-header">
+      <span class="card-header-icon">📶</span>
+      <h2 class="card-title" id="wifi-heading">Conexión a Internet</h2>
+    </div>
+
+    {% if current_wifi %}
+    <div class="status-bar connected">
+      ✅ Conectado a <strong>&nbsp;{{ current_wifi }}</strong>
+    </div>
+    {% else %}
+    <div class="status-bar disconnected" id="current-wifi-div">
+      ⚠️ Sin conexión a Internet
+    </div>
+    {% endif %}
+
+    <button id="scanWifiBtn" class="btn-primary">
+      📶 Buscar redes WiFi
+    </button>
+    <span id="wifi-scan-status" class="scan-label"></span>
+
+    <div id="wifi-table">
+      {% for n in wifi_networks %}
+      <div class="wifi-row">
+        <div class="wifi-info">
+          <div>
+            <div class="wifi-name">{{ n.ssid }}</div>
+            <div class="wifi-meta">
+              <span class="wifi-signal">{{ n.signal }}%</span>
+              {% if n.security %}<span title="Red protegida">🔒</span>{% endif %}
+            </div>
+          </div>
+        </div>
+        <button class="btn-outline connect-wifi-btn"
+                data-ssid="{{ n.ssid }}"
+                data-security="{{ n.security }}"
+                data-saved="{{ 1 if n.saved else 0 }}">Conectar</button>
+      </div>
+      {% endfor %}
+    </div>
+
+    <div id="wifi-result" class="result-msg" role="status" aria-live="polite"></div>
+  </section>
+
+  <!-- ── Diagnóstico ───────────────────────────────────────────────────── -->
+  <details id="diag-section" class="diag-collapsible">
+    <summary class="diag-summary">
+      <span>⚙️ Diagnóstico</span>
+      <span class="diag-arrow">▶</span>
+    </summary>
+    <div class="diag-content">
+      <div class="sys-grid">
+        <div class="sys-item">
+          <span class="sys-label">Tiempo encendido</span>
+          <span class="sys-value" id="sys-uptime">—</span>
+        </div>
+        <div class="sys-item">
+          <span class="sys-label">Conexión</span>
+          <span class="sys-value" id="sys-connection">—</span>
+        </div>
+      </div>
+    </div>
+  </details>
+
+  <!-- ── Modal contraseña WiFi ──────────────────────────────────────────── -->
+  <div id="wifi-modal" role="dialog" aria-modal="true" aria-labelledby="modal-ssid">
+    <div class="modal-box">
+      <h3 id="modal-ssid"></h3>
+      <input type="password"
+             id="wifi-password"
+             placeholder="Contraseña de la red"
+             autocomplete="current-password">
+      <div class="modal-actions">
+        <button class="modal-confirm" onclick="confirmWifiConnect()">Conectar</button>
+        <button class="modal-cancel"  onclick="closeModal()">Cancelar</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+</html>

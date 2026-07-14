@@ -1,0 +1,76 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "schema-cache-meta.json",
+  "title": "Cache Metadata",
+  "description": "TTL tracking and cache policy state for 7-day playlist cache",
+  "type": "object",
+  "required": ["_schema_version", "cache_policy", "active_cache"],
+  "properties": {
+    "_schema_version": { "const": "1.0" },
+    "cache_policy": {
+      "type": "object",
+      "required": ["max_ttl_days", "auto_renew", "delete_on_expire"],
+      "properties": {
+        "max_ttl_days": { "type": "integer", "minimum": 1, "maximum": 30 },
+        "auto_renew": { "type": "boolean" },
+        "delete_on_expire": { "type": "boolean" },
+        "preserve_on_server_unavailable": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "active_cache": {
+      "type": "object",
+      "properties": {
+        "playlist_id": { "type": ["string", "null"] },
+        "version_hash": { "type": ["string", "null"] },
+        "downloaded_at": { "type": ["string", "null"], "format": "date-time" },
+        "expires_at": { "type": ["string", "null"], "format": "date-time" },
+        "tracks_count": { "type": "integer", "minimum": 0 },
+        "total_size_bytes": { "type": "integer", "minimum": 0 },
+        "last_verified_at": { "type": ["string", "null"], "format": "date-time" },
+        "last_hash_check": { "type": ["string", "null"] },
+        "integrity_verified": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "staging_cache": {
+      "type": "object",
+      "properties": {
+        "playlist_id": { "type": ["string", "null"] },
+        "version_hash": { "type": ["string", "null"] },
+        "download_started_at": { "type": ["string", "null"], "format": "date-time" },
+        "progress_percent": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "tracks_downloaded": { "type": "integer", "minimum": 0 },
+        "tracks_total": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "statistics": {
+      "type": "object",
+      "properties": {
+        "total_sync_operations": { "type": "integer", "minimum": 0 },
+        "successful_syncs": { "type": "integer", "minimum": 0 },
+        "failed_syncs": { "type": "integer", "minimum": 0 },
+        "last_successful_sync": { "type": ["string", "null"], "format": "date-time" },
+        "last_failed_sync": { "type": ["string", "null"], "format": "date-time" },
+        "bytes_downloaded_total": { "type": "integer", "minimum": 0 },
+        "bandwidth_saved_by_skipping": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "expiration_warning_sent": { "type": "boolean" },
+    "expiration_warning_at": { "type": ["string", "null"], "format": "date-time" },
+    "runtime": {
+      "type": "object",
+      "description": "Cumulative power-on runtime counter for cache expiration",
+      "properties": {
+        "runtime_seconds": { "type": "integer", "minimum": 0 },
+        "runtime_limit_seconds": { "const": 604800 },
+        "runtime_remaining_seconds": { "type": "integer", "minimum": 0 },
+        "last_runtime_check_uptime": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,20 @@
+[Unit]
+Description=Sigil Radio Fetcher — playlist download, hash verification, atomic swap
+Documentation=docs/ARCHITECTURE_PLAN_PHASE1.md
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=sigil
+Group=sigil
+Environment=AUDIO_CONF=/etc/sigil/audio.conf
+ExecStart=/usr/local/bin/radio-fetcher.sh
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

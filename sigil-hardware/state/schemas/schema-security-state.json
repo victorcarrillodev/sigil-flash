@@ -1,0 +1,80 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "schema-security-state.json",
+  "title": "Security State",
+  "description": "Device security posture, tamper detection state, and wipe policy",
+  "type": "object",
+  "required": ["_schema_version", "device_mode", "build_type"],
+  "properties": {
+    "_schema_version": { "const": "1.0" },
+    "device_mode": {
+      "type": "string",
+      "enum": ["production", "factory", "debug", "support"]
+    },
+    "build_type": {
+      "type": "string",
+      "enum": ["production", "factory", "debug"]
+    },
+    "ssh_enabled": { "type": "boolean" },
+    "authorized_access": {
+      "type": "object",
+      "properties": {
+        "factory_keys_installed": { "type": "boolean" },
+        "debug_keys_installed": { "type": "boolean" },
+        "support_mode_active": { "type": "boolean" },
+        "last_authorized_access": { "type": ["string", "null"], "format": "date-time" }
+      },
+      "additionalProperties": false
+    },
+    "tamper_detection": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "last_check": { "type": ["string", "null"], "format": "date-time" },
+        "storage_integrity": {
+          "type": "object",
+          "properties": {
+            "status": { "enum": ["verified", "mismatch", "unknown", "not_applicable"] },
+            "last_verified": { "type": ["string", "null"], "format": "date-time" },
+            "hash": { "type": ["string", "null"] }
+          },
+          "additionalProperties": false
+        },
+        "memory_integrity": {
+          "type": "object",
+          "properties": {
+            "status": { "enum": ["verified", "mismatch", "unknown", "not_applicable"] },
+            "last_check": { "type": ["string", "null"], "format": "date-time" }
+          },
+          "additionalProperties": false
+        },
+        "boot_integrity": {
+          "type": "object",
+          "properties": {
+            "status": { "enum": ["verified", "mismatch", "unknown", "not_applicable"] },
+            "last_check": { "type": ["string", "null"], "format": "date-time" }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "tamper_events": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "wipe_policy": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "triggers": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "preserve_device_identity": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

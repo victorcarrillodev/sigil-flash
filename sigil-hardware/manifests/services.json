@@ -1,0 +1,32 @@
+{
+  "comment": "Systemd service enable/disable manifest for Sigil OS",
+  "version": "2.0",
+  "services": {
+    "enable": [
+      "NetworkManager",
+      "bluetooth-panel",
+      "bt-connect",
+      "radio-stream",
+      "sigil-leds",
+      "wifi-fallback"
+    ],
+    "disable": [
+      "hostapd",
+      "dnsmasq",
+      "audio-manager",
+      "radio-fetcher",
+      "audio-player"
+    ],
+    "mask": [],
+    "unmask": [
+      "hostapd",
+      "dnsmasq"
+    ]
+  },
+  "notes": [
+    "hostapd and dnsmasq are unmasked but DISABLED — wifi-fallback controls them",
+    "NetworkManager is enabled; dhcpcd should have wlan0 in denyinterfaces",
+    "bluetooth-panel requires /etc/sigil/panel.env (created by firstboot or flasher)",
+    "audio-manager, radio-fetcher, audio-player: Phase 1 skeletons — disabled until extraction complete"
+  ]
+}

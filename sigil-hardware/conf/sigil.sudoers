@@ -1,0 +1,20 @@
+# /etc/sudoers.d/sigil — Minimal sudo permissions for sigil user
+#
+# Only what bt-connect.sh actually needs:
+#   - rfkill unblock bluetooth
+#   - hciconfig hci0 up
+#   - chown / chmod preferred_bt.txt (fix root-owned file)
+#
+# Network operations are handled by root-run services (wifi-fallback.sh,
+# bluetooth-panel.service), so nmcli/iwlist/iw are NOT in this file.
+# ==============================================================================
+
+# Bluetooth management (bt-connect.sh)
+sigil ALL=(ALL) NOPASSWD: /usr/sbin/rfkill
+sigil ALL=(ALL) NOPASSWD: /usr/bin/rfkill
+sigil ALL=(ALL) NOPASSWD: /usr/sbin/hciconfig
+sigil ALL=(ALL) NOPASSWD: /usr/bin/hciconfig
+
+# Permission repair for preferred_bt.txt (bt-connect.sh)
+sigil ALL=(ALL) NOPASSWD: /bin/chown sigil\:sigil /home/sigil/preferred_bt.txt
+sigil ALL=(ALL) NOPASSWD: /bin/chmod 644 /home/sigil/preferred_bt.txt

@@ -1,0 +1,20 @@
+[Unit]
+Description=Sigil Bluetooth Control Panel
+After=network.target bluetooth.target
+Wants=bluetooth.target
+
+[Service]
+User=root
+Group=root
+EnvironmentFile=/etc/sigil/panel.env
+WorkingDirectory=/home/sigil
+ExecStartPre=/bin/sleep 8
+ExecStartPre=/bin/bash -c "iw dev wlan0 set power_save off || true"
+ExecStart=/usr/bin/python3 /home/sigil/app.py
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

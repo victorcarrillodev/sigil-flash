@@ -1,0 +1,19 @@
+{
+  "_schema_version": "1.0",
+  "event_id": "evt_abc123",
+  "event_type": "storage_integrity_mismatch",
+  "severity": "high",
+  "detected_at": "2026-07-09T14:30:00Z",
+  "details": {
+    "description": "Hash mismatch detected in /home/sigil/music/active/tracks/",
+    "expected_hash": "sha256:abc123",
+    "actual_hash": "sha256:def456",
+    "affected_files": ["track003.mp3", "track007.mp3"]
+  },
+  "source": "radio-fetcher.service",
+  "auto_response": "alert_only",
+  "user_notified": true,
+  "resolved": false,
+  "resolved_at": null,
+  "resolution": null
+}

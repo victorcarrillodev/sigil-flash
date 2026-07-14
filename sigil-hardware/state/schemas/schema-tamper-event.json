@@ -1,0 +1,50 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "schema-tamper-event.json",
+  "title": "Tamper Event",
+  "description": "Security event record for tamper detection incidents",
+  "type": "object",
+  "required": ["_schema_version", "event_id", "event_type", "severity"],
+  "properties": {
+    "_schema_version": { "const": "1.0" },
+    "event_id": { "type": "string" },
+    "event_type": {
+      "type": "string",
+      "enum": [
+        "storage_integrity_mismatch",
+        "ssh_access_attempt",
+        "unauthorized_modification",
+        "extraction_detected",
+        "runtime_integrity_breach"
+      ]
+    },
+    "severity": {
+      "type": "string",
+      "enum": ["low", "medium", "high", "critical"]
+    },
+    "detected_at": { "type": "string", "format": "date-time" },
+    "details": {
+      "type": "object",
+      "properties": {
+        "description": { "type": "string" },
+        "expected_hash": { "type": "string" },
+        "actual_hash": { "type": "string" },
+        "affected_files": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "source": { "type": "string" },
+    "auto_response": {
+      "type": "string",
+      "enum": ["none", "alert_only", "wipe"]
+    },
+    "user_notified": { "type": "boolean" },
+    "resolved": { "type": "boolean" },
+    "resolved_at": { "type": ["string", "null"], "format": "date-time" },
+    "resolution": { "type": ["string", "null"] }
+  },
+  "additionalProperties": false
+}

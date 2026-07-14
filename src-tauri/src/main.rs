@@ -52,6 +52,7 @@ pub fn run() {
             commands::downloads::cancel_download,
             commands::downloads::verify_image,
             commands::config::save_device_config,
+            commands::flash::get_hardware_size,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

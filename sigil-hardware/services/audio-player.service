@@ -1,0 +1,18 @@
+[Unit]
+Description=Sigil Audio Player — playlist playback engine, state persistence
+After=network-online.target pulseaudio.service bt-connect.service
+Wants=network-online.target pulseaudio.service bt-connect.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=sigil
+Group=sigil
+ExecStart=/usr/local/bin/audio-player.sh
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

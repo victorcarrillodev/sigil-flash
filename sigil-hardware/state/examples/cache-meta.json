@@ -1,0 +1,45 @@
+{
+  "_schema_version": "1.0",
+  "cache_policy": {
+    "max_ttl_days": 7,
+    "auto_renew": true,
+    "delete_on_expire": true,
+    "preserve_on_server_unavailable": false
+  },
+  "active_cache": {
+    "playlist_id": "pl_abc123",
+    "version_hash": "sha256:8f14e45f",
+    "downloaded_at": "2026-07-09T10:05:00Z",
+    "expires_at": "2026-07-16T10:05:00Z",
+    "tracks_count": 50,
+    "total_size_bytes": 524288000,
+    "last_verified_at": "2026-07-09T10:05:00Z",
+    "last_hash_check": "sha256:abc123",
+    "integrity_verified": true
+  },
+  "staging_cache": {
+    "playlist_id": null,
+    "version_hash": null,
+    "download_started_at": null,
+    "progress_percent": 0,
+    "tracks_downloaded": 0,
+    "tracks_total": 0
+  },
+  "statistics": {
+    "total_sync_operations": 150,
+    "successful_syncs": 145,
+    "failed_syncs": 5,
+    "last_successful_sync": "2026-07-09T10:05:00Z",
+    "last_failed_sync": "2026-07-08T22:30:00Z",
+    "bytes_downloaded_total": 78643200000,
+    "bandwidth_saved_by_skipping": 52428800000
+  },
+  "expiration_warning_sent": false,
+  "expiration_warning_at": null,
+  "runtime": {
+    "runtime_seconds": 352000,
+    "runtime_limit_seconds": 604800,
+    "runtime_remaining_seconds": 252800,
+    "last_runtime_check_uptime": 123456.78
+  }
+}

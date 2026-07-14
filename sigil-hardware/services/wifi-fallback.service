@@ -1,0 +1,17 @@
+[Unit]
+Description=Sigil WiFi Fallback AP
+After=network.target NetworkManager.service
+Wants=network.target NetworkManager.service
+
+[Service]
+Type=simple
+User=root
+EnvironmentFile=-/etc/sigil/wifi-fallback.conf
+ExecStart=/usr/local/bin/wifi-fallback.sh
+Restart=on-failure
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

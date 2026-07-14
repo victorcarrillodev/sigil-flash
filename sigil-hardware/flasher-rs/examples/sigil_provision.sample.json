@@ -1,0 +1,10 @@
+{
+  "_schema_version": "1.0",
+  "serial_number": "SIGIL-Z2W-TEST-0001",
+  "model": "Sigil-Streamer",
+  "model_version": "v1",
+  "batch": "TEST-BATCH",
+  "capabilities": {
+    "i2s_dac": false
+  }
+}

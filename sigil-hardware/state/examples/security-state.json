@@ -1,0 +1,39 @@
+{
+  "_schema_version": "1.0",
+  "device_mode": "production",
+  "build_type": "production",
+  "ssh_enabled": false,
+  "authorized_access": {
+    "factory_keys_installed": false,
+    "debug_keys_installed": false,
+    "support_mode_active": false,
+    "last_authorized_access": null
+  },
+  "tamper_detection": {
+    "enabled": true,
+    "last_check": "2026-07-09T12:00:00Z",
+    "storage_integrity": {
+      "status": "verified",
+      "last_verified": "2026-07-09T12:00:00Z",
+      "hash": "sha256:abc123"
+    },
+    "memory_integrity": {
+      "status": "not_applicable",
+      "last_check": null
+    },
+    "boot_integrity": {
+      "status": "not_applicable",
+      "last_check": null
+    }
+  },
+  "tamper_events": [],
+  "wipe_policy": {
+    "enabled": true,
+    "triggers": [
+      "explicit_factory_reset",
+      "tamper_detected_storage",
+      "max_ttl_exceeded"
+    ],
+    "preserve_device_identity": true
+  }
+}

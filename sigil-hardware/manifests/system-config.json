@@ -1,0 +1,82 @@
+{
+  "comment": "System configuration manifest for Sigil OS",
+  "version": "1.0",
+  "boot_config": {
+    "file": "/boot/firmware/config.txt",
+    "fallback": "/boot/config.txt",
+    "changes": [
+      {
+        "search": "dtparam=audio=on",
+        "replace": "dtparam=audio=off",
+        "description": "Disable onboard audio (HDMI/analog)"
+      },
+      {
+        "ensure": "dtoverlay=hifiberry-dac",
+        "condition": "provision.capabilities.i2s_dac == true or confirmed legacy model mapping",
+        "otherwise": "remove exact dtoverlay=hifiberry-dac entry",
+        "description": "Enable I2S DAC only for explicitly declared PCM5102 hardware"
+      }
+    ]
+  },
+  "pulseaudio_default_pa": {
+    "file": "/etc/pulse/default.pa",
+    "append": [
+      "",
+      "# Sigil: conectar automáticamente al sink BT cuando aparece",
+      "load-module module-switch-on-connect"
+    ]
+  },
+  "hostapd_default": {
+    "file": "/etc/default/hostapd",
+    "ensure": "DAEMON_CONF=\"/etc/hostapd/hostapd.conf\""
+  },
+  "dhcpcd_deny_interfaces": {
+    "file": "/etc/dhcpcd.conf",
+    "ensure": "denyinterfaces wlan0",
+    "condition": "systemctl is-enabled dhcpcd"
+  },
+  "state_dirs": [
+    "/var/lib/wifi-manager",
+    "/etc/sigil"
+  ],
+  "state_files": [
+    {
+      "path": "/home/sigil/preferred_bt.txt",
+      "owner": "sigil:sigil",
+      "mode": "644"
+    },
+    {
+      "path": "/home/sigil/now_playing.txt",
+      "owner": "sigil:sigil",
+      "mode": "644"
+    },
+    {
+      "path": "/var/log/bt-connect.log",
+      "owner": "sigil:sigil",
+      "mode": "644"
+    },
+    {
+      "path": "/var/log/radio-stream.log",
+      "owner": "sigil:sigil",
+      "mode": "644"
+    },
+    {
+      "path": "/var/log/wifi-fallback.log",
+      "owner": "sigil:sigil",
+      "mode": "644"
+    },
+    {
+      "path": "/var/log/wifi-manager.log",
+      "owner": "sigil:sigil",
+      "mode": "644"
+    }
+  ],
+  "user": {
+    "username": "sigil",
+    "uid": 1001,
+    "shell": "/bin/bash",
+    "groups": ["bluetooth", "audio", "pulse-access"],
+    "password": "sigil1234",
+    "home": "/home/sigil"
+  }
+}

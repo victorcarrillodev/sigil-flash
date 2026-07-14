@@ -1,0 +1,52 @@
+# Exact runtime/install inputs included in a generated flasher payload.
+# Paths are relative to the sigil-hardware repository root. Keep this list
+# aligned with install.sh; development files and whole directories are not
+# implicitly copied.
+install.sh
+panel/app.py
+panel/bluetooth.py
+panel/config.py
+panel/device_identity.py
+panel/geolocation.py
+panel/wifi.py
+panel/static/css/style.css
+panel/static/js/app.js
+panel/templates/index.html
+scripts/audio-manager.sh
+scripts/audio-player.sh
+scripts/bt-connect.sh
+scripts/firstboot.sh
+scripts/radio-fetcher.sh
+scripts/radio-stream.sh
+scripts/set-a2dp.sh
+scripts/sigil-audio-route.sh
+scripts/sigil-audio-capability.sh
+scripts/sigil-cache-wipe.sh
+scripts/sigil-healthcheck.sh
+scripts/sigil-leds.sh
+scripts/sigil-logout-fetch-operation.sh
+scripts/sigil-validate-state.sh
+scripts/ssh-monitor.sh
+scripts/wifi-fallback.sh
+scripts/wifi-manager.sh
+services/audio-manager.service
+services/audio-player.service
+services/bluetooth-panel.service
+services/bt-connect.service
+services/radio-fetcher.service
+services/radio-stream.service
+services/sigil-leds.service
+services/ssh-monitor.service
+services/wifi-fallback.service
+conf/90-sigil-geolocate
+conf/99-sigil-mac-fixed.conf
+conf/audio.conf
+conf/bluetooth-main.conf
+conf/dnsmasq.conf
+conf/hostapd.conf
+conf/pulse-daemon.conf
+conf/security.conf
+conf/sigil-network.sudoers
+conf/sigil-tmpfiles.conf
+conf/sigil.sudoers
+conf/wifi-fallback.conf

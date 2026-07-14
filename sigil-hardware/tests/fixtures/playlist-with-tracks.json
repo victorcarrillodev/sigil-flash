@@ -1,0 +1,10 @@
+{
+  "_schema_version": "1.0",
+  "playlist_id": "pl_test001",
+  "version_hash": "sha256:abcdef123456",
+  "tracks": [
+    {"id": "tr_001", "url": "/audio/track1.mp3", "filename": "track1.mp3", "title": "First Track", "sha256": "aaa"},
+    {"id": "tr_002", "url": "/audio/track2.mp3", "filename": "track2.mp3", "title": "Second Track", "sha256": "bbb"},
+    {"id": "tr_003", "url": "/audio/track3.mp3", "filename": "track3.mp3", "title": "Third Track", "sha256": "ccc"}
+  ]
+}

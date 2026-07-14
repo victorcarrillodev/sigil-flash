@@ -1,4 +1,5 @@
 import { useMemo, useRef, useEffect, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { ImageInfo, Device, RPiModel, FlashProgress, LogEntry, formatSize } from "../App";
 import { BoardSVG } from "./BoardIcons";
 
@@ -183,30 +184,30 @@ function formatETA(sec: number): string {
 function DonutGauge({ 
   pct, 
   sublabel, 
-  deviceBytes, 
-  imageSize 
+  pctBoot,
+  pctOS,
+  pctPanel,
+  pctServices,
+  pctMusic,
+  pctFree
 }: { 
   pct: number; 
   sublabel: string; 
-  deviceBytes: number; 
-  imageSize: number; 
+  pctBoot: number;
+  pctOS: number;
+  pctPanel: number;
+  pctServices: number;
+  pctMusic: number;
+  pctFree: number;
 }) {
-  const R = 45;
+  const R = 40;
   const circ = 2 * Math.PI * R;
 
-  const hasData = deviceBytes > 0 && imageSize > 0;
-  
-  const bootBytes = 512 * 1024 * 1024;
-  const effectiveBoot = Math.min(imageSize, bootBytes);
-  const systemBytes = Math.max(0, imageSize - effectiveBoot);
-  const freeBytes = Math.max(0, deviceBytes - imageSize);
-
-  const pctBoot = hasData ? (effectiveBoot / deviceBytes) * 100 : 0;
-  const pctSystem = hasData ? (systemBytes / deviceBytes) * 100 : 0;
-  const pctFree = hasData ? (freeBytes / deviceBytes) * 100 : 100;
-
   const filledBoot = (pctBoot / 100) * circ;
-  const filledSystem = (pctSystem / 100) * circ;
+  const filledOS = (pctOS / 100) * circ;
+  const filledPanel = (pctPanel / 100) * circ;
+  const filledServices = (pctServices / 100) * circ;
+  const filledMusic = (pctMusic / 100) * circ;
   const filledFree = (pctFree / 100) * circ;
 
   const pctClass = pct > 0 ? "text-primary" : "text-muted";
@@ -229,34 +230,73 @@ function DonutGauge({
           r={R}
           fill="transparent"
           stroke="var(--bg-deep)"
-          strokeWidth="9"
+          strokeWidth="14"
         />
-        {hasData ? (
+        {pct > 0 ? (
           <>
-            {/* Segmento 3: Libre (Gris Apagado) */}
+            {/* Segmento 6: Libre (Gris) */}
             <circle
               cx="50"
               cy="50"
               r={R}
               fill="transparent"
               stroke="#475569"
-              strokeWidth="9"
+              strokeWidth="14"
               strokeDasharray={`${filledFree} ${circ - filledFree}`}
-              strokeDashoffset={-(filledBoot + filledSystem)}
-              strokeLinecap="round"
+              strokeDashoffset={-(filledBoot + filledOS + filledPanel + filledServices + filledMusic)}
+              strokeLinecap="butt"
               style={{ transition: "all 0.4s ease-out" }}
             />
-            {/* Segmento 2: System (Magenta) */}
+            {/* Segmento 5: Música (Verde) */}
+            <circle
+              cx="50"
+              cy="50"
+              r={R}
+              fill="transparent"
+              stroke="#10b981"
+              strokeWidth="14"
+              strokeDasharray={`${filledMusic} ${circ - filledMusic}`}
+              strokeDashoffset={-(filledBoot + filledOS + filledPanel + filledServices)}
+              strokeLinecap="butt"
+              style={{ transition: "all 0.4s ease-out" }}
+            />
+            {/* Segmento 4: Servicios (Púrpura) */}
+            <circle
+              cx="50"
+              cy="50"
+              r={R}
+              fill="transparent"
+              stroke="#a855f7"
+              strokeWidth="14"
+              strokeDasharray={`${filledServices} ${circ - filledServices}`}
+              strokeDashoffset={-(filledBoot + filledOS + filledPanel)}
+              strokeLinecap="butt"
+              style={{ transition: "all 0.4s ease-out" }}
+            />
+            {/* Segmento 3: Panel (Naranja) */}
+            <circle
+              cx="50"
+              cy="50"
+              r={R}
+              fill="transparent"
+              stroke="#f97316"
+              strokeWidth="14"
+              strokeDasharray={`${filledPanel} ${circ - filledPanel}`}
+              strokeDashoffset={-(filledBoot + filledOS)}
+              strokeLinecap="butt"
+              style={{ transition: "all 0.4s ease-out" }}
+            />
+            {/* Segmento 2: OS Base (Magenta) */}
             <circle
               cx="50"
               cy="50"
               r={R}
               fill="transparent"
               stroke="var(--accent)"
-              strokeWidth="9"
-              strokeDasharray={`${filledSystem} ${circ - filledSystem}`}
+              strokeWidth="14"
+              strokeDasharray={`${filledOS} ${circ - filledOS}`}
               strokeDashoffset={-filledBoot}
-              strokeLinecap="round"
+              strokeLinecap="butt"
               style={{ transition: "all 0.4s ease-out" }}
             />
             {/* Segmento 1: Boot (Cian) */}
@@ -266,10 +306,10 @@ function DonutGauge({
               r={R}
               fill="transparent"
               stroke="var(--info)"
-              strokeWidth="9"
+              strokeWidth="14"
               strokeDasharray={`${filledBoot} ${circ - filledBoot}`}
               strokeDashoffset={0}
-              strokeLinecap="round"
+              strokeLinecap="butt"
               style={{ transition: "all 0.4s ease-out" }}
             />
           </>
@@ -314,6 +354,26 @@ export default function CenterPanel({
 
   const consoleRef = useRef<HTMLDivElement | null>(null);
   const [elapsed, setElapsed] = useState(0);
+  const [hardwareSize, setHardwareSize] = useState(0);
+
+  useEffect(() => {
+    invoke("get_hardware_size")
+      .then((size: any) => {
+        if (typeof size === "number") {
+          setHardwareSize(size);
+        }
+      })
+      .catch((err) => {
+        console.error("Error al obtener tamaño de sigil-hardware:", err);
+      });
+  }, []);
+
+  const totalWriteSize = useMemo(() => {
+    if (!image) return 0;
+    // image.size + hardwareSize real + 1.2 GB de almacenamiento de música
+    const musicBytes = 1200 * 1024 * 1024;
+    return image.size + hardwareSize + musicBytes;
+  }, [image, hardwareSize]);
 
   useEffect(() => {
     if (consoleRef.current) {
@@ -353,8 +413,8 @@ export default function CenterPanel({
     };
     const deviceBytes = val * (multipliers[unit] ?? 1);
     if (deviceBytes === 0) return 0;
-    return Math.min(100, Math.round((image.size / deviceBytes) * 100));
-  }, [image, device]);
+    return Math.min(100, Math.round((totalWriteSize / deviceBytes) * 100));
+  }, [image, device, totalWriteSize]);
 
   // Parse total device bytes
   const deviceBytes = useMemo(() => {
@@ -369,6 +429,48 @@ export default function CenterPanel({
     };
     return val * (multipliers[unit] ?? 1);
   }, [device]);
+
+  // Parse unified space distribution percentages matching central usagePct
+  const spaceBreakdown = useMemo(() => {
+    if (!image || !device || deviceBytes === 0) {
+      return { pctBoot: 0, pctOS: 0, pctPanel: 0, pctServices: 0, pctMusic: 0, pctFree: 100 };
+    }
+    const bootBytes = 512 * 1024 * 1024;
+    const effectiveBoot = Math.min(image.size, bootBytes);
+    const osBytes = Math.max(0, image.size - effectiveBoot);
+    
+    // Desglosamos el hardwareSize real obtenido de Rust (40% panel, 60% services)
+    const panelBytes = Math.round(hardwareSize * 0.4);
+    const servicesBytes = Math.max(0, hardwareSize - panelBytes);
+    const musicBytes = 1200 * 1024 * 1024;
+    
+    const totalUsedBytes = effectiveBoot + osBytes + panelBytes + servicesBytes + musicBytes;
+
+    const rawBoot = (effectiveBoot / totalUsedBytes) * usagePct;
+    const rawOS = (osBytes / totalUsedBytes) * usagePct;
+    const rawPanel = (panelBytes / totalUsedBytes) * usagePct;
+    const rawServices = (servicesBytes / totalUsedBytes) * usagePct;
+    const rawMusic = (musicBytes / totalUsedBytes) * usagePct;
+
+    // Garantizar un mínimo visual de 3.5% para segmentos ocupados para que se vean con terminación recta
+    const pctBoot = rawBoot > 0 ? Math.max(rawBoot, 3.5) : 0;
+    const pctOS = rawOS > 0 ? Math.max(rawOS, 3.5) : 0;
+    const pctPanel = rawPanel > 0 ? Math.max(rawPanel, 3.5) : 0;
+    const pctServices = rawServices > 0 ? Math.max(rawServices, 3.5) : 0;
+    const pctMusic = rawMusic > 0 ? Math.max(rawMusic, 3.5) : 0;
+
+    const totalUsedVisual = pctBoot + pctOS + pctPanel + pctServices + pctMusic;
+    const pctFree = Math.max(5, 100 - totalUsedVisual);
+
+    return {
+      pctBoot,
+      pctOS,
+      pctPanel,
+      pctServices,
+      pctMusic,
+      pctFree
+    };
+  }, [image, device, deviceBytes, usagePct, hardwareSize]);
 
   // Static list of mock completed flashes
   const mockHistory = [
@@ -590,8 +692,12 @@ export default function CenterPanel({
                 <DonutGauge 
                   pct={usagePct} 
                   sublabel={usagePct === 0 ? "SD" : "usado"} 
-                  deviceBytes={deviceBytes} 
-                  imageSize={image ? image.size : 0} 
+                  pctBoot={spaceBreakdown.pctBoot}
+                  pctOS={spaceBreakdown.pctOS}
+                  pctPanel={spaceBreakdown.pctPanel}
+                  pctServices={spaceBreakdown.pctServices}
+                  pctMusic={spaceBreakdown.pctMusic}
+                  pctFree={spaceBreakdown.pctFree}
                 />
 
                 <div style={{ display: "flex", flexDirection: "column", gap: "8px", flex: 1, minWidth: 0 }}>
@@ -628,23 +734,38 @@ export default function CenterPanel({
                       <span style={{ fontSize: "11px", fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.02em" }}>Distribución de espacio estimada</span>
                       
                       <div style={{ display: "flex", height: "8px", borderRadius: "4px", overflow: "hidden", background: "var(--bg-deep)", boxShadow: "var(--shadow-inset-sm)" }}>
-                        <div style={{ width: `${(Math.min(deviceBytes, 512 * 1024 * 1024) / deviceBytes) * 100}%`, background: "var(--info)" }} title="Partición Boot" />
-                        <div style={{ width: `${(Math.max(0, Math.min(deviceBytes - 512 * 1024 * 1024, image.size - 512 * 1024 * 1024)) / deviceBytes) * 100}%`, background: "var(--accent)" }} title="Sistema Raíz (System)" />
-                        <div style={{ flex: 1, background: "#475569" }} title="Espacio Libre (Paquetes / Usuario)" />
+                        <div style={{ width: `${spaceBreakdown.pctBoot}%`, background: "var(--info)" }} title="Partición Boot" />
+                        <div style={{ width: `${spaceBreakdown.pctOS}%`, background: "var(--accent)" }} title="Sistema Raíz (OS Base)" />
+                        <div style={{ width: `${spaceBreakdown.pctPanel}%`, background: "#f97316" }} title="Streamer Web Panel" />
+                        <div style={{ width: `${spaceBreakdown.pctServices}%`, background: "#a855f7" }} title="Servicios y Daemons" />
+                        <div style={{ width: `${spaceBreakdown.pctMusic}%`, background: "#10b981" }} title="Música / Datos" />
+                        <div style={{ flex: 1, background: "#475569" }} title="Espacio Libre (Usuario)" />
                       </div>
 
-                      <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "8px", fontSize: "10px", marginTop: "2px" }}>
+                      <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "6px 8px", fontSize: "10px", marginTop: "2px" }}>
                         <div style={{ display: "flex", alignItems: "center", gap: "4px" }}>
-                          <span style={{ width: "6px", height: "6px", borderRadius: "50%", background: "var(--info)", display: "inline-block" }}></span>
+                          <span style={{ width: "6px", height: "6px", borderRadius: "50%", background: "var(--info)", display: "inline-block", flexShrink: 0 }}></span>
                           <span style={{ color: "var(--text-secondary)", whiteSpace: "nowrap" }}>Boot: 512 MB</span>
                         </div>
                         <div style={{ display: "flex", alignItems: "center", gap: "4px" }}>
-                          <span style={{ width: "6px", height: "6px", borderRadius: "50%", background: "var(--accent)", display: "inline-block" }}></span>
-                          <span style={{ color: "var(--text-secondary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>System: {formatSize(Math.max(0, image.size - 512 * 1024 * 1024))}</span>
+                          <span style={{ width: "6px", height: "6px", borderRadius: "50%", background: "var(--accent)", display: "inline-block", flexShrink: 0 }}></span>
+                          <span style={{ color: "var(--text-secondary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>OS Base: {formatSize(Math.max(0, image.size - 512 * 1024 * 1024))}</span>
                         </div>
                         <div style={{ display: "flex", alignItems: "center", gap: "4px" }}>
-                          <span style={{ width: "6px", height: "6px", borderRadius: "50%", background: "#475569", display: "inline-block" }}></span>
-                          <span style={{ color: "var(--text-secondary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>Libre: {formatSize(Math.max(0, deviceBytes - image.size))}</span>
+                          <span style={{ width: "6px", height: "6px", borderRadius: "50%", background: "#f97316", display: "inline-block", flexShrink: 0 }}></span>
+                          <span style={{ color: "var(--text-secondary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>Web Panel: {formatSize(Math.round(hardwareSize * 0.4))}</span>
+                        </div>
+                        <div style={{ display: "flex", alignItems: "center", gap: "4px" }}>
+                          <span style={{ width: "6px", height: "6px", borderRadius: "50%", background: "#a855f7", display: "inline-block", flexShrink: 0 }}></span>
+                          <span style={{ color: "var(--text-secondary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>Daemons: {formatSize(Math.max(0, hardwareSize - Math.round(hardwareSize * 0.4)))}</span>
+                        </div>
+                        <div style={{ display: "flex", alignItems: "center", gap: "4px" }}>
+                          <span style={{ width: "6px", height: "6px", borderRadius: "50%", background: "#10b981", display: "inline-block", flexShrink: 0 }}></span>
+                          <span style={{ color: "var(--text-secondary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>Música: 1.2 GB</span>
+                        </div>
+                        <div style={{ display: "flex", alignItems: "center", gap: "4px" }}>
+                          <span style={{ width: "6px", height: "6px", borderRadius: "50%", background: "#475569", display: "inline-block", flexShrink: 0 }}></span>
+                          <span style={{ color: "var(--text-secondary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>Libre: {formatSize(Math.max(0, deviceBytes - totalWriteSize))}</span>
                         </div>
                       </div>
                     </div>

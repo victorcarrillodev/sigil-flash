@@ -1,0 +1,63 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "schema-playback-state.json",
+  "title": "Playback State",
+  "description": "Persistent playback position, mode, and decoder failure state",
+  "type": "object",
+  "required": ["_schema_version", "mode"],
+  "properties": {
+    "_schema_version": { "const": "1.0" },
+    "mode": {
+      "type": "string",
+      "enum": ["RADIO", "LOCAL", "TRANSITIONING", "IDLE", "CACHE_EXPIRED"]
+    },
+    "playing": { "type": "boolean" },
+    "radio": {
+      "type": "object",
+      "properties": {
+        "last_check": { "type": ["string", "null"], "format": "date-time" },
+        "last_hash": { "type": ["string", "null"] },
+        "consecutive_failures": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "local": {
+      "type": "object",
+      "properties": {
+        "playlist_hash": { "type": ["string", "null"] },
+        "current_track_index": { "type": "integer", "minimum": 0 },
+        "current_track_id": { "type": ["string", "null"] },
+        "current_track_url": { "type": ["string", "null"] },
+        "position_seconds": { "type": "integer", "minimum": 0 },
+        "last_updated": { "type": "string", "format": "date-time" },
+        "consecutive_failures": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "statistics": {
+      "type": "object",
+      "properties": {
+        "total_plays": { "type": "integer", "minimum": 0 },
+        "mode_switches": { "type": "integer", "minimum": 0 },
+        "last_server_contact": { "type": ["string", "null"], "format": "date-time" }
+      },
+      "additionalProperties": false
+    },
+    "decoder_failure": {
+      "type": "object",
+      "properties": {
+        "last_error": { "type": "string" },
+        "decoder_exit_code": { "type": "integer", "minimum": 1 },
+        "failed_track_id": { "type": ["string", "null"] },
+        "failed_track_url": { "type": ["string", "null"] },
+        "failed_local_path": { "type": ["string", "null"] },
+        "failure_source": { "type": "string", "enum": ["RADIO", "LOCAL"] },
+        "consecutive_failures": { "type": "integer", "minimum": 1 },
+        "failure_at": { "type": "string", "format": "date-time" },
+        "playing": { "const": false }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

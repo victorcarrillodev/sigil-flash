@@ -1,0 +1,34 @@
+sigil ALL=(ALL) NOPASSWD: /usr/bin/nmcli
+sigil ALL=(ALL) NOPASSWD: /usr/bin/systemctl stop hostapd
+sigil ALL=(ALL) NOPASSWD: /usr/bin/systemctl stop dnsmasq
+sigil ALL=(ALL) NOPASSWD: /usr/bin/systemctl start hostapd
+sigil ALL=(ALL) NOPASSWD: /usr/bin/systemctl start dnsmasq
+sigil ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart hostapd
+sigil ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart dnsmasq
+sigil ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart radio-stream
+sigil ALL=(ALL) NOPASSWD: /usr/bin/systemctl unmask hostapd
+sigil ALL=(ALL) NOPASSWD: /usr/bin/systemctl stop bt-connect
+sigil ALL=(ALL) NOPASSWD: /usr/bin/systemctl start bt-connect
+sigil ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart bt-connect
+sigil ALL=(ALL) NOPASSWD: /usr/bin/systemctl reset-failed bt-connect
+sigil ALL=(ALL) NOPASSWD: /usr/bin/systemctl reset-failed radio-stream
+sigil ALL=(ALL) NOPASSWD: /usr/bin/systemctl reset-failed bt-connect radio-stream
+sigil ALL=(ALL) NOPASSWD: /sbin/ip
+sigil ALL=(ALL) NOPASSWD: /usr/sbin/ip
+sigil ALL=(ALL) NOPASSWD: /usr/sbin/iwlist
+sigil ALL=(ALL) NOPASSWD: /sbin/iwlist
+sigil ALL=(ALL) NOPASSWD: /usr/sbin/iw
+sigil ALL=(ALL) NOPASSWD: /usr/bin/rfkill
+sigil ALL=(ALL) NOPASSWD: /usr/sbin/rfkill
+sigil ALL=(ALL) NOPASSWD: /usr/bin/hciconfig
+sigil ALL=(ALL) NOPASSWD: /usr/sbin/hciconfig
+sigil ALL=(ALL) NOPASSWD: /usr/bin/wpa_cli
+sigil ALL=(ALL) NOPASSWD: /usr/sbin/killall
+sigil ALL=(ALL) NOPASSWD: /usr/bin/killall
+sigil ALL=(ALL) NOPASSWD: /usr/bin/pactl
+sigil ALL=(ALL) NOPASSWD: /usr/bin/pinctrl
+# Permisos para reparar preferred_bt.txt si root lo creó con permisos incorrectos
+sigil ALL=(ALL) NOPASSWD: /bin/chown sigil\:sigil /home/sigil/preferred_bt.txt
+sigil ALL=(ALL) NOPASSWD: /bin/chmod 644 /home/sigil/preferred_bt.txt
+# Permite saltar la pista actual desde la API /music/next del panel
+sigil ALL=(ALL) NOPASSWD: /usr/bin/pkill

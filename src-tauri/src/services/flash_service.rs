@@ -316,13 +316,42 @@ pub async fn run_raw_flash_cli(
         let _ = child.wait().await;
     }
 
+    // Report post-install status
+    let copy_progress = FlashProgress {
+        bytes_written: total_bytes,
+        total_bytes,
+        speed_mbps: 0.0,
+        eta_seconds: 0.0,
+        status: "running".to_string(),
+        message: "Instalando sistema sigil-hardware en la microSD...".to_string(),
+    };
+    if let Ok(json) = serde_json::to_string(&copy_progress) {
+        let _ = std::fs::write(&prog_path, json);
+    }
+
+    // Perform offline installation of sigil-hardware on the microSD
+    if let Err(e) = install_sigil_hardware(dest) {
+        let err_progress = FlashProgress {
+            bytes_written: total_bytes,
+            total_bytes,
+            speed_mbps: 0.0,
+            eta_seconds: 0.0,
+            status: "error".to_string(),
+            message: format!("Error en post-instalación: {}", e),
+        };
+        if let Ok(json) = serde_json::to_string(&err_progress) {
+            let _ = std::fs::write(&prog_path, json);
+        }
+        return Err(e);
+    }
+
     let final_progress = FlashProgress {
         bytes_written: total_bytes,
         total_bytes,
         speed_mbps: 0.0,
         eta_seconds: 0.0,
         status: "done".to_string(),
-        message: "Escritura de imagen completada exitosamente".to_string(),
+        message: "Flasheo e instalación de sigil-hardware completados exitosamente.".to_string(),
     };
     if let Ok(json) = serde_json::to_string(&final_progress) {
         let _ = std::fs::write(&prog_path, json);
@@ -427,4 +456,122 @@ pub fn get_xz_uncompressed_size(path: &str) -> AppResult<u64> {
     }
 
     Err(AppError::Flash("No se pudo obtener el tamaño descomprimido del archivo xz.".to_string()))
+}
+
+fn install_sigil_hardware(device: &str) -> AppResult<()> {
+    let part2 = if device.contains("mmcblk") || device.contains("nvme") || device.contains("loop") {
+        format!("{}p2", device)
+    } else {
+        format!("{}2", device)
+    };
+
+    println!("Recargando tabla de particiones en {}...", device);
+    let _ = std::process::Command::new("partprobe").arg(device).status();
+    std::thread::sleep(std::time::Duration::from_millis(1000));
+
+    let mount_dir = "/tmp/sigil-rootfs";
+    let _ = std::fs::create_dir_all(mount_dir);
+
+    // Intentar desmontar por si acaso quedó colgado de una ejecución anterior
+    let _ = std::process::Command::new("umount").arg(mount_dir).status();
+
+    println!("Montando partición raíz {} en {}...", part2, mount_dir);
+    let mount_status = std::process::Command::new("mount")
+        .args(&[&part2, mount_dir])
+        .status();
+
+    if mount_status.is_err() || !mount_status.unwrap().success() {
+        return Err(AppError::Flash(format!(
+            "No se pudo montar la partición raíz {}. Verifica que la imagen se haya grabado correctamente y contenga particiones ext4.",
+            part2
+        )));
+    }
+
+    println!("Copiando repositorio sigil-hardware a la microSD...");
+    let opt_dir = format!("{}/opt", mount_dir);
+    let _ = std::fs::create_dir_all(&opt_dir);
+
+    let copy_status = std::process::Command::new("cp")
+        .args(&["-r", "/home/dev-pro/Escritorio/sigil-flash/sigil-hardware", &opt_dir])
+        .status();
+
+    if copy_status.is_err() || !copy_status.unwrap().success() {
+        let _ = std::process::Command::new("umount").arg(mount_dir).status();
+        return Err(AppError::Flash("Error al copiar los archivos de sigil-hardware a la partición raíz.".to_string()));
+    }
+
+    println!("Configurando el script de primer arranque (firstboot.sh)...");
+    let firstboot_path = format!("{}/usr/local/bin/sigil-firstboot.sh", mount_dir);
+    let firstboot_content = r#"#!/bin/bash
+exec > /var/log/sigil-firstboot.log 2>&1
+echo "=== Iniciando instalación de Sigil-Hardware en primer arranque ==="
+
+cd /opt/sigil-hardware
+
+chmod +x install.sh
+
+# Ejecutar el instalador de Sigil-Hardware
+bash install.sh
+
+# Habilitar lingering e inicio en arranque
+loginctl enable-linger sigil || true
+
+# Restaurar rc.local original
+if [ -f /etc/rc.local.orig ]; then
+    mv /etc/rc.local.orig /etc/rc.local
+else
+    cat << 'EOF' > /etc/rc.local
+#!/bin/sh -e
+exit 0
+EOF
+    chmod +x /etc/rc.local
+fi
+
+echo "=== Instalación completada con éxito. Reiniciando... ==="
+reboot
+"#;
+
+    if let Err(e) = std::fs::write(&firstboot_path, firstboot_content) {
+        let _ = std::process::Command::new("umount").arg(mount_dir).status();
+        return Err(AppError::Flash(format!("No se pudo escribir el script de primer arranque: {}", e)));
+    }
+
+    let _ = std::process::Command::new("chmod")
+        .args(&["+x", &firstboot_path])
+        .status();
+
+    println!("Configurando rc.local para la ejecución en el primer encendido...");
+    let rc_local_path = format!("{}/etc/rc.local", mount_dir);
+    let rc_local_orig = format!("{}/etc/rc.local.orig", mount_dir);
+
+    if std::path::Path::new(&rc_local_path).exists() {
+        let _ = std::fs::copy(&rc_local_path, &rc_local_orig);
+    }
+
+    let rc_local_content = r#"#!/bin/bash
+/usr/local/bin/sigil-firstboot.sh &
+exit 0
+"#;
+
+    if let Err(e) = std::fs::write(&rc_local_path, rc_local_content) {
+        let _ = std::process::Command::new("umount").arg(mount_dir).status();
+        return Err(AppError::Flash(format!("No se pudo configurar /etc/rc.local: {}", e)));
+    }
+
+    let _ = std::process::Command::new("chmod")
+        .args(&["+x", &rc_local_path])
+        .status();
+
+    println!("Desmontando partición raíz...");
+    let umount_status = std::process::Command::new("umount")
+        .arg(mount_dir)
+        .status();
+
+    if umount_status.is_err() || !umount_status.unwrap().success() {
+        return Err(AppError::Flash("Fallo al desmontar la partición de la microSD de manera segura.".to_string()));
+    }
+
+    let _ = std::fs::remove_dir(mount_dir);
+    println!("Instalación de sigil-hardware en la microSD preparada con éxito.");
+    Ok(())
 }

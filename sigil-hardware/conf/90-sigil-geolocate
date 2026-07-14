@@ -1,0 +1,29 @@
+#!/bin/bash
+# 90-sigil-geolocate — NetworkManager dispatcher for SIGIL WiFi geolocation
+# Installed to /etc/NetworkManager/dispatcher.d/90-sigil-geolocate
+# Triggered automatically by NetworkManager on interface events.
+# =============================================================================
+# Only reacts to wlan0 'up' events. Runs geolocation asynchronously.
+# Failure is non-critical: never blocks the dispatcher or other services.
+
+INTERFACE="$1"
+ACTION="$2"
+
+# Only wlan0 connectivity events — ignore loopback, Ethernet, and other actions
+[ "$INTERFACE" != "wlan0" ] && exit 0
+[ "$ACTION" != "up" ] && exit 0
+
+# Production defaults; overrides exist only to permit isolated execution of this
+# exact dispatcher in the repository test suite.
+GEO_DELAY_SECONDS="${SIGIL_GEO_DELAY_SECONDS:-5}"
+GEO_PYTHON="${SIGIL_GEO_PYTHON:-python3}"
+GEO_SCRIPT="${SIGIL_GEO_SCRIPT:-/home/sigil/geolocation.py}"
+GEO_LOG="${SIGIL_GEO_LOG:-/var/log/sigil-geolocate.log}"
+
+# Delay and worker both run asynchronously — NetworkManager returns immediately.
+(
+    sleep "$GEO_DELAY_SECONDS"
+    exec "$GEO_PYTHON" "$GEO_SCRIPT"
+) </dev/null >>"$GEO_LOG" 2>&1 &
+
+exit 0

@@ -1,0 +1,31 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "schema-bluetooth-state.json",
+  "title": "Bluetooth State",
+  "description": "Preferred Bluetooth device and connection status",
+  "type": "object",
+  "required": ["_schema_version"],
+  "properties": {
+    "_schema_version": { "const": "1.0" },
+    "preferred_device": {
+      "type": ["object", "null"],
+      "properties": {
+        "mac": { "type": "string", "pattern": "^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$" },
+        "name": { "type": "string" },
+        "paired_at": { "type": "string", "format": "date-time" },
+        "last_connected": { "type": "string", "format": "date-time" }
+      },
+      "additionalProperties": false
+    },
+    "connection_status": {
+      "type": "object",
+      "properties": {
+        "connected": { "type": "boolean" },
+        "profile": { "type": "string" },
+        "since": { "type": ["string", "null"], "format": "date-time" }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

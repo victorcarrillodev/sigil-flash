@@ -1,0 +1,13 @@
+[Unit]
+Description=SIGIL Hardware LED Monitor
+After=network.target bluetooth.target
+
+[Service]
+ExecStart=/usr/local/bin/sigil-leds.sh
+Restart=always
+RestartSec=3
+User=root
+Group=root
+
+[Install]
+WantedBy=multi-user.target
