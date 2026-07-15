@@ -6,16 +6,17 @@
       "NetworkManager",
       "bluetooth-panel",
       "bt-connect",
-      "radio-stream",
+      "radio-fetcher",
+      "audio-manager",
+      "audio-player",
       "sigil-leds",
-      "wifi-fallback"
+      "wifi-fallback",
+      "sigil-firstboot"
     ],
     "disable": [
       "hostapd",
       "dnsmasq",
-      "audio-manager",
-      "radio-fetcher",
-      "audio-player"
+      "radio-stream"
     ],
     "mask": [],
     "unmask": [
@@ -27,6 +28,7 @@
     "hostapd and dnsmasq are unmasked but DISABLED — wifi-fallback controls them",
     "NetworkManager is enabled; dhcpcd should have wlan0 in denyinterfaces",
     "bluetooth-panel requires /etc/sigil/panel.env (created by firstboot or flasher)",
-    "audio-manager, radio-fetcher, audio-player: Phase 1 skeletons — disabled until extraction complete"
+    "audio-manager, radio-fetcher and audio-player are the production autonomous playback runtime",
+    "radio-stream remains installed but disabled as an explicit rollback path"
   ]
 }

@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="description" content="Panel de control Sigil — conecta altavoces Bluetooth y WiFi.">
   <meta name="theme-color" content="#0d0f14">
+  <meta name="sigil-csrf-token" content="{{ csrf_token }}">
   <title>Sigil</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
 </head>
@@ -19,6 +20,10 @@
     </div>
     <p class="page-subtitle">Conecta tus altavoces e Internet desde aquí.</p>
   </header>
+  <form action="{{ url_for('logout') }}" method="post" style="text-align:right">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <button class="btn-outline" type="submit">Cerrar sesión</button>
+  </form>
 
   <!-- ── Música en reproducción ────────────────────────────────────────── -->
   <section class="card music-card" aria-labelledby="music-heading" id="music-section">
@@ -35,7 +40,6 @@
           <span id="speaker-label">Bocina no conectada</span>
         </div>
       </div>
-      <button class="btn-next" id="music-next-btn" title="Siguiente pista" disabled>⏭</button>
     </div>
   </section>
 

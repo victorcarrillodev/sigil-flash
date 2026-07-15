@@ -1,6 +1,6 @@
 #!/bin/bash
-# sigil-phase2-cutover.sh — Controlled, reversible migration from
-# radio-stream.service to radio-fetcher + audio-manager + audio-player
+# sigil-phase2-cutover.sh — Controlled, reversible repair/migration from a
+# legacy radio-stream deployment to the production Phase 2 runtime
 #
 # Usage:
 #   ./sigil-phase2-cutover.sh --dry-run   # preview without mutation (default)
@@ -535,12 +535,7 @@ disable_service() {
 
 confirm_no_legacy_mpg123() {
     if pgrep -x mpg123 &>/dev/null; then
-        warn "mpg123 process still running — killing"
-        pkill -x mpg123 2>/dev/null || true
-        sleep 1
-    fi
-    if pgrep -x mpg123 &>/dev/null; then
-        error "mpg123 process persists after kill — aborting"
+        error "mpg123 remains after stopping the legacy systemd cgroup — aborting"
         return 1
     fi
     info "No legacy mpg123 process remains"

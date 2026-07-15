@@ -5,6 +5,10 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "${HERE}/.." && pwd)"
 BUILDER="${ROOT}/scripts/build-flasher-payload.sh"
+if [ "${SIGIL_MANUFACTURING_TESTS:-0}" != "1" ] && [ -f /etc/sigil/device.conf ]; then
+    printf 'SKIP: flasher payload tests are build/manufacturing-only; no on-device payload generation\n'
+    exit 0
+fi
 TEST_ROOT=$(mktemp -d /tmp/sigil-flasher-payload.XXXXXX)
 PAYLOAD="${TEST_ROOT}/payload"
 PASS=0

@@ -1,119 +1,50 @@
-# Sigil OS — Offline Flasher (Linux Only)
+# SIGIL Hardware offline package contract
 
-## Overview
+`sigil-hardware` defines what Raspberry Pi OS needs; it does not manufacture
+or store a package bundle.
 
-The Sigil OS offline flasher creates a bootable MicroSD for Sigil devices
-by injecting `sigil-hardware` payload into a Raspberry Pi OS base image.
+## Canonical source
 
-This replaces `pi-gen/stage-sigil` as the installation method. pi-gen remains
-as legacy/reference until the flasher is validated as functionally equivalent.
+`manifests/offline-package-contract.json` is the only package source of truth.
+It pins the schema, Debian distribution, architecture, version policy, required
+packages and optional profiles. `install.sh` and the flasher consume this file;
+neither carries a second package list.
 
-## Architecture
+The repository must never contain `.deb` files, an APT `Packages` index, a
+generated repository, downloaded package caches, or build artifacts.
 
-```
-Linux PC operator
-  |
-  +-- sigil-flasher
-  |     |
-  |     +-- selects Raspberry Pi OS base .img / .img.xz
-  |     +-- decompresses/validates image
-  |     +-- writes image to MicroSD (sudo)
-  |     +-- sync & reprobe partitions
-  |     +-- mounts boot + rootfs (sudo)
-  |     +-- injects sigil-hardware payload
-  |     +-- installs dependencies from local .deb cache (chroot)
-  |     +-- applies system config
-  |     +-- enables/disables services (systemctl --root)
-  |     +-- writes sigil_provision.json to boot
-  |     +-- prepares minimal firstboot
-  |     +-- sync + unmount
-  |
-  +-- Raspberry Pi boots already prepared
-        |
-        +-- firstboot finalizes:
-              - machine-id
-              - hostname
-              - device.json
-              - panel.env
-              - cleanup
-              - lightweight validation
+## Offline installer
 
-No apt online during flashing.
-No apt online in firstboot.
-Firstboot does NOT install packages, clone repos, or download.
+Run inside an already-mounted target image:
+
+```bash
+sudo ./install.sh --offline-repo /opt/sigil/offline-repo
 ```
 
-## Requirements
+`scripts/install-offline-packages.sh` independently validates the contract,
+repository manifest, distribution, architecture, indexes, package metadata and
+SHA-256 checksums. It creates a temporary `file://` APT source with isolated
+APT lists and cache, verifies every required candidate, installs without
+recommends, verifies dpkg state and removes the temporary source. It never
+configures an HTTP(S) source and is safe to run again.
 
-- **OS:** Linux only (x86_64 or aarch64)
-- **Python:** 3.8+
-- **Privileges:** sudo (for writing SD, mounting, chroot)
-- **Base image:** Raspberry Pi OS Lite (Bookworm) — 32-bit or 64-bit
-- **Dependencies:** `lsblk`, `blkid`, `mount`, `umount`, `partprobe`, `udevadm`,
-  `losetup` (for image loopback)
+Package downloading, dependency resolution, repository generation and SD-image
+injection belong to `sigil-flash`.
 
-## Manifests (source of truth)
+## First boot boundary
 
-All installation specs live in `sigil-hardware/manifests/`:
+Manufacturing installs packages and system payload before the SD is removed
+from the workstation. First boot is limited to identity, hostname, protected
+secrets/PIN, service enablement and hardware-specific configuration. It must
+not run `apt install`, `pip install`, clone a repository or download runtime
+dependencies.
 
-| File | Purpose |
-|---|---|
-| `apt-packages.txt` | Required apt packages |
-| `install-layout.json` | File copy mapping (source -> destination) |
-| `services.json` | Systemd enable/disable manifest |
-| `system-config.json` | Boot config, PulseAudio, user, state files |
+## Validation
 
-These manifests are the canonical reference. pi-gen and install.sh are legacy.
-
-## Phase 1 — Dry Run
-
-The current implementation is Phase 1: dry-run only.
-
-```
-python3 flasher/sigil-flasher.py --base-image /path/to/raspios.img
-python3 flasher/sigil-flasher.py --base-image /path/to/raspios.img.xz --device /dev/mmcblk0
+```bash
+./tests/test_final_offline_packages.sh
+cargo test --manifest-path flasher-rs/Cargo.toml --locked --offline
 ```
 
-Dry-run validates paths, loads manifests, and prints what it **would** do.
-No writes, no mounts, no sudo, no chroot.
-
-## Service management
-
-Services are enabled/disabled offline via `systemctl --root=<rootfs>`.
-Fallback: manual symlinks in `multi-user.target.wants/`.
-
-| Action | Services |
-|---|---|
-| Enable | NetworkManager, bluetooth-panel, bt-connect, radio-stream, sigil-leds, wifi-fallback |
-| Disable | hostapd, dnsmasq |
-| Unmask | hostapd, dnsmasq (wifi-fallback controls them at runtime) |
-
-## Provisioning
-
-The flasher writes `boot/sigil_provision.json` (operator-provided device identity):
-
-```json
-{
-  "serial_number": "SIGIL-Z2W-2026-0001",
-  "model": "Sigil-Streamer-v1",
-  "batch": "LOTE-2026-A"
-}
-```
-
-Firstboot moves it to `/etc/sigil/device.json` and generates:
-- Unique machine-id
-- Hostname from serial (or CPU serial fallback)
-- `/etc/sigil/panel.env` with random SECRET_KEY
-- Cleans up provisioning file from boot
-
-## pi-gen status
-
-pi-gen is **legacy/reference** until the flasher produces a functionally
-equivalent SD. Do NOT delete pi-gen. Do NOT modify pi-gen.
-
-Validation checklist for replacing pi-gen:
-1. SD created by flasher passes offline validation
-2. Raspberry Pi boots cleanly with firstboot
-3. Core functions verified: panel, AP fallback, WiFi, Bluetooth, radio, LEDs
-4. Security baseline confirmed
-5. Result reproducible on 2+ clean SDs
+The Rust flasher validates the same contract and reports `Offline package
+repository validated.` during dry-run; it performs no installation in dry-run.

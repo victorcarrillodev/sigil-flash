@@ -1,0 +1,42 @@
+{
+  "schema_version": "2.0",
+  "bundle_version": "2026.07.14.1",
+  "distribution": "debian",
+  "distribution_version": "13",
+  "distribution_codename": "trixie",
+  "architecture": "arm64",
+  "allowed_package_architectures": [
+    "arm64",
+    "all"
+  ],
+  "base_image_name": "2026-06-18-raspios-trixie-arm64-lite.img.xz",
+  "base_image_sha256": "acff736ca7945e3b305f07cda4abdb870910e12634991da69783611756e381b3",
+  "install_recommends": false,
+  "version_policy": "distribution-candidate",
+  "packages": [
+    { "name": "python3", "required": true, "version": null, "profile": "runtime" },
+    { "name": "python3-flask", "required": true, "version": null, "profile": "runtime" },
+    { "name": "python3-argon2", "required": true, "version": null, "profile": "runtime" },
+    { "name": "python3-bluez", "required": true, "version": null, "profile": "runtime" },
+    { "name": "network-manager", "required": true, "version": null, "profile": "runtime" },
+    { "name": "bluez", "required": true, "version": null, "profile": "runtime" },
+    { "name": "bluetooth", "required": true, "version": null, "profile": "runtime" },
+    { "name": "pulseaudio", "required": true, "version": null, "profile": "runtime" },
+    { "name": "pulseaudio-utils", "required": true, "version": null, "profile": "runtime" },
+    { "name": "pulseaudio-module-bluetooth", "required": true, "version": null, "profile": "runtime" },
+    { "name": "alsa-utils", "required": true, "version": null, "profile": "runtime" },
+    { "name": "mpg123", "required": true, "version": null, "profile": "runtime" },
+    { "name": "hostapd", "required": true, "version": null, "profile": "runtime" },
+    { "name": "dnsmasq", "required": true, "version": null, "profile": "runtime" },
+    { "name": "wireless-tools", "required": true, "version": null, "profile": "runtime" },
+    { "name": "rfkill", "required": true, "version": null, "profile": "runtime" },
+    { "name": "iw", "required": true, "version": null, "profile": "runtime" },
+    { "name": "sudo", "required": true, "version": null, "profile": "runtime" },
+    { "name": "curl", "required": true, "version": null, "profile": "runtime" },
+    { "name": "logrotate", "required": true, "version": null, "profile": "runtime" },
+    { "name": "raspi-utils", "required": true, "version": null, "profile": "runtime" },
+    { "name": "firmware-brcm80211", "required": true, "version": null, "profile": "runtime" },
+    { "name": "wireless-regdb", "required": true, "version": null, "profile": "runtime" },
+    { "name": "openssh-server", "required": false, "version": null, "profile": "factory-debug" }
+  ]
+}

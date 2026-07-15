@@ -4,7 +4,6 @@
 # Responsibilities:
 #   - Persists manufacturing identity in /etc/sigil/device.conf (idempotent)
 #   - Creates initial state JSON files if missing (idempotent)
-#   - Registers device with server once
 #   - Creates /etc/logrotate.d/sigil
 #   - All operations are idempotent: safe to re-run
 #
@@ -15,6 +14,8 @@
 #   firstboot.sh --status     # show completion status and exit
 # =============================================================================
 set -euo pipefail
+# shellcheck source=./scripts/sigil-cache-meta-perms.sh
+. "$(dirname "${BASH_SOURCE[0]}")/sigil-cache-meta-perms.sh"
 
 # --- Paths ---
 SIGIL_STATE_DIR="/var/lib/sigil"
@@ -34,7 +35,10 @@ FIRSTBOOT_DONE_FILE="${SIGIL_STATE_DIR}/firstboot_completed.json"
 
 LOGROTATE_FILE="/etc/logrotate.d/sigil"
 DEVICE_CONF="${SIGIL_CONFIG_DIR}/device.conf"
-IDENTITY_HELPER="${SIGIL_IDENTITY_HELPER:-/home/sigil/device_identity.py}"
+IDENTITY_HELPER="${SIGIL_IDENTITY_HELPER:-/opt/sigil/panel/device_identity.py}"
+PANEL_AUTH_HELPER="${SIGIL_PANEL_AUTH_HELPER:-/opt/sigil/panel/panel_auth.py}"
+PANEL_SECRET_INPUT="${SIGIL_PANEL_SECRET_INPUT:-/etc/sigil/manufacturing/sigil_secrets.json}"
+PANEL_PIN_HASH="${SIGIL_PANEL_PIN_HASH:-/etc/sigil/secrets/panel-pin.hash}"
 PROVISION_TO_REMOVE=""
 
 # --- Config defaults ---
@@ -151,6 +155,34 @@ apply_manufacturing_identity() {
         chown root:sigil "$DEVICE_CONF"
         chmod 640 "$DEVICE_CONF"
     fi
+}
+
+provision_panel_credential() {
+    [ -r "$PANEL_AUTH_HELPER" ] || die "Panel credential helper missing"
+    if $DRY_RUN; then
+        if [ -f "$PANEL_SECRET_INPUT" ]; then
+            log "DRY" "Would consume protected panel credential and retain only an Argon2id hash"
+        elif [ -f "$PANEL_PIN_HASH" ]; then
+            log "DRY" "Panel credential hash already configured"
+        else
+            log "WARN" "Panel remains setup-locked until a protected manufacturing secret is supplied"
+        fi
+        return 0
+    fi
+
+    local result
+    local status
+    if result=$(python3 "$PANEL_AUTH_HELPER" --input "$PANEL_SECRET_INPUT" --output "$PANEL_PIN_HASH"); then
+        log "INFO" "$result"
+        return 0
+    else
+        status=$?
+    fi
+    if [ "$status" -eq 3 ]; then
+        log "WARN" "Panel is setup-locked; no credential hash is configured"
+        return 0
+    fi
+    die "Panel credential provisioning failed"
 }
 
 # Check if firstboot has already completed
@@ -468,7 +500,7 @@ with os.fdopen(fd, 'w') as f:
 os.replace(tmp_path, file_path)
 PYEOF
     chown sigil:sigil "$CACHE_META_FILE"
-    chmod 644 "$CACHE_META_FILE"
+    sigil_cache_meta_fix_permissions "$CACHE_META_FILE"
 }
 
 create_bluetooth_state_json() {
@@ -882,6 +914,28 @@ enforce_runtime_permissions() {
     fi
 }
 
+ensure_user_lingering() {
+    local linger_file="/var/lib/systemd/linger/sigil"
+    if [ -f "$linger_file" ]; then
+        log "INFO" "User lingering already enabled for sigil"
+        return 0
+    fi
+    if $DRY_RUN; then
+        log "INFO" "DRY-RUN: would enable user lingering for sigil"
+        return 0
+    fi
+    if ! command -v loginctl >/dev/null 2>&1; then
+        log "ERROR" "loginctl unavailable; cannot enable user lingering"
+        return 1
+    fi
+    if loginctl enable-linger sigil; then
+        log "INFO" "User lingering enabled for sigil"
+    else
+        log "ERROR" "Could not enable user lingering for sigil"
+        return 1
+    fi
+}
+
 # ── Main ────────────────────────────────────────────────────────────────────
 
 usage() {
@@ -933,12 +987,8 @@ fi
 
 log "INFO" "=== firstboot starting ==="
 
-# Load config
-load_config
-init_curl_auth
-trap cleanup_curl_auth EXIT TERM INT
-
 apply_manufacturing_identity
+provision_panel_credential
 
 log "INFO" "Device ID: $(get_device_id)"
 log "INFO" "Hostname: $(get_hostname)"
@@ -950,9 +1000,7 @@ if is_firstboot_done; then
     enforce_runtime_permissions
     ensure_run_sigil
     ensure_ssh_monitor
-    if ! $DRY_RUN; then
-        register_device
-    fi
+    ensure_user_lingering
     log "INFO" "=== firstboot complete (already done, state verified) ==="
     exit 0
 fi
@@ -976,11 +1024,7 @@ verify_state_perms
 enforce_runtime_permissions
 ensure_run_sigil
 ensure_ssh_monitor
-
-# Step 5: Device registration (only if not already registered)
-if ! $DRY_RUN; then
-    register_device
-fi
+ensure_user_lingering
 
 # Mark firstboot as completed
 mark_firstboot_done

@@ -1,8 +1,8 @@
-use crate::model::{Provision, Severity, ValidationItem, ValidationResult};
+use crate::model::{ManufacturingSecrets, Provision, Severity, ValidationItem, ValidationResult};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufReader, Read};
 use std::path::{Component, Path};
 
@@ -13,6 +13,7 @@ pub const OFFICIAL_IMAGE_SHA256: &str =
 const PAYLOAD_MANIFEST: &str = "payload-manifest.json";
 const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
 const MAX_PROVISION_BYTES: u64 = 4096;
+const MAX_SECRETS_BYTES: u64 = 1024;
 
 #[derive(Debug, Deserialize)]
 struct PayloadManifest {
@@ -44,20 +45,166 @@ pub fn validate_inputs(
     base_image: &Path,
     expected_base_sha256: Option<&str>,
     payload: &Path,
+    offline_packages: &Option<std::path::PathBuf>,
     target_device: &Option<std::path::PathBuf>,
     provision: &Option<std::path::PathBuf>,
+    secrets: &Option<std::path::PathBuf>,
 ) -> ValidationResult {
     let mut items = Vec::new();
 
     validate_base_image(base_image, expected_base_sha256, &mut items);
     validate_payload(payload, &mut items);
+    validate_offline_packages(
+        base_image,
+        expected_base_sha256,
+        payload,
+        offline_packages.as_deref(),
+        &mut items,
+    );
     validate_provision(provision.as_deref(), &mut items);
+    validate_secrets(secrets.as_deref(), &mut items);
     validate_target(base_image, target_device.as_deref(), &mut items);
 
     let valid = items
         .iter()
         .all(|item| !matches!(item.severity, Severity::Error));
     ValidationResult { valid, items }
+}
+
+fn validate_offline_packages(
+    base_image: &Path,
+    expected_base_sha256: Option<&str>,
+    payload: &Path,
+    repository: Option<&Path>,
+    items: &mut Vec<ValidationItem>,
+) {
+    let Some(repository) = repository else {
+        error(items, "--offline-packages is required for manufacturing");
+        return;
+    };
+    let contract = payload.join("manifests/offline-package-contract.json");
+    match crate::offline::validate_repository(repository, &contract) {
+        Ok(summary) => {
+            let actual_name = base_image.file_name().and_then(|name| name.to_str());
+            let expected_sha256 = expected_base_sha256.map(str::to_ascii_lowercase);
+            if actual_name != Some(summary.base_image_name.as_str())
+                || expected_sha256.as_deref() != Some(summary.base_image_sha256.as_str())
+            {
+                error(
+                    items,
+                    format!(
+                        "offline package bundle {} is incompatible with base image {}",
+                        summary.bundle_version,
+                        base_image.display()
+                    ),
+                );
+            } else {
+                info(
+                    items,
+                    format!(
+                        "Offline package repository validated. bundle={}, direct_packages={}, resolved_packages={}, distribution={}, architecture={}, total_bytes={}, base_image_compatible=yes",
+                        summary.bundle_version,
+                        summary.direct_package_count,
+                        summary.resolved_package_count,
+                        summary.distribution,
+                        summary.architecture,
+                        summary.total_bytes,
+                    ),
+                );
+            }
+        }
+        Err(message) => error(
+            items,
+            format!("offline package repository invalid: {message}"),
+        ),
+    }
+}
+
+pub fn validate_panel_pin(pin: &str) -> Result<(), String> {
+    if !(6..=12).contains(&pin.len()) || !pin.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err("panel PIN must contain exactly 6 to 12 decimal digits".into());
+    }
+    let repeated = pin.bytes().all(|byte| byte == pin.as_bytes()[0]);
+    let ascending = "12345678901234567890".contains(pin);
+    let descending = "98765432109876543210".contains(pin);
+    if repeated || ascending || descending {
+        return Err("panel PIN is too trivial".into());
+    }
+    Ok(())
+}
+
+pub fn load_secrets(path: &Path) -> Result<ManufacturingSecrets, String> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error_value| format!("--secrets cannot be read: {error_value}"))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err("--secrets must be a regular non-symlink file".into());
+    }
+    if metadata.len() > MAX_SECRETS_BYTES {
+        return Err("--secrets exceeds 1024 bytes".into());
+    }
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    }
+    let file = options
+        .open(path)
+        .map_err(|error_value| format!("--secrets cannot be opened safely: {error_value}"))?;
+    let opened = file
+        .metadata()
+        .map_err(|error_value| format!("--secrets metadata unavailable: {error_value}"))?;
+    if !opened.is_file() || opened.len() != metadata.len() {
+        return Err("--secrets changed during validation".into());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        if (opened.dev(), opened.ino()) != (metadata.dev(), metadata.ino()) {
+            return Err("--secrets changed during validation".into());
+        }
+        if opened.permissions().mode() & 0o777 != 0o600 {
+            return Err("--secrets must have mode 0600".into());
+        }
+    }
+    let mut bytes = Vec::with_capacity((opened.len() as usize).min(MAX_SECRETS_BYTES as usize));
+    file.take(MAX_SECRETS_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error_value| format!("--secrets cannot be read: {error_value}"))?;
+    if bytes.len() as u64 > MAX_SECRETS_BYTES {
+        return Err("--secrets exceeds 1024 bytes".into());
+    }
+    if bytes.starts_with(&[0xef, 0xbb, 0xbf]) {
+        return Err("--secrets must be UTF-8 without BOM".into());
+    }
+    let secrets: ManufacturingSecrets = serde_json::from_slice(&bytes)
+        .map_err(|error_value| format!("--secrets violates the strict schema: {error_value}"))?;
+    if secrets.schema_version != "1.0" {
+        return Err("--secrets _schema_version must be 1.0".into());
+    }
+    validate_panel_pin(&secrets.panel_pin)?;
+    Ok(secrets)
+}
+
+fn validate_secrets(path: Option<&Path>, items: &mut Vec<ValidationItem>) {
+    let Some(path) = path else {
+        error(
+            items,
+            "secret file supplied: no; new manufacturing requires --secrets",
+        );
+        return;
+    };
+    match load_secrets(path) {
+        Ok(secrets) => info(
+            items,
+            format!(
+                "secret file supplied: yes; schema valid: yes; panel PIN configured: yes ({} digits)",
+                secrets.panel_pin.len()
+            ),
+        ),
+        Err(message) => error(items, message),
+    }
 }
 
 fn validate_base_image(path: &Path, expected: Option<&str>, items: &mut Vec<ValidationItem>) {
@@ -633,13 +780,355 @@ fn info(items: &mut Vec<ValidationItem>, message: impl Into<String>) {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::path::PathBuf;
+    use std::sync::OnceLock;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn fixture_signing_home() -> &'static PathBuf {
+        static HOME: OnceLock<PathBuf> = OnceLock::new();
+        HOME.get_or_init(|| {
+            let home = std::env::temp_dir()
+                .join(format!("sigil-flasher-test-signing-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&home);
+            fs::create_dir_all(&home).expect("fixture signing home");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(&home, fs::Permissions::from_mode(0o700))
+                    .expect("fixture signing home mode");
+            }
+            let generated = std::process::Command::new("gpg")
+                .args([
+                    "--homedir",
+                    home.to_str().expect("signing home"),
+                    "--batch",
+                    "--pinentry-mode",
+                    "loopback",
+                    "--passphrase",
+                    "",
+                    "--quick-generate-key",
+                    "SIGIL Fixture <fixture@invalid>",
+                    "ed25519",
+                    "sign",
+                    "0",
+                ])
+                .status()
+                .expect("generate signing key");
+            assert!(generated.success(), "fixture signing key generation failed");
+            home
+        })
+    }
+
+    fn create_offline_repository(root: &Path, contract_path: &Path) -> PathBuf {
+        let repository = root.join("offline-packages");
+        let packages_dir = repository.join("packages");
+        let snapshot = repository.join("sources-snapshot");
+        let keyrings = snapshot.join("keyrings");
+        fs::create_dir_all(&packages_dir).expect("offline packages directory");
+        fs::create_dir_all(&keyrings).expect("offline keyring directory");
+        let contract_bytes = fs::read(contract_path).expect("contract bytes");
+        let contract: crate::offline::PackageContract =
+            serde_json::from_slice(&contract_bytes).expect("contract JSON");
+        let mut package_entries = Vec::new();
+        let mut index = String::new();
+        let mut size_bytes = 0_u64;
+
+        for requirement in contract.packages.iter().filter(|item| item.required) {
+            let package_root = root.join(format!("deb-{}", requirement.name));
+            fs::create_dir_all(package_root.join("DEBIAN")).expect("Debian control directory");
+            fs::write(
+                package_root.join("DEBIAN/control"),
+                format!(
+                    "Package: {}\nVersion: 1.0\nArchitecture: arm64\nMaintainer: SIGIL Tests <test@invalid>\nDescription: synthetic offline fixture\n",
+                    requirement.name
+                ),
+            )
+            .expect("Debian control");
+            let filename = format!("packages/{}_1.0_arm64.deb", requirement.name);
+            let destination = repository.join(&filename);
+            let status = std::process::Command::new("dpkg-deb")
+                .args(["--build", "--root-owner-group"])
+                .arg(&package_root)
+                .arg(&destination)
+                .status()
+                .expect("dpkg-deb fixture");
+            assert!(status.success(), "dpkg-deb fixture failed");
+            let size = fs::metadata(&destination).expect("deb metadata").len();
+            let sha256 = sha256_file(&destination).expect("deb hash");
+            size_bytes += size;
+            index.push_str(&format!(
+                "Package: {}\nVersion: 1.0\nArchitecture: arm64\nFilename: {}\nSize: {}\nSHA256: {}\nDescription: synthetic offline fixture\n\n",
+                requirement.name, filename, size, sha256
+            ));
+            package_entries.push(json!({
+                "name": requirement.name,
+                "version": "1.0",
+                "architecture": "arm64",
+                "filename": filename,
+                "sha256": sha256,
+                "size": size,
+            }));
+            fs::remove_dir_all(package_root).expect("remove package fixture root");
+        }
+
+        fs::write(repository.join("Packages"), index).expect("Packages index");
+        let compressed = std::process::Command::new("gzip")
+            .args(["-n", "-9", "-c"])
+            .arg(repository.join("Packages"))
+            .output()
+            .expect("gzip Packages");
+        assert!(compressed.status.success(), "gzip fixture failed");
+        fs::write(repository.join("Packages.gz"), compressed.stdout).expect("Packages.gz");
+
+        let required: Vec<_> = contract
+            .packages
+            .iter()
+            .filter(|requirement| requirement.required)
+            .map(|requirement| requirement.name.clone())
+            .collect();
+
+        let debian_source = "Types: deb\nURIs: http://deb.debian.org/debian/\nSuites: trixie trixie-updates\nComponents: main contrib non-free non-free-firmware\nSigned-By: /usr/share/keyrings/debian-archive-keyring.pgp\n";
+        let raspi_source = "Types: deb\nURIs: http://archive.raspberrypi.com/debian/\nSuites: trixie\nComponents: main\nSigned-By: /usr/share/keyrings/raspberrypi-archive-keyring.pgp\n";
+        fs::write(snapshot.join("debian.sources"), debian_source).expect("Debian source");
+        fs::write(snapshot.join("raspi.sources"), raspi_source).expect("Pi source");
+        fs::write(
+            snapshot.join("os-release"),
+            "ID=debian\nVERSION_ID=13\nVERSION_CODENAME=trixie\n",
+        )
+        .expect("os-release");
+        fs::write(
+            keyrings.join("debian-archive-keyring.pgp"),
+            b"debian-test-keyring",
+        )
+        .expect("Debian keyring");
+        fs::write(
+            keyrings.join("raspberrypi-archive-keyring.pgp"),
+            b"raspberry-pi-test-keyring",
+        )
+        .expect("Pi keyring");
+
+        let sources = vec![
+            json!({
+                "file": "debian.sources",
+                "sha256": sha256_file(&snapshot.join("debian.sources")).expect("source hash"),
+                "uris": ["http://deb.debian.org/debian/"],
+                "effective_uris": ["http://deb.debian.org/debian/"],
+                "suites": ["trixie", "trixie-updates"],
+                "signed_by": "/usr/share/keyrings/debian-archive-keyring.pgp",
+                "scope": "Debian 13 Trixie and security archives"
+            }),
+            json!({
+                "file": "raspi.sources",
+                "sha256": sha256_file(&snapshot.join("raspi.sources")).expect("source hash"),
+                "uris": ["http://archive.raspberrypi.com/debian/"],
+                "effective_uris": ["https://ftp.uni-hannover.de/raspberrypi/"],
+                "suites": ["trixie"],
+                "signed_by": "/usr/share/keyrings/raspberrypi-archive-keyring.pgp",
+                "scope": "Raspberry Pi Trixie archive"
+            }),
+        ];
+        fs::write(
+            snapshot.join("sources-metadata.json"),
+            serde_json::to_vec_pretty(&json!({"sources": sources.clone()}))
+                .expect("source metadata"),
+        )
+        .expect("source metadata");
+        fs::write(
+            snapshot.join("base-image-metadata.json"),
+            serde_json::to_vec_pretty(&json!({
+                "filename": contract.base_image_name,
+                "sha256": contract.base_image_sha256,
+                "distribution": contract.distribution,
+                "distribution_version": contract.distribution_version,
+                "distribution_codename": contract.distribution_codename,
+                "architecture": contract.architecture,
+            }))
+            .expect("base image metadata"),
+        )
+        .expect("base image metadata");
+
+        let signing_home = fixture_signing_home();
+        let listing = std::process::Command::new("gpg")
+            .args([
+                "--homedir",
+                signing_home.to_str().expect("signing home"),
+                "--batch",
+                "--with-colons",
+                "--list-secret-keys",
+            ])
+            .output()
+            .expect("list signing key");
+        let listing = String::from_utf8(listing.stdout).expect("signing key listing");
+        let fingerprint = listing
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix("fpr:::::::::")
+                    .and_then(|rest| rest.split(':').next())
+            })
+            .expect("signing fingerprint");
+        let repository_key = keyrings.join("sigil-offline-repository.gpg");
+        let exported = std::process::Command::new("gpg")
+            .args([
+                "--homedir",
+                signing_home.to_str().expect("signing home"),
+                "--batch",
+                "--output",
+                repository_key.to_str().expect("repository key"),
+                "--export",
+                fingerprint,
+            ])
+            .status()
+            .expect("export signing key");
+        assert!(exported.success(), "fixture signing key export failed");
+
+        let keyring_metadata = vec![
+            json!({
+                "package": "debian-archive-keyring",
+                "package_version": "2025.1",
+                "source_image": contract.base_image_name,
+                "source_path": "/usr/share/keyrings/debian-archive-keyring.pgp",
+                "artifact_path": "keyrings/debian-archive-keyring.pgp",
+                "sha256": sha256_file(&keyrings.join("debian-archive-keyring.pgp")).expect("keyring hash"),
+                "fingerprints": ["1111111111111111111111111111111111111111"],
+                "scope": "Debian archives"
+            }),
+            json!({
+                "package": "raspberrypi-archive-keyring",
+                "package_version": "2025.1+rpt1",
+                "source_image": contract.base_image_name,
+                "source_path": "/usr/share/keyrings/raspberrypi-archive-keyring.pgp",
+                "artifact_path": "keyrings/raspberrypi-archive-keyring.pgp",
+                "sha256": sha256_file(&keyrings.join("raspberrypi-archive-keyring.pgp")).expect("keyring hash"),
+                "fingerprints": ["2222222222222222222222222222222222222222"],
+                "scope": "Raspberry Pi archive"
+            }),
+            json!({
+                "package": null,
+                "package_version": null,
+                "source_image": null,
+                "source_path": "generated fixture signing key",
+                "artifact_path": "keyrings/sigil-offline-repository.gpg",
+                "sha256": sha256_file(&repository_key).expect("keyring hash"),
+                "fingerprints": [fingerprint],
+                "scope": "SIGIL file:// offline repository"
+            }),
+        ];
+        fs::write(
+            snapshot.join("keyring-metadata.json"),
+            serde_json::to_vec_pretty(&json!({"keyrings": keyring_metadata.clone()}))
+                .expect("keyring metadata"),
+        )
+        .expect("keyring metadata");
+
+        fs::write(
+            repository.join("Release"),
+            b"Date: Tue, 15 Jul 2026 00:00:00 UTC\n",
+        )
+        .expect("Release");
+        for (output, arguments) in [
+            ("InRelease", vec!["--clearsign"]),
+            ("Release.gpg", vec!["--detach-sign"]),
+        ] {
+            let status = std::process::Command::new("gpg")
+                .args([
+                    "--homedir",
+                    signing_home.to_str().expect("signing home"),
+                    "--batch",
+                    "--yes",
+                    "--local-user",
+                    fingerprint,
+                ])
+                .args(arguments)
+                .args([
+                    "--output",
+                    repository.join(output).to_str().expect("signature output"),
+                    repository.join("Release").to_str().expect("Release"),
+                ])
+                .status()
+                .expect("sign fixture repository");
+            assert!(status.success(), "fixture repository signing failed");
+        }
+
+        let manifest = json!({
+            "schema_version": "2.0",
+            "repository_type": "sigil-offline-apt",
+            "package_contract_schema_version": contract.schema_version,
+            "bundle_version": contract.bundle_version,
+            "package_contract_sha256": sha256_file(contract_path).expect("contract hash"),
+            "source_sigil_hardware_commit": null,
+            "base_image_name": contract.base_image_name,
+            "base_image_sha256": contract.base_image_sha256,
+            "distribution": contract.distribution,
+            "distribution_version": contract.distribution_version,
+            "distribution_codename": contract.distribution_codename,
+            "architecture": contract.architecture,
+            "generation_timestamp": "2026-07-15T00:00:00Z",
+            "direct_packages": required,
+            "direct_package_count": package_entries.len(),
+            "resolved_package_count": package_entries.len(),
+            "total_bytes": size_bytes,
+            "unresolved_packages": [],
+            "sources": sources,
+            "keyrings": keyring_metadata,
+            "python_dependencies": {
+                "fully_satisfied_by_debian_packages": {
+                    "flask": "python3-flask",
+                    "argon2": "python3-argon2",
+                    "bluetooth": "python3-bluez"
+                },
+                "wheels": []
+            },
+            "packages": package_entries,
+        });
+        fs::write(
+            repository.join("package-manifest.json"),
+            serde_json::to_vec_pretty(&manifest).expect("offline manifest JSON"),
+        )
+        .expect("offline manifest");
+
+        let mut checksums = String::new();
+        for package in manifest["packages"].as_array().expect("packages") {
+            let filename = package["filename"].as_str().expect("filename");
+            checksums.push_str(&format!(
+                "{}  {}\n",
+                sha256_file(&repository.join(filename)).expect("package checksum"),
+                filename
+            ));
+        }
+        for relative in [
+            "Packages",
+            "Packages.gz",
+            "Release",
+            "Release.gpg",
+            "InRelease",
+            "package-manifest.json",
+            "sources-snapshot/debian.sources",
+            "sources-snapshot/raspi.sources",
+            "sources-snapshot/os-release",
+            "sources-snapshot/base-image-metadata.json",
+            "sources-snapshot/sources-metadata.json",
+            "sources-snapshot/keyring-metadata.json",
+            "sources-snapshot/keyrings/debian-archive-keyring.pgp",
+            "sources-snapshot/keyrings/raspberrypi-archive-keyring.pgp",
+            "sources-snapshot/keyrings/sigil-offline-repository.gpg",
+        ] {
+            checksums.push_str(&format!(
+                "{}  {}\n",
+                sha256_file(&repository.join(relative)).expect("metadata checksum"),
+                relative
+            ));
+        }
+        fs::write(repository.join("checksums.sha256"), checksums).expect("checksums");
+        repository
+    }
 
     struct Fixture {
         root: std::path::PathBuf,
         image: std::path::PathBuf,
         payload: std::path::PathBuf,
+        offline: std::path::PathBuf,
         provision: std::path::PathBuf,
+        secrets: std::path::PathBuf,
         target: std::path::PathBuf,
         image_sha256: String,
     }
@@ -652,14 +1141,39 @@ mod tests {
                 .as_nanos();
             let root =
                 std::env::temp_dir().join(format!("sigil-flasher-{unique}-{}", std::process::id()));
+            let image = root.join("fixture.img.xz");
+            fs::create_dir_all(&root).expect("fixture root");
+            fs::write(&image, b"controlled compressed-image fixture").expect("image");
+            let image_sha256 = sha256_file(&image).expect("image hash");
+            let mut contract: serde_json::Value = serde_json::from_str(include_str!(
+                "../../manifests/offline-package-contract.json"
+            ))
+            .expect("canonical contract");
+            contract["base_image_name"] = json!("fixture.img.xz");
+            contract["base_image_sha256"] = json!(image_sha256.clone());
+            let contract_bytes = serde_json::to_vec_pretty(&contract).expect("fixture contract");
+
             let payload = root.join("payload");
             fs::create_dir_all(&payload).expect("payload directory");
-            let files = [
-                ("install.sh", "#!/bin/bash\n", 0o755),
-                ("panel/app.py", "print('sigil')\n", 0o644),
-                ("scripts/firstboot.sh", "#!/bin/bash\n", 0o755),
-                ("services/sigil-firstboot.service", "[Service]\n", 0o644),
-                ("conf/audio.conf", "API_KEY=\"<placeholder>\"\n", 0o644),
+            let files: Vec<(&str, Vec<u8>, u32)> = vec![
+                ("install.sh", b"#!/bin/bash\n".to_vec(), 0o755),
+                ("panel/app.py", b"print('sigil')\n".to_vec(), 0o644),
+                ("scripts/firstboot.sh", b"#!/bin/bash\n".to_vec(), 0o755),
+                (
+                    "services/sigil-firstboot.service",
+                    b"[Service]\n".to_vec(),
+                    0o644,
+                ),
+                (
+                    "conf/audio.conf",
+                    b"API_KEY=\"<placeholder>\"\n".to_vec(),
+                    0o644,
+                ),
+                (
+                    "manifests/offline-package-contract.json",
+                    contract_bytes,
+                    0o644,
+                ),
             ];
             let mut manifest_files = Vec::new();
             for (path, content, mode) in files {
@@ -696,16 +1210,29 @@ mod tests {
                 serde_json::to_vec_pretty(&manifest).expect("manifest JSON"),
             )
             .expect("manifest");
+            let offline = create_offline_repository(
+                &root,
+                &payload.join("manifests/offline-package-contract.json"),
+            );
 
-            let image = root.join("fixture.img.xz");
-            fs::write(&image, b"controlled compressed-image fixture").expect("image");
-            let image_sha256 = sha256_file(&image).expect("image hash");
             let provision = root.join("provision.json");
             fs::write(
                 &provision,
                 br#"{"_schema_version":"1.0","serial_number":"SIGIL-TEST-0001","model":"Sigil-Streamer","model_version":"v1","batch":"TEST","capabilities":{"i2s_dac":false}}"#,
             )
             .expect("provision");
+            let secrets = root.join("sigil_secrets.json");
+            fs::write(
+                &secrets,
+                br#"{"_schema_version":"1.0","panel_pin":"80427159"}"#,
+            )
+            .expect("secrets");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(&secrets, fs::Permissions::from_mode(0o600))
+                    .expect("secret mode");
+            }
             let target = root.join("target.img");
             fs::write(&target, []).expect("target");
 
@@ -713,7 +1240,9 @@ mod tests {
                 root,
                 image,
                 payload,
+                offline,
                 provision,
+                secrets,
                 target,
                 image_sha256,
             }
@@ -724,8 +1253,10 @@ mod tests {
                 &self.image,
                 Some(&self.image_sha256),
                 &self.payload,
+                &Some(self.offline.clone()),
                 &Some(self.target.clone()),
                 &Some(self.provision.clone()),
+                &Some(self.secrets.clone()),
             )
         }
     }
@@ -751,6 +1282,171 @@ mod tests {
         );
     }
 
+    fn refresh_manifest_checksum(repository: &Path) {
+        let checksums_path = repository.join("checksums.sha256");
+        let replacement = format!(
+            "{}  package-manifest.json",
+            sha256_file(&repository.join("package-manifest.json")).expect("manifest checksum")
+        );
+        let checksums = fs::read_to_string(&checksums_path)
+            .expect("checksums")
+            .lines()
+            .map(|line| {
+                if line.ends_with("  package-manifest.json") {
+                    replacement.clone()
+                } else {
+                    line.to_owned()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(checksums_path, format!("{checksums}\n")).expect("updated checksums");
+    }
+
+    #[test]
+    fn offline_repository_rejects_invalid_manifest() {
+        let fixture = Fixture::new();
+        fs::write(fixture.offline.join("package-manifest.json"), b"not-json")
+            .expect("corrupt manifest");
+        let error = crate::offline::validate_repository(
+            &fixture.offline,
+            &fixture
+                .payload
+                .join("manifests/offline-package-contract.json"),
+        )
+        .expect_err("invalid manifest must fail");
+        assert!(error.contains("manifest"));
+    }
+
+    #[test]
+    fn offline_repository_rejects_checksum_corruption() {
+        let fixture = Fixture::new();
+        let package = fs::read_dir(fixture.offline.join("packages"))
+            .expect("packages")
+            .next()
+            .expect("package")
+            .expect("package entry")
+            .path();
+        let mut bytes = fs::read(&package).expect("package bytes");
+        bytes.push(0);
+        fs::write(package, bytes).expect("corrupt package");
+        let error = crate::offline::validate_repository(
+            &fixture.offline,
+            &fixture
+                .payload
+                .join("manifests/offline-package-contract.json"),
+        )
+        .expect_err("checksum corruption must fail");
+        assert!(error.contains("checksum mismatch"));
+    }
+
+    #[test]
+    fn offline_repository_rejects_wrong_package_architecture() {
+        let fixture = Fixture::new();
+        let manifest_path = fixture.offline.join("package-manifest.json");
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(&manifest_path).expect("manifest"))
+                .expect("manifest JSON");
+        manifest["packages"][0]["architecture"] = json!("amd64");
+        fs::write(
+            manifest_path,
+            serde_json::to_vec_pretty(&manifest).expect("manifest JSON"),
+        )
+        .expect("wrong architecture manifest");
+        refresh_manifest_checksum(&fixture.offline);
+        let error = crate::offline::validate_repository(
+            &fixture.offline,
+            &fixture
+                .payload
+                .join("manifests/offline-package-contract.json"),
+        )
+        .expect_err("wrong architecture must fail");
+        assert!(error.contains("wrong package architecture"));
+    }
+
+    #[test]
+    fn offline_repository_rejects_wrong_bundle_version() {
+        let fixture = Fixture::new();
+        let manifest_path = fixture.offline.join("package-manifest.json");
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(&manifest_path).expect("manifest"))
+                .expect("manifest JSON");
+        manifest["bundle_version"] = json!("2099.01.01.1");
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&manifest).expect("manifest JSON"),
+        )
+        .expect("wrong version manifest");
+        refresh_manifest_checksum(&fixture.offline);
+
+        let error = crate::offline::validate_repository(
+            &fixture.offline,
+            &fixture
+                .payload
+                .join("manifests/offline-package-contract.json"),
+        )
+        .expect_err("wrong bundle version must fail");
+        assert!(error.contains("bundle version"));
+    }
+
+    #[test]
+    fn offline_repository_rejects_wrong_base_image_contract() {
+        let fixture = Fixture::new();
+        let manifest_path = fixture.offline.join("package-manifest.json");
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(&manifest_path).expect("manifest"))
+                .expect("manifest JSON");
+        manifest["base_image_name"] = json!("different.img.xz");
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&manifest).expect("manifest JSON"),
+        )
+        .expect("wrong base image manifest");
+        refresh_manifest_checksum(&fixture.offline);
+
+        let error = crate::offline::validate_repository(
+            &fixture.offline,
+            &fixture
+                .payload
+                .join("manifests/offline-package-contract.json"),
+        )
+        .expect_err("wrong base image must fail");
+        assert!(error.contains("base image"));
+    }
+
+    #[test]
+    fn offline_repository_rejects_missing_package_file() {
+        let fixture = Fixture::new();
+        let package = fs::read_dir(fixture.offline.join("packages"))
+            .expect("packages")
+            .next()
+            .expect("package")
+            .expect("package entry")
+            .path();
+        fs::remove_file(package).expect("remove package");
+        assert!(crate::offline::validate_repository(
+            &fixture.offline,
+            &fixture
+                .payload
+                .join("manifests/offline-package-contract.json"),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn offline_repository_rejects_packages_gzip_mismatch() {
+        let fixture = Fixture::new();
+        fs::write(fixture.offline.join("Packages.gz"), b"not-gzip").expect("corrupt Packages.gz");
+        let error = crate::offline::validate_repository(
+            &fixture.offline,
+            &fixture
+                .payload
+                .join("manifests/offline-package-contract.json"),
+        )
+        .expect_err("invalid Packages.gz must fail");
+        assert!(error.contains("Packages.gz"));
+    }
+
     #[test]
     fn base_image_checksum_mismatch_fails() {
         let fixture = Fixture::new();
@@ -758,8 +1454,10 @@ mod tests {
             &fixture.image,
             Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
             &fixture.payload,
+            &Some(fixture.offline.clone()),
             &Some(fixture.target.clone()),
             &Some(fixture.provision.clone()),
+            &Some(fixture.secrets.clone()),
         );
         assert!(!result.valid);
     }
@@ -795,6 +1493,17 @@ mod tests {
         fs::write(
             &fixture.provision,
             br#"{"_schema_version":"1.0","serial_number":"S1","model":"M","model_version":"v1","batch":"B","capabilities":{"i2s_dac":false},"api_key":"do-not-store"}"#,
+        )
+        .expect("provision");
+        assert!(!fixture.validate().valid);
+    }
+
+    #[test]
+    fn provision_rejects_panel_pin_field() {
+        let fixture = Fixture::new();
+        fs::write(
+            &fixture.provision,
+            br#"{"_schema_version":"1.0","serial_number":"S1","model":"M","model_version":"v1","batch":"B","capabilities":{"i2s_dac":false},"panel_pin":"80427159"}"#,
         )
         .expect("provision");
         assert!(!fixture.validate().valid);
@@ -873,9 +1582,65 @@ mod tests {
             &fixture.image,
             Some(&fixture.image_sha256),
             &fixture.payload,
+            &Some(fixture.offline.clone()),
             &Some(fixture.image.clone()),
             &Some(fixture.provision.clone()),
+            &Some(fixture.secrets.clone()),
         );
         assert!(!result.valid);
+    }
+
+    #[test]
+    fn secrets_reject_unknown_fields_and_trivial_pins_without_disclosure() {
+        let fixture = Fixture::new();
+        fs::write(
+            &fixture.secrets,
+            br#"{"_schema_version":"1.0","panel_pin":"123456","api_key":"synthetic"}"#,
+        )
+        .expect("secrets");
+        let result = fixture.validate();
+        assert!(!result.valid);
+        let report = result
+            .items
+            .iter()
+            .map(|item| item.message.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!report.contains("123456"));
+        assert!(!report.contains("synthetic"));
+    }
+
+    #[test]
+    fn secrets_reject_malformed_pin_and_insecure_mode() {
+        let fixture = Fixture::new();
+        fs::write(
+            &fixture.secrets,
+            br#"{"_schema_version":"1.0","panel_pin":"80 27159"}"#,
+        )
+        .expect("secrets");
+        assert!(!fixture.validate().valid);
+
+        fs::write(
+            &fixture.secrets,
+            br#"{"_schema_version":"1.0","panel_pin":"80427159"}"#,
+        )
+        .expect("secrets");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&fixture.secrets, fs::Permissions::from_mode(0o644)).expect("mode");
+            assert!(!fixture.validate().valid);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn secrets_reject_symlink() {
+        use std::os::unix::fs::symlink;
+        let fixture = Fixture::new();
+        let target = fixture.root.join("secret-target.json");
+        fs::rename(&fixture.secrets, &target).expect("move");
+        symlink(&target, &fixture.secrets).expect("link");
+        assert!(!fixture.validate().valid);
     }
 }

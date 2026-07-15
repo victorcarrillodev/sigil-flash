@@ -1,6 +1,7 @@
 use crate::errors::{AppError, AppResult};
 use crate::models::FlashProgress;
-use std::io::{ErrorKind, Write};
+use sha2::{Digest, Sha256};
+use std::io::{ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -14,13 +15,70 @@ pub struct FlashService {
     active_process: Arc<Mutex<Option<tokio::process::Child>>>,
     // Serializes flash requests inside this application process.
     operation_lock: Arc<Mutex<()>>,
+    offline_packages: PathBuf,
+    package_contract: PathBuf,
+}
+
+const ELEVATED_LAUNCHER_GRACE: Duration = Duration::from_secs(2);
+const DETACHED_WRITER_TIMEOUT: Duration = Duration::from_secs(45 * 60);
+
+#[derive(Debug, PartialEq, Eq)]
+enum FlashCompletion {
+    Running,
+    Succeeded,
+    Failed(String),
+}
+
+fn completion_from_observation(
+    progress: Option<&FlashProgress>,
+    launcher_exit_success: Option<bool>,
+    elapsed_since_launcher_exit: Option<Duration>,
+) -> FlashCompletion {
+    if let Some(progress) = progress {
+        match progress.status.as_str() {
+            "done" if launcher_exit_success.is_some() => return FlashCompletion::Succeeded,
+            "error" | "cancelled" if launcher_exit_success.is_some() => {
+                return FlashCompletion::Failed(progress.message.clone());
+            }
+            _ => {}
+        }
+    }
+
+    let Some(elapsed) = elapsed_since_launcher_exit else {
+        return FlashCompletion::Running;
+    };
+    if progress.is_none() && elapsed >= ELEVATED_LAUNCHER_GRACE {
+        return FlashCompletion::Failed(match launcher_exit_success {
+            Some(true) => "El proceso elevado terminó sin publicar un resultado".to_string(),
+            _ => "La autorización administrativa fue cancelada o falló".to_string(),
+        });
+    }
+    if elapsed >= DETACHED_WRITER_TIMEOUT {
+        return FlashCompletion::Failed(
+            "El escritor privilegiado no publicó un resultado final dentro del tiempo límite"
+                .to_string(),
+        );
+    }
+    FlashCompletion::Running
 }
 
 impl FlashService {
     pub fn new() -> Self {
+        let flash_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
         Self {
             active_process: Arc::new(Mutex::new(None)),
             operation_lock: Arc::new(Mutex::new(())),
+            offline_packages: flash_root
+                .join("artifacts")
+                .join("offline-packages")
+                .join("trixie-arm64"),
+            package_contract: flash_root
+                .join("sigil-hardware")
+                .join("manifests")
+                .join("offline-package-contract.json"),
         }
     }
 
@@ -46,6 +104,7 @@ impl FlashService {
                 "La ruta del archivo de imagen no existe".to_string(),
             ));
         }
+        validate_bundle_for_image(&image_p, &self.offline_packages, &self.package_contract)?;
 
         // 1. Establish progress monitoring file in temp directory
         let progress_file = unique_progress_path();
@@ -74,6 +133,8 @@ impl FlashService {
             device_p.to_string_lossy().to_string(),
             "--progress-file".to_string(),
             progress_file.to_string_lossy().to_string(),
+            "--offline-packages".to_string(),
+            self.offline_packages.to_string_lossy().to_string(),
         ];
 
         // 3. Spawn elevated command depending on platform
@@ -88,24 +149,35 @@ impl FlashService {
         // 4. Poll progress file while the child process runs
         let start_time = Instant::now();
         let mut last_bytes = 0u64;
-        let mut success = false;
+        let mut launcher_exit_success = None;
+        let mut launcher_exited_at = None;
+        let mut last_progress = None;
+        let final_result;
 
         loop {
-            // Check if process finished
-            {
+            if launcher_exit_success.is_none() {
                 let mut guard = self.active_process.lock().await;
                 if let Some(ref mut c) = *guard {
-                    if let Ok(Some(status)) = c.try_wait() {
-                        success = status.success();
-                        *guard = None;
-                        break;
+                    match c.try_wait() {
+                        Ok(Some(status)) => {
+                            launcher_exit_success = Some(status.success());
+                            launcher_exited_at = Some(Instant::now());
+                            *guard = None;
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            final_result = Err(AppError::Flash(format!(
+                                "No se pudo consultar el proceso elevado: {error}"
+                            )));
+                            break;
+                        }
                     }
                 } else {
-                    break;
+                    launcher_exit_success = Some(false);
+                    launcher_exited_at = Some(Instant::now());
                 }
             }
 
-            // Read progress file
             if progress_file.exists() {
                 if let Ok(content) = std::fs::read_to_string(&progress_file) {
                     if let Ok(progress) = serde_json::from_str::<FlashProgress>(&content) {
@@ -125,12 +197,13 @@ impl FlashService {
                         };
 
                         last_bytes = current_bytes;
+                        last_progress = Some(progress.clone());
 
                         let _ = app.emit(
                             "flash-progress",
                             FlashProgress {
                                 bytes_written: current_bytes,
-                                total_bytes: image_size,
+                                total_bytes: progress.total_bytes,
                                 speed_mbps: speed,
                                 eta_seconds: eta,
                                 status: progress.status,
@@ -138,6 +211,23 @@ impl FlashService {
                             },
                         );
                     }
+                }
+            }
+
+            let elapsed_since_launcher_exit = launcher_exited_at.map(|instant| instant.elapsed());
+            match completion_from_observation(
+                last_progress.as_ref(),
+                launcher_exit_success,
+                elapsed_since_launcher_exit,
+            ) {
+                FlashCompletion::Running => {}
+                FlashCompletion::Succeeded => {
+                    final_result = Ok(());
+                    break;
+                }
+                FlashCompletion::Failed(message) => {
+                    final_result = Err(AppError::Flash(message));
+                    break;
                 }
             }
 
@@ -149,35 +239,38 @@ impl FlashService {
             let _ = std::fs::remove_file(&progress_file);
         }
 
-        if success {
-            let _ = app.emit(
-                "flash-progress",
-                FlashProgress {
-                    bytes_written: image_size,
-                    total_bytes: image_size,
-                    speed_mbps: 0.0,
-                    eta_seconds: 0.0,
-                    status: "done".to_string(),
-                    message: "Flasheo completado y sincronizado exitosamente.".to_string(),
-                },
-            );
-            Ok(())
-        } else {
-            let _ = app.emit(
-                "flash-progress",
-                FlashProgress {
-                    bytes_written: last_bytes,
-                    total_bytes: image_size,
-                    speed_mbps: 0.0,
-                    eta_seconds: 0.0,
-                    status: "error".to_string(),
-                    message: "Error de ejecución: proceso de escritura cancelado o fallido"
-                        .to_string(),
-                },
-            );
-            Err(AppError::Flash(
-                "El proceso de flasheo terminó con fallos".to_string(),
-            ))
+        let final_total = last_progress
+            .as_ref()
+            .map_or(image_size, |progress| progress.total_bytes);
+        match final_result {
+            Ok(()) => {
+                let _ = app.emit(
+                    "flash-progress",
+                    FlashProgress {
+                        bytes_written: final_total,
+                        total_bytes: final_total,
+                        speed_mbps: 0.0,
+                        eta_seconds: 0.0,
+                        status: "done".to_string(),
+                        message: "Flasheo completado y sincronizado exitosamente.".to_string(),
+                    },
+                );
+                Ok(())
+            }
+            Err(error) => {
+                let _ = app.emit(
+                    "flash-progress",
+                    FlashProgress {
+                        bytes_written: last_bytes,
+                        total_bytes: final_total,
+                        speed_mbps: 0.0,
+                        eta_seconds: 0.0,
+                        status: "error".to_string(),
+                        message: format!("Error de ejecución: {error}"),
+                    },
+                );
+                Err(error)
+            }
         }
     }
 
@@ -349,7 +442,12 @@ impl Drop for DeviceWriteLock {
 
 /// Raw block-by-block image copier executing under administrative rights.
 /// Periodically saves status to the progress file.
-pub async fn run_raw_flash_cli(src: &str, dest: &str, progress_file: &str) -> AppResult<()> {
+pub async fn run_raw_flash_cli(
+    src: &str,
+    dest: &str,
+    progress_file: &str,
+    offline_packages: &str,
+) -> AppResult<()> {
     // Safety verification check: Block writing to critical mountpoints on Linux/macOS
     #[cfg(unix)]
     {
@@ -366,6 +464,26 @@ pub async fn run_raw_flash_cli(src: &str, dest: &str, progress_file: &str) -> Ap
     let src_path = PathBuf::from(src);
     let dest_path = PathBuf::from(dest);
     let prog_path = PathBuf::from(progress_file);
+    write_progress_file(
+        &prog_path,
+        &FlashProgress {
+            bytes_written: 0,
+            total_bytes: 0,
+            speed_mbps: 0.0,
+            eta_seconds: 0.0,
+            status: "running".to_string(),
+            message: "Validando imagen y dependencias offline...".to_string(),
+        },
+    );
+    let flash_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| AppError::Validation("No se pudo resolver SIGIL Flash".into()))?;
+    let package_contract = flash_root
+        .join("sigil-hardware")
+        .join("manifests")
+        .join("offline-package-contract.json");
+    validate_bundle_for_image(&src_path, Path::new(offline_packages), &package_contract)?;
     let _device_lock = DeviceWriteLock::acquire(dest)?;
 
     let total_bytes = if src.to_lowercase().ends_with(".xz") {
@@ -475,7 +593,7 @@ pub async fn run_raw_flash_cli(src: &str, dest: &str, progress_file: &str) -> Ap
     }
 
     // Perform offline installation of sigil-hardware on the microSD
-    if let Err(e) = install_sigil_hardware(dest) {
+    if let Err(e) = install_sigil_hardware(dest, Path::new(offline_packages)) {
         let err_progress = FlashProgress {
             bytes_written: total_bytes,
             total_bytes,
@@ -503,6 +621,30 @@ pub async fn run_raw_flash_cli(src: &str, dest: &str, progress_file: &str) -> Ap
     }
 
     Ok(())
+}
+
+fn write_progress_file(path: &Path, progress: &FlashProgress) {
+    if let Ok(json) = serde_json::to_string(progress) {
+        let _ = std::fs::write(path, json);
+    }
+}
+
+pub fn write_raw_flash_error(progress_file: &str, error: &AppError) {
+    let path = Path::new(progress_file);
+    let previous = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|content| serde_json::from_str::<FlashProgress>(&content).ok());
+    write_progress_file(
+        path,
+        &FlashProgress {
+            bytes_written: previous.as_ref().map_or(0, |value| value.bytes_written),
+            total_bytes: previous.as_ref().map_or(0, |value| value.total_bytes),
+            speed_mbps: 0.0,
+            eta_seconds: 0.0,
+            status: "error".to_string(),
+            message: format!("Error en flasheo o postinstalación: {error}"),
+        },
+    );
 }
 
 // ============================================================
@@ -610,173 +752,344 @@ pub fn get_xz_uncompressed_size(path: &str) -> AppResult<u64> {
     ))
 }
 
-fn install_sigil_hardware(device: &str) -> AppResult<()> {
-    let part2 = if device.contains("mmcblk") || device.contains("nvme") || device.contains("loop") {
-        format!("{}p2", device)
-    } else {
-        format!("{}2", device)
-    };
+fn install_sigil_hardware(device: &str, offline_packages: &Path) -> AppResult<()> {
+    let root_partition = partition_path(device, 2);
+    let boot_partition = partition_path(device, 1);
+    let flash_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| AppError::Validation("No se pudo resolver SIGIL Flash".into()))?;
+    let hardware_source = flash_root.join("sigil-hardware");
+    let package_contract = hardware_source
+        .join("manifests")
+        .join("offline-package-contract.json");
 
-    println!("Recargando tabla de particiones en {}...", device);
+    flasher_rs::offline::validate_repository(offline_packages, &package_contract)
+        .map_err(|error| AppError::Validation(format!("Bundle offline inválido: {error}")))?;
+
+    println!("Recargando tabla de particiones en {device}...");
     let _ = std::process::Command::new("partprobe").arg(device).status();
-    std::thread::sleep(std::time::Duration::from_millis(1000));
+    std::thread::sleep(Duration::from_secs(1));
+    let _ = std::process::Command::new("umount")
+        .arg(&boot_partition)
+        .status();
+    let _ = std::process::Command::new("umount")
+        .arg(&root_partition)
+        .status();
 
     let mount_dir = std::env::temp_dir().join(format!("sigil-rootfs-{}", std::process::id()));
     std::fs::create_dir_all(&mount_dir)?;
+    let mut mounted = Vec::new();
 
-    // Intentar desmontar por si acaso quedó colgado de una ejecución anterior
-    let _ = std::process::Command::new("umount")
-        .arg(&mount_dir)
-        .status();
+    if let Err(error) = mount_partition_with_retry(device, &root_partition, &mount_dir) {
+        let _ = std::fs::remove_dir(&mount_dir);
+        return Err(error);
+    }
+    mounted.push(mount_dir.clone());
 
-    println!(
-        "Montando partición raíz {} en {}...",
-        part2,
-        mount_dir.display()
-    );
-    let mut mount_status = std::process::Command::new("mount")
-        .arg(&part2)
-        .arg(&mount_dir)
-        .status();
+    let preparation = (|| -> AppResult<()> {
+        let boot_mount = mount_dir.join("boot/firmware");
+        std::fs::create_dir_all(&boot_mount)?;
+        mount_checked(&boot_partition, &boot_mount)?;
+        mounted.push(boot_mount);
 
-    // Reintentar hasta 10 veces (20 segundos) por si el kernel tarda en registrar las particiones
-    for i in 1..=10 {
-        if mount_status.as_ref().is_ok_and(|status| status.success()) {
+        println!("Copiando payload sigil-hardware sin artefactos de desarrollo...");
+        let hardware_target = mount_dir.join("opt/sigil-hardware");
+        copy_hardware_payload(&hardware_source, &hardware_target)?;
+
+        println!("Inyectando repositorio APT offline en /opt/sigil/offline-repo...");
+        let repository_target = mount_dir.join("opt/sigil/offline-repo");
+        copy_directory_contents(offline_packages, &repository_target)?;
+
+        for (source, relative, mount_type) in [
+            ("/dev", "dev", "bind"),
+            ("proc", "proc", "proc"),
+            ("sysfs", "sys", "sysfs"),
+        ] {
+            let target = mount_dir.join(relative);
+            std::fs::create_dir_all(&target)?;
+            let status = if mount_type == "bind" {
+                std::process::Command::new("mount")
+                    .args(["--bind", source])
+                    .arg(&target)
+                    .status()
+            } else {
+                std::process::Command::new("mount")
+                    .args(["-t", mount_type, source])
+                    .arg(&target)
+                    .status()
+            }
+            .map_err(|error| AppError::Flash(format!("No se pudo montar {relative}: {error}")))?;
+            if !status.success() {
+                return Err(AppError::Flash(format!(
+                    "No se pudo montar {relative} para preparar la imagen"
+                )));
+            }
+            mounted.push(target);
+        }
+
+        let policy_path = mount_dir.join("usr/sbin/policy-rc.d");
+        let policy_backup = mount_dir.join("usr/sbin/policy-rc.d.sigil-backup");
+        if policy_path.exists() {
+            std::fs::rename(&policy_path, &policy_backup)?;
+        }
+        std::fs::write(&policy_path, "#!/bin/sh\nexit 101\n")?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&policy_path, std::fs::Permissions::from_mode(0o755))?;
+        }
+
+        let qemu_target = mount_dir.join("usr/bin/qemu-aarch64-static");
+        let copied_qemu = std::env::consts::ARCH != "aarch64" && !qemu_target.exists();
+        let install_result = (|| -> AppResult<()> {
+            if copied_qemu {
+                let qemu_source = Path::new("/usr/bin/qemu-aarch64-static");
+                if !qemu_source.is_file() {
+                    return Err(AppError::Flash(
+                        "qemu-aarch64-static es obligatorio para preparar una imagen ARM64 desde este host"
+                            .into(),
+                    ));
+                }
+                std::fs::copy(qemu_source, &qemu_target)?;
+            }
+
+            println!("Instalando dependencias y configuración dentro de la imagen (sin red)...");
+            let mut command = std::process::Command::new("chroot");
+            command.arg(&mount_dir);
+            if std::env::consts::ARCH != "aarch64" {
+                command.arg("/usr/bin/qemu-aarch64-static");
+            }
+            let output = command
+                .args([
+                    "/bin/bash",
+                    "/opt/sigil-hardware/install.sh",
+                    "--offline-repo",
+                    "/opt/sigil/offline-repo",
+                ])
+                .env("SIGIL_IMAGE_PREPARATION", "1")
+                .env("DEBIAN_FRONTEND", "noninteractive")
+                .output()
+                .map_err(|error| AppError::Flash(format!("No se pudo iniciar chroot: {error}")))?;
+            if !output.status.success() {
+                let detail = summarize_command_failure(&output.stdout, &output.stderr);
+                return Err(AppError::Flash(format!(
+                    "La instalación offline dentro de la imagen falló con estado {}: {detail}",
+                    output.status
+                )));
+            }
+            Ok(())
+        })();
+        let _ = std::fs::remove_file(&policy_path);
+        if policy_backup.exists() {
+            std::fs::rename(&policy_backup, &policy_path)?;
+        }
+        if copied_qemu {
+            let _ = std::fs::remove_file(&qemu_target);
+        }
+        install_result?;
+
+        let sync_status = std::process::Command::new("sync").status()?;
+        if !sync_status.success() {
+            return Err(AppError::Flash("No se pudo sincronizar la microSD".into()));
+        }
+        Ok(())
+    })();
+
+    let cleanup_result = unmount_all(&mut mounted);
+    let _ = std::fs::remove_dir(&mount_dir);
+    preparation?;
+    cleanup_result?;
+    println!("Imagen preparada: paquetes instalados offline y firstboot mínimo habilitado.");
+    Ok(())
+}
+
+fn summarize_command_failure(stdout: &[u8], stderr: &[u8]) -> String {
+    fn tail(bytes: &[u8]) -> String {
+        let text = String::from_utf8_lossy(bytes);
+        let mut lines = text
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .rev()
+            .take(8)
+            .collect::<Vec<_>>();
+        lines.reverse();
+        lines.join(" | ")
+    }
+
+    let stderr = tail(stderr);
+    let stdout = tail(stdout);
+    match (stderr.is_empty(), stdout.is_empty()) {
+        (false, false) => format!("stderr: {stderr}; stdout: {stdout}"),
+        (false, true) => format!("stderr: {stderr}"),
+        (true, false) => format!("stdout: {stdout}"),
+        (true, true) => "el instalador no produjo salida de diagnóstico".to_string(),
+    }
+}
+
+fn validate_bundle_for_image(
+    image: &Path,
+    offline_packages: &Path,
+    package_contract: &Path,
+) -> AppResult<()> {
+    let summary = flasher_rs::offline::validate_repository(offline_packages, package_contract)
+        .map_err(|error| {
+            AppError::Validation(format!(
+                "El bundle de dependencias offline no es válido: {error}"
+            ))
+        })?;
+    let image_name = image
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            AppError::Validation("La imagen base no tiene un nombre de archivo válido".into())
+        })?;
+    if image_name != summary.base_image_name {
+        return Err(AppError::Validation(format!(
+            "El bundle {} requiere la imagen {}, no {}",
+            summary.bundle_version, summary.base_image_name, image_name
+        )));
+    }
+
+    let image_sha256 = sha256_file(image)?;
+    if image_sha256 != summary.base_image_sha256 {
+        return Err(AppError::Validation(format!(
+            "La imagen base {} no coincide con el SHA-256 requerido por el bundle {}",
+            image.display(),
+            summary.bundle_version
+        )));
+    }
+    Ok(())
+}
+
+fn sha256_file(path: &Path) -> AppResult<String> {
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 1024 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
             break;
         }
-        println!(
-            "Intento {} de montaje falló o demoró. Esperando y reintentando...",
-            i
-        );
-        std::thread::sleep(std::time::Duration::from_millis(2000));
+        hasher.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn partition_path(device: &str, number: u8) -> String {
+    if device.contains("mmcblk") || device.contains("nvme") || device.contains("loop") {
+        format!("{device}p{number}")
+    } else {
+        format!("{device}{number}")
+    }
+}
+
+fn mount_partition_with_retry(device: &str, partition: &str, target: &Path) -> AppResult<()> {
+    for attempt in 1..=10 {
+        let status = std::process::Command::new("mount")
+            .arg(partition)
+            .arg(target)
+            .status();
+        if status.as_ref().is_ok_and(|value| value.success()) {
+            return Ok(());
+        }
+        println!("Montaje de {partition}: intento {attempt}/10...");
         let _ = std::process::Command::new("sync").status();
         let _ = std::process::Command::new("partprobe").arg(device).status();
-        std::thread::sleep(std::time::Duration::from_millis(1000));
-        mount_status = std::process::Command::new("mount")
-            .arg(&part2)
-            .arg(&mount_dir)
-            .status();
+        std::thread::sleep(Duration::from_secs(2));
     }
+    Err(AppError::Flash(format!(
+        "No se pudo montar la partición raíz {partition}"
+    )))
+}
 
-    if !mount_status.is_ok_and(|status| status.success()) {
-        let _ = std::fs::remove_dir(&mount_dir);
-        return Err(AppError::Flash(format!(
-            "No se pudo montar la partición raíz {}. Verifica que la imagen se haya grabado correctamente y contenga particiones ext4.",
-            part2
-        )));
+fn mount_checked(source: &str, target: &Path) -> AppResult<()> {
+    let status = std::process::Command::new("mount")
+        .arg(source)
+        .arg(target)
+        .status()
+        .map_err(|error| AppError::Flash(format!("No se pudo ejecutar mount: {error}")))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(AppError::Flash(format!(
+            "No se pudo montar {source} en {}",
+            target.display()
+        )))
     }
+}
 
-    println!("Copiando repositorio sigil-hardware a la microSD...");
-    let opt_dir = mount_dir.join("opt");
-    let _ = std::fs::create_dir_all(&opt_dir);
-
-    let workspace_hw_path =
-        PathBuf::from("/home/ubuntu/Desktop/sigil-OS/sigil-flash/sigil-hardware");
-
-    let copy_status = std::process::Command::new("cp")
-        .arg("-r")
-        .arg(&workspace_hw_path)
-        .arg(&opt_dir)
-        .status();
-
-    if !copy_status.is_ok_and(|status| status.success()) {
-        let _ = std::process::Command::new("umount")
-            .arg(&mount_dir)
-            .status();
-        let _ = std::fs::remove_dir(&mount_dir);
-        return Err(AppError::Flash(
-            "Error al copiar los archivos de sigil-hardware a la partición raíz.".to_string(),
-        ));
+fn copy_hardware_payload(source: &Path, target: &Path) -> AppResult<()> {
+    if target.exists() {
+        std::fs::remove_dir_all(target)?;
     }
-
-    println!("Configurando el script de primer arranque (firstboot.sh)...");
-    let firstboot_path = mount_dir.join("usr/local/bin/sigil-firstboot.sh");
-    let firstboot_content = r#"#!/bin/bash
-exec > /var/log/sigil-firstboot.log 2>&1
-echo "=== Iniciando instalación de Sigil-Hardware en primer arranque ==="
-
-cd /opt/sigil-hardware
-
-chmod +x install.sh
-
-# Ejecutar el instalador de Sigil-Hardware
-bash install.sh
-
-# Habilitar lingering e inicio en arranque
-loginctl enable-linger sigil || true
-
-# Restaurar rc.local original
-if [ -f /etc/rc.local.orig ]; then
-    mv /etc/rc.local.orig /etc/rc.local
-else
-    echo '#!/bin/sh -e' > /etc/rc.local
-    echo 'exit 0' >> /etc/rc.local
-    chmod +x /etc/rc.local
-fi
-
-echo "=== Instalación completada con éxito. Reiniciando... ==="
-reboot
-"#;
-
-    if let Err(e) = std::fs::write(&firstboot_path, firstboot_content) {
-        let _ = std::process::Command::new("umount")
-            .arg(&mount_dir)
-            .status();
-        let _ = std::fs::remove_dir(&mount_dir);
-        return Err(AppError::Flash(format!(
-            "No se pudo escribir el script de primer arranque: {}",
-            e
-        )));
+    std::fs::create_dir_all(target)?;
+    copy_path(&source.join("install.sh"), &target.join("install.sh"))?;
+    for directory in ["panel", "scripts", "services", "conf", "manifests"] {
+        copy_path(&source.join(directory), &target.join(directory))?;
     }
-
-    let _ = std::process::Command::new("chmod")
-        .arg("+x")
-        .arg(&firstboot_path)
-        .status();
-
-    println!("Configurando rc.local para la ejecución en el primer encendido...");
-    let rc_local_path = mount_dir.join("etc/rc.local");
-    let rc_local_orig = mount_dir.join("etc/rc.local.orig");
-
-    if rc_local_path.exists() {
-        let _ = std::fs::copy(&rc_local_path, &rc_local_orig);
-    }
-
-    let rc_local_content = r#"#!/bin/bash
-/usr/local/bin/sigil-firstboot.sh &
-exit 0
-"#;
-
-    if let Err(e) = std::fs::write(&rc_local_path, rc_local_content) {
-        let _ = std::process::Command::new("umount")
-            .arg(&mount_dir)
-            .status();
-        let _ = std::fs::remove_dir(&mount_dir);
-        return Err(AppError::Flash(format!(
-            "No se pudo configurar /etc/rc.local: {}",
-            e
-        )));
-    }
-
-    let _ = std::process::Command::new("chmod")
-        .arg("+x")
-        .arg(&rc_local_path)
-        .status();
-
-    println!("Desmontando partición raíz...");
-    let umount_status = std::process::Command::new("umount")
-        .arg(&mount_dir)
-        .status();
-
-    if !umount_status.is_ok_and(|status| status.success()) {
-        return Err(AppError::Flash(
-            "Fallo al desmontar la partición de la microSD de manera segura.".to_string(),
-        ));
-    }
-
-    let _ = std::fs::remove_dir(&mount_dir);
-    println!("Instalación de sigil-hardware en la microSD preparada con éxito.");
     Ok(())
+}
+
+fn copy_directory_contents(source: &Path, target: &Path) -> AppResult<()> {
+    if target.exists() {
+        std::fs::remove_dir_all(target)?;
+    }
+    std::fs::create_dir_all(target)?;
+    let status = std::process::Command::new("cp")
+        .args(["-a"])
+        .arg(source.join("."))
+        .arg(target)
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(AppError::Flash(format!(
+            "No se pudo copiar el repositorio offline desde {}",
+            source.display()
+        )))
+    }
+}
+
+fn copy_path(source: &Path, target: &Path) -> AppResult<()> {
+    if !source.exists() {
+        return Err(AppError::Flash(format!(
+            "Falta un componente del payload: {}",
+            source.display()
+        )));
+    }
+    let status = std::process::Command::new("cp")
+        .args(["-a"])
+        .arg(source)
+        .arg(target)
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(AppError::Flash(format!(
+            "No se pudo copiar {}",
+            source.display()
+        )))
+    }
+}
+
+fn unmount_all(mounted: &mut Vec<PathBuf>) -> AppResult<()> {
+    let mut failures = Vec::new();
+    while let Some(target) = mounted.pop() {
+        let status = std::process::Command::new("umount").arg(&target).status();
+        if !status.as_ref().is_ok_and(|value| value.success()) {
+            failures.push(target.display().to_string());
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(AppError::Flash(format!(
+            "No se pudieron desmontar de forma segura: {}",
+            failures.join(", ")
+        )))
+    }
 }
 
 #[cfg(test)]
@@ -831,5 +1144,121 @@ mod tests {
         assert!(lock.is_ok(), "stale lock was not reclaimed: {lock:?}");
         drop(lock);
         let _ = std::fs::remove_dir_all(lock_dir);
+    }
+
+    #[test]
+    fn repository_copy_replaces_stale_files_idempotently() {
+        let root = isolated_lock_dir("repository-copy-idempotent");
+        let source = root.join("source");
+        let target = root.join("target");
+        std::fs::create_dir_all(source.join("packages")).expect("source packages");
+        std::fs::write(source.join("Packages"), b"fixture index").expect("source index");
+        std::fs::write(source.join("packages/demo.deb"), b"fixture package")
+            .expect("source package");
+        std::fs::create_dir_all(&target).expect("target");
+        std::fs::write(target.join("stale.deb"), b"stale").expect("stale package");
+
+        copy_directory_contents(&source, &target).expect("first repository copy");
+        copy_directory_contents(&source, &target).expect("second repository copy");
+
+        assert!(!target.join("stale.deb").exists());
+        assert_eq!(
+            std::fs::read(target.join("Packages")).expect("copied index"),
+            b"fixture index"
+        );
+        assert!(target.join("packages/demo.deb").is_file());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn empty_mount_cleanup_is_idempotent() {
+        let mut mounted = Vec::new();
+        assert!(unmount_all(&mut mounted).is_ok());
+        assert!(unmount_all(&mut mounted).is_ok());
+    }
+
+    fn progress(status: &str, message: &str) -> FlashProgress {
+        FlashProgress {
+            bytes_written: 1,
+            total_bytes: 2,
+            speed_mbps: 0.0,
+            eta_seconds: 0.0,
+            status: status.to_string(),
+            message: message.to_string(),
+        }
+    }
+
+    #[test]
+    fn running_writer_should_remain_authoritative_after_launcher_failure() {
+        let running = progress("running", "installing offline packages");
+
+        let outcome =
+            completion_from_observation(Some(&running), Some(false), Some(Duration::from_secs(60)));
+
+        assert_eq!(outcome, FlashCompletion::Running);
+    }
+
+    #[test]
+    fn terminal_writer_success_should_override_launcher_failure() {
+        let done = progress("done", "complete");
+
+        let outcome =
+            completion_from_observation(Some(&done), Some(false), Some(Duration::from_secs(60)));
+
+        assert_eq!(outcome, FlashCompletion::Succeeded);
+    }
+
+    #[test]
+    fn terminal_writer_error_should_preserve_actionable_message() {
+        let error = progress("error", "dpkg configuration failed");
+
+        let outcome =
+            completion_from_observation(Some(&error), Some(false), Some(Duration::from_secs(60)));
+
+        assert_eq!(
+            outcome,
+            FlashCompletion::Failed("dpkg configuration failed".to_string())
+        );
+    }
+
+    #[test]
+    fn launcher_failure_without_writer_progress_should_fail_after_grace() {
+        let outcome = completion_from_observation(None, Some(false), Some(ELEVATED_LAUNCHER_GRACE));
+
+        assert!(matches!(outcome, FlashCompletion::Failed(_)));
+    }
+
+    #[test]
+    fn command_failure_summary_should_include_stderr_and_stdout_tail() {
+        let stdout = b"old\nuseful stdout\n";
+        let stderr = b"warning\nactionable failure\n";
+
+        let summary = summarize_command_failure(stdout, stderr);
+
+        assert_eq!(
+            summary,
+            "stderr: warning | actionable failure; stdout: old | useful stdout"
+        );
+    }
+
+    #[test]
+    fn raw_flash_error_should_preserve_existing_progress_counts() {
+        let root = isolated_lock_dir("raw-error-progress");
+        let path = root.join("progress.json");
+        write_progress_file(&path, &progress("running", "writing"));
+
+        write_raw_flash_error(
+            path.to_str().expect("UTF-8 fixture path"),
+            &AppError::Flash("dpkg failed".to_string()),
+        );
+
+        let actual: FlashProgress =
+            serde_json::from_slice(&std::fs::read(&path).expect("read error progress"))
+                .expect("parse error progress");
+        assert_eq!(actual.bytes_written, 1);
+        assert_eq!(actual.total_bytes, 2);
+        assert_eq!(actual.status, "error");
+        assert!(actual.message.contains("dpkg failed"));
+        let _ = std::fs::remove_dir_all(root);
     }
 }

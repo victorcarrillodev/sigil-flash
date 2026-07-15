@@ -1,3 +1,6 @@
 __pycache__/
 *.pyc
 state/__pycache__/
+artifacts/
+offline-repo/
+*.deb

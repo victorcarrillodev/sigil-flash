@@ -198,7 +198,7 @@ registrar `STATE=AP_ACTIVE` y `CLIENT_STATE=CLIENT_LINK_DEAD` simultáneamente.
 
 Since 2026-07-01, `sigil-hardware/manifests/` contains the canonical specs:
 
-- `apt-packages.txt` — required packages
+- `offline-package-contract.json` — canonical distribution, architecture, required/optional packages and version policy
 - `install-layout.json` — file copy mapping
 - `services.json` — systemd enable/disable
 - `system-config.json` — boot/config/user settings

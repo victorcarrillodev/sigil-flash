@@ -16,8 +16,8 @@ ACTION="$2"
 # Production defaults; overrides exist only to permit isolated execution of this
 # exact dispatcher in the repository test suite.
 GEO_DELAY_SECONDS="${SIGIL_GEO_DELAY_SECONDS:-5}"
-GEO_PYTHON="${SIGIL_GEO_PYTHON:-python3}"
-GEO_SCRIPT="${SIGIL_GEO_SCRIPT:-/home/sigil/geolocation.py}"
+GEO_PYTHON="${SIGIL_GEO_PYTHON:-/usr/bin/python3}"
+GEO_SCRIPT="${SIGIL_GEO_SCRIPT:-/opt/sigil/panel/geolocation.py}"
 GEO_LOG="${SIGIL_GEO_LOG:-/var/log/sigil-geolocate.log}"
 
 # Delay and worker both run asynchronously — NetworkManager returns immediately.

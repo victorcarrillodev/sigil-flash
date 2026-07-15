@@ -13,6 +13,16 @@
 - 🎨 **Neumorphism UI** — Interfaz elegante con sombras suaves
 - 📋 **Consola de logs** en tiempo real
 - 🔐 **pkexec** — Solicita privilegios de admin con diálogo nativo de Polkit
+- 📦 **Dependencias offline** — Construye, valida e instala el repositorio ARM64 dentro de la imagen
+
+## Fabricación sin Internet en la Raspberry
+
+`sigil-hardware` mantiene el contrato canónico de paquetes. SIGIL Flash resuelve
+y descarga su cierre transitivo, genera el repositorio APT local, valida hashes
+y arquitectura, y lo instala dentro de la imagen durante el flasheo real. El
+primer arranque no instala dependencias. Consulta
+[`docs/OFFLINE_PACKAGES.md`](docs/OFFLINE_PACKAGES.md) para el flujo y los
+prerrequisitos de fabricación.
 
 ## 🚀 Inicio Rápido
 

@@ -17,10 +17,12 @@ fn print_help() {
     println!("  --base-image <PATH>          Immutable .img or .img.xz input");
     println!("  --base-image-sha256 <HEX>    Expected SHA-256 of that exact input file");
     println!("  --payload <DIR>              Generated SIGIL payload directory");
+    println!("  --offline-packages <DIR>     Validated local APT repository");
     println!();
     println!("Optional:");
     println!("  --target-device <PATH>       Device reference or regular-file fixture");
     println!("  --provision <PATH>           External sigil_provision.json");
+    println!("  --secrets <PATH>             Protected sigil_secrets.json (PIN never in argv)");
     println!("  --dry-run                    Required by apply; guarantees no writes");
 }
 
@@ -55,8 +57,10 @@ struct CmdArgs {
     base_image: Option<PathBuf>,
     base_image_sha256: Option<String>,
     payload: Option<PathBuf>,
+    offline_packages: Option<PathBuf>,
     target_device: Option<PathBuf>,
     provision: Option<PathBuf>,
+    secrets: Option<PathBuf>,
     dry_run: bool,
 }
 
@@ -64,8 +68,10 @@ fn parse_cmd_args(args: &[String]) -> Result<CmdArgs, String> {
     let mut base_image = None;
     let mut base_image_sha256 = None;
     let mut payload = None;
+    let mut offline_packages = None;
     let mut target_device = None;
     let mut provision = None;
+    let mut secrets = None;
     let mut dry_run = false;
 
     let mut i = 0;
@@ -92,6 +98,13 @@ fn parse_cmd_args(args: &[String]) -> Result<CmdArgs, String> {
                 }
                 payload = Some(PathBuf::from(&args[i]));
             }
+            "--offline-packages" => {
+                i += 1;
+                if i >= args.len() {
+                    return Err("missing value for --offline-packages".into());
+                }
+                offline_packages = Some(PathBuf::from(&args[i]));
+            }
             "--target-device" => {
                 i += 1;
                 if i >= args.len() {
@@ -106,6 +119,13 @@ fn parse_cmd_args(args: &[String]) -> Result<CmdArgs, String> {
                 }
                 provision = Some(PathBuf::from(&args[i]));
             }
+            "--secrets" => {
+                i += 1;
+                if i >= args.len() {
+                    return Err("missing value for --secrets".into());
+                }
+                secrets = Some(PathBuf::from(&args[i]));
+            }
             "--dry-run" => dry_run = true,
             _ => return Err(format!("unrecognized argument: {}", args[i])),
         }
@@ -116,8 +136,10 @@ fn parse_cmd_args(args: &[String]) -> Result<CmdArgs, String> {
         base_image,
         base_image_sha256,
         payload,
+        offline_packages,
         target_device,
         provision,
+        secrets,
         dry_run,
     })
 }
@@ -136,13 +158,22 @@ fn build_engine(cmd: &CmdArgs) -> Result<Engine, String> {
         .base_image_sha256
         .clone()
         .ok_or_else(|| "error: --base-image-sha256 is required".to_string())?;
+    let offline_packages = cmd
+        .offline_packages
+        .clone()
+        .ok_or_else(|| "error: --offline-packages is required".to_string())?;
 
-    let mut engine = Engine::new(base_image, payload).with_base_image_sha256(base_image_sha256);
+    let mut engine = Engine::new(base_image, payload)
+        .with_base_image_sha256(base_image_sha256)
+        .with_offline_packages(offline_packages);
     if let Some(ref dev) = cmd.target_device {
         engine = engine.with_target_device(dev.clone());
     }
     if let Some(ref prov) = cmd.provision {
         engine = engine.with_provision(prov.clone());
+    }
+    if let Some(ref secrets) = cmd.secrets {
+        engine = engine.with_secrets(secrets.clone());
     }
     Ok(engine)
 }
@@ -233,15 +264,7 @@ fn cmd_status() {
         println!("  {}", cap);
     }
     println!();
-    println!("Core packages ({}):", status.core_packages.len());
-    for pkg in status.core_packages {
-        println!("  - {pkg}");
-    }
-    println!();
-    println!("Optional packages ({}):", status.optional_packages.len());
-    for pkg in status.optional_packages {
-        println!("  - {pkg} (factory/debug only)");
-    }
+    println!("Package requirements: loaded exclusively from the payload canonical contract");
     println!();
     println!("Services to enable ({}):", status.services_enable.len());
     for svc in status.services_enable {

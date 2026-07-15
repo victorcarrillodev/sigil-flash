@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0d0f14">
+  <title>Acceso técnico — SIGIL</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+  <main class="card" style="max-width:420px;margin:10vh auto;padding:24px">
+    <div class="card-header">
+      <span class="card-header-icon">🔐</span>
+      <h1 class="card-title">Acceso técnico SIGIL</h1>
+    </div>
+    {% if setup_locked %}
+      <p class="result-msg error" role="alert">El panel está bloqueado hasta que un técnico aprovisione un PIN local.</p>
+    {% else %}
+      <form method="post" autocomplete="off">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <label class="form-label" for="panel-pin">PIN del panel</label>
+        <input class="form-input" id="panel-pin" name="panel_pin" type="password"
+               inputmode="numeric" pattern="[0-9]{6,12}" minlength="6" maxlength="12"
+               autocomplete="current-password" required autofocus>
+        <button class="btn-primary" type="submit" style="margin-top:16px">Entrar</button>
+      </form>
+    {% endif %}
+    {% if error %}<p class="result-msg error" role="alert">{{ error }}</p>{% endif %}
+  </main>
+</body>
+</html>

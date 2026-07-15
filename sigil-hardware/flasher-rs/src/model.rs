@@ -22,6 +22,15 @@ pub struct Capabilities {
     pub i2s_dac: bool,
 }
 
+/// Strict, deliberately narrow manufacturing secret contract.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ManufacturingSecrets {
+    #[serde(rename = "_schema_version")]
+    pub schema_version: String,
+    pub panel_pin: String,
+}
+
 /// A complete customization plan with labeled sections.
 pub struct Plan {
     pub title: String,
@@ -71,8 +80,6 @@ pub struct EngineStatus {
     pub description: &'static str,
     pub phase: &'static str,
     pub capabilities: Vec<&'static str>,
-    pub core_packages: &'static [&'static str],
-    pub optional_packages: &'static [&'static str],
     pub services_enable: &'static [&'static str],
     pub services_disable: &'static [&'static str],
 }
@@ -80,35 +87,6 @@ pub struct EngineStatus {
 // ═══════════════════════════════════════════════════════════════════════
 // Behavior Model Constants
 // ═══════════════════════════════════════════════════════════════════════
-
-/// Core apt packages required for Sigil OS (always installed).
-pub const CORE_PACKAGES: &[&str] = &[
-    "python3",
-    "python3-flask",
-    "python3-bluez",
-    "network-manager",
-    "bluez",
-    "bluetooth",
-    "pulseaudio",
-    "pulseaudio-utils",
-    "pulseaudio-module-bluetooth",
-    "alsa-utils",
-    "mpg123",
-    "hostapd",
-    "dnsmasq",
-    "wireless-tools",
-    "rfkill",
-    "iw",
-    "sudo",
-    "curl",
-    "firmware-brcm80211",
-    "wireless-regdb",
-    "raspi-utils",
-    "python3-pip",
-];
-
-/// Optional packages (factory/debug only, disabled by default).
-pub const OPTIONAL_PACKAGES: &[&str] = &["openssh-server"];
 
 /// Services to enable in the customized image.
 pub const SERVICES_ENABLE: &[&str] = &[
@@ -128,7 +106,7 @@ pub const SERVICES_UNMASK: &[&str] = &["hostapd", "dnsmasq"];
 
 /// Files and directories to copy from payload into rootfs.
 pub const CONFIG_COPIES: &[&str] = &[
-    "panel/ -> /home/sigil/",
+    "panel/ -> /opt/sigil/panel/ (root:root, read-only)",
     "scripts/ -> /usr/local/bin/",
     "services/ -> /etc/systemd/system/",
     "conf/bluetooth-main.conf -> /etc/bluetooth/main.conf",
@@ -166,7 +144,13 @@ pub const USER_GROUPS: &[&str] = &[
 ];
 
 /// State directories to create in the rootfs.
-pub const STATE_DIRECTORIES: &[&str] = &["/var/lib/wifi-manager", "/var/lib/sigil", "/etc/sigil"];
+pub const STATE_DIRECTORIES: &[&str] = &[
+    "/var/lib/wifi-manager",
+    "/var/lib/sigil",
+    "/etc/sigil",
+    "/etc/sigil/secrets (root:sigil, 0750)",
+    "/etc/sigil/manufacturing (root:root, 0700; temporary input only)",
+];
 
 /// State files with owner:group and mode.
 pub const STATE_FILES: &[(&str, &str, &str)] = &[
@@ -192,6 +176,7 @@ pub const FIRSTBOOT_RESPONSIBILITIES: &[&str] = &[
     "apply sigil_provision.json and remove from boot",
     "verify ownership and permissions",
     "clean up provision file from boot partition",
+    "consume the protected panel secret once, create an Argon2id hash, and remove plaintext",
 ];
 
 /// Items deferred to runtime/firstboot (documented for clarity).

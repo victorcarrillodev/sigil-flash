@@ -12,6 +12,7 @@ use services::disk_service::DiskService;
 use services::download_service::DownloadService;
 use services::engine_service::FlasherEngineService;
 use services::flash_service::FlashService;
+use services::offline_package_service::OfflinePackageService;
 use services::verification_service::VerificationService;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -37,6 +38,10 @@ pub fn run() {
     let flash_service = FlashService::new();
     let config_service = ConfigService::new();
     let verification_service = VerificationService::new();
+    let offline_package_service = OfflinePackageService::new().unwrap_or_else(|error| {
+        tracing::error!("OfflinePackageService init failed: {error}");
+        std::process::exit(1);
+    });
 
     // 2b. Instantiate flasher-rs engine adapter
     let engine_service = match FlasherEngineService::new() {
@@ -62,6 +67,7 @@ pub fn run() {
         .manage(flash_service)
         .manage(config_service)
         .manage(verification_service)
+        .manage(offline_package_service)
         .manage(engine_service)
         .invoke_handler(tauri::generate_handler![
             commands::disks::list_devices,
@@ -73,6 +79,9 @@ pub fn run() {
             commands::downloads::cancel_download,
             commands::downloads::verify_image,
             commands::config::save_device_config,
+            commands::offline_packages::offline_packages_status,
+            commands::offline_packages::offline_packages_validate,
+            commands::offline_packages::offline_packages_build,
             // flasher-rs engine adapter commands
             commands::engine::engine_status,
             commands::engine::engine_plan,
@@ -107,12 +116,23 @@ fn main() {
 
     if args.contains(&"--flash-raw".to_string()) {
         let rt = tokio::runtime::Runtime::new().unwrap();
+        let progress_file_for_error = get_arg_value(&args, "--progress-file").ok();
         if let Err(e) = rt.block_on(async {
             let src = get_arg_value(&args, "--src")?;
             let dest = get_arg_value(&args, "--dest")?;
             let progress_file = get_arg_value(&args, "--progress-file")?;
-            services::flash_service::run_raw_flash_cli(&src, &dest, &progress_file).await
+            let offline_packages = get_arg_value(&args, "--offline-packages")?;
+            services::flash_service::run_raw_flash_cli(
+                &src,
+                &dest,
+                &progress_file,
+                &offline_packages,
+            )
+            .await
         }) {
+            if let Some(progress_file) = progress_file_for_error {
+                services::flash_service::write_raw_flash_error(&progress_file, &e);
+            }
             eprintln!("Fallo durante el flasheo directo: {}", e);
             std::process::exit(1);
         }

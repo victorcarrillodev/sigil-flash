@@ -52,6 +52,8 @@ pub struct EngineParams {
     pub base_image_sha256: String,
     /// Absolute path to the generated SIGIL payload directory.
     pub payload: String,
+    /// Absolute path to the manufacturing-owned offline APT repository.
+    pub offline_packages: String,
     /// Optional absolute path to `sigil_provision.json`.
     pub provision: Option<String>,
     /// Optional path to the protected manufacturing secret input.
@@ -420,6 +422,11 @@ fn build_argv(command: &str, params: &EngineParams) -> AppResult<Vec<String>> {
     if params.payload.trim().is_empty() {
         return Err(AppError::Validation("--payload must not be empty".into()));
     }
+    if params.offline_packages.trim().is_empty() {
+        return Err(AppError::Validation(
+            "--offline-packages must not be empty".into(),
+        ));
+    }
 
     // Validate SHA-256 format (64 hex chars)
     if !is_sha256_hex(params.base_image_sha256.trim()) {
@@ -432,6 +439,7 @@ fn build_argv(command: &str, params: &EngineParams) -> AppResult<Vec<String>> {
     for (field, value) in [
         ("base_image", &params.base_image),
         ("payload", &params.payload),
+        ("offline_packages", &params.offline_packages),
     ] {
         reject_shell_injection(field, value)?;
     }
@@ -457,6 +465,9 @@ fn build_argv(command: &str, params: &EngineParams) -> AppResult<Vec<String>> {
 
     argv.push("--payload".into());
     argv.push(params.payload.clone());
+
+    argv.push("--offline-packages".into());
+    argv.push(params.offline_packages.clone());
 
     if let Some(ref p) = params.provision {
         argv.push("--provision".into());
@@ -717,6 +728,7 @@ mod tests {
             base_image: "/tmp/test fixture.img.xz".into(), // path with space
             base_image_sha256: "a".repeat(64),
             payload: "/tmp/payload dir".into(), // path with space
+            offline_packages: "/tmp/offline packages".into(),
             provision: None,
             secrets: None,
             target_device: None,
@@ -853,6 +865,20 @@ mod tests {
     #[ignore = "cross-repository dry-run; run explicitly for release validation"]
     async fn test_complete_tauri_adapter_to_flasher_dry_run() {
         let service = FlasherEngineService::new().expect("locate built flasher-rs");
+        let flash_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("sigil-flash root")
+            .to_path_buf();
+        let base_image = flash_root
+            .parent()
+            .expect("sigil-OS root")
+            .join("artifacts/base-images/2026-06-18-raspios-trixie-arm64-lite.img.xz");
+        let offline_packages = flash_root.join("artifacts/offline-packages/trixie-arm64");
+        assert!(base_image.is_file(), "official base image is unavailable");
+        assert!(
+            offline_packages.join("package-manifest.json").is_file(),
+            "real offline bundle is unavailable"
+        );
         let directory = std::env::temp_dir().join(format!(
             "sigil flash complete dry run {}",
             std::process::id()
@@ -865,12 +891,10 @@ mod tests {
             std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
                 .expect("fixture mode");
         }
-        let base_image = directory.join("base image.img");
         let target = directory.join("target fixture.img");
         let provision_path = directory.join("device provision.json");
         let secrets_path = directory.join("panel secrets.json");
         let payload = directory.join("payload with spaces");
-        std::fs::write(&base_image, []).expect("base image fixture");
         std::fs::write(&target, []).expect("target fixture");
         service
             .write_provision(
@@ -898,9 +922,10 @@ mod tests {
         );
         let params = EngineParams {
             base_image: base_image.to_string_lossy().to_string(),
-            base_image_sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            base_image_sha256: "acff736ca7945e3b305f07cda4abdb870910e12634991da69783611756e381b3"
                 .into(),
             payload: payload.to_string_lossy().to_string(),
+            offline_packages: offline_packages.to_string_lossy().to_string(),
             provision: Some(provision_path.to_string_lossy().to_string()),
             secrets: Some(secrets_path.to_string_lossy().to_string()),
             target_device: Some(target.to_string_lossy().to_string()),
@@ -970,6 +995,7 @@ mod tests {
             base_image: "/images/my image.img".into(),
             base_image_sha256: "b".repeat(64),
             payload: "/payloads/my payload".into(),
+            offline_packages: "/offline/my packages".into(),
             provision: Some("/provision/provision file.json".into()),
             secrets: Some("/secrets/panel secrets.json".into()),
             target_device: Some("/tmp/target file.img".into()),
@@ -994,6 +1020,7 @@ mod tests {
             base_image: "/home/user/my images/test file.img.xz".into(),
             base_image_sha256: "c".repeat(64),
             payload: "/home/user/sigil payloads/hw payload dir".into(),
+            offline_packages: "/home/user/offline packages/trixie arm64".into(),
             provision: Some("/home/user/my provision/device provision.json".into()),
             secrets: Some("/home/user/manufacturing secrets/panel secret.json".into()),
             target_device: Some("/tmp/target fixture file.img".into()),
@@ -1037,6 +1064,7 @@ mod tests {
             base_image_sha256: "acff736ca7945e3b305f07cda4abdb870910e12634991da69783611756e381b3"
                 .into(),
             payload: "/tmp/payload".into(),
+            offline_packages: "/tmp/offline".into(),
             provision: None,
             secrets: None,
             target_device: None,

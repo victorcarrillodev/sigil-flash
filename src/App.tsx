@@ -96,9 +96,10 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    let disposed = false;
     let unlisten: UnlistenFn | undefined;
     const setup = async () => {
-      unlisten = await listen<FlashProgress>("flash-progress", (event) => {
+      const listener = await listen<FlashProgress>("flash-progress", (event) => {
         setProgress(event.payload);
         if (event.payload.message) {
           const t = event.payload.status === "error" ? "error"
@@ -111,9 +112,17 @@ export default function App() {
           addLog("Flasheo cancelado por el usuario.", "warning");
         }
       });
+      if (disposed) {
+        listener();
+      } else {
+        unlisten = listener;
+      }
     };
-    setup();
-    return () => { unlisten?.(); };
+    void setup();
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
   }, [addLog]);
 
   const handleImageSelected = (info: ImageInfo) => {

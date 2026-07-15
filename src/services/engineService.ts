@@ -38,6 +38,7 @@ export interface EngineParams {
   base_image: string;
   base_image_sha256: string;
   payload: string;
+  offline_packages: string;
   provision: string | null;
   secrets: string | null;
   target_device: string | null;
@@ -64,6 +65,27 @@ export interface SecretWriteResult {
   schema_version: "1.0";
   panel_pin_configured: boolean;
   pin_length: number;
+}
+
+export interface OfflinePackageStatus {
+  path: string;
+  detected: boolean;
+  valid: boolean;
+  bundle_version: string;
+  package_contract_schema_version: string;
+  direct_package_count: number;
+  resolved_package_count: number;
+  architecture: string;
+  distribution: string;
+  base_image_name: string;
+  base_image_sha256: string;
+  base_image_compatible: boolean;
+  total_bytes: number;
+  keyring_status: string;
+  sources_status: string;
+  unresolved_packages: string[];
+  manifest_status: "missing" | "invalid" | "valid";
+  message: string;
 }
 
 // ── Command wrappers ──────────────────────────────────────────────────────────
@@ -115,6 +137,36 @@ export async function engineBuildPayload(
   return invoke<EngineResult>("engine_build_payload", {
     outputDir: outputDir ?? null,
   });
+}
+
+export async function offlinePackagesStatus(
+  path?: string,
+  baseImage?: string,
+  baseImageSha256?: string
+): Promise<OfflinePackageStatus> {
+  return invoke<OfflinePackageStatus>("offline_packages_status", {
+    path: path ?? null,
+    baseImage: baseImage ?? null,
+    baseImageSha256: baseImageSha256 ?? null,
+  });
+}
+
+export async function offlinePackagesValidate(
+  path?: string,
+  baseImage?: string,
+  baseImageSha256?: string
+): Promise<OfflinePackageStatus> {
+  return invoke<OfflinePackageStatus>("offline_packages_validate", {
+    path: path ?? null,
+    baseImage: baseImage ?? null,
+    baseImageSha256: baseImageSha256 ?? null,
+  });
+}
+
+export async function offlinePackagesBuild(
+  rebuild: boolean
+): Promise<OfflinePackageStatus> {
+  return invoke<OfflinePackageStatus>("offline_packages_build", { rebuild });
 }
 
 /** Run flasher-rs plan (reads only; no files written). */

@@ -1,4 +1,5 @@
 pub mod model;
+pub mod offline;
 pub mod plan;
 pub mod validate;
 
@@ -15,8 +16,10 @@ pub struct Engine {
     base_image: PathBuf,
     base_image_sha256: Option<String>,
     payload: PathBuf,
+    offline_packages: Option<PathBuf>,
     target_device: Option<PathBuf>,
     provision: Option<PathBuf>,
+    secrets: Option<PathBuf>,
 }
 
 impl Engine {
@@ -26,8 +29,10 @@ impl Engine {
             base_image,
             base_image_sha256: None,
             payload,
+            offline_packages: None,
             target_device: None,
             provision: None,
+            secrets: None,
         }
     }
 
@@ -43,9 +48,21 @@ impl Engine {
         self
     }
 
+    /// Set the manufacturing-owned offline APT repository.
+    pub fn with_offline_packages(mut self, repository: PathBuf) -> Self {
+        self.offline_packages = Some(repository);
+        self
+    }
+
     /// Set the provisioning file path (sigil_provision.json).
     pub fn with_provision(mut self, provision: PathBuf) -> Self {
         self.provision = Some(provision);
+        self
+    }
+
+    /// Set the protected manufacturing secret input (sigil_secrets.json).
+    pub fn with_secrets(mut self, secrets: PathBuf) -> Self {
+        self.secrets = Some(secrets);
         self
     }
 
@@ -62,8 +79,14 @@ impl Engine {
     pub fn target_device(&self) -> &Option<PathBuf> {
         &self.target_device
     }
+    pub fn offline_packages(&self) -> &Option<PathBuf> {
+        &self.offline_packages
+    }
     pub fn provision(&self) -> &Option<PathBuf> {
         &self.provision
+    }
+    pub fn secrets(&self) -> &Option<PathBuf> {
+        &self.secrets
     }
 
     // ── Engine Commands ────────────────────────────────────────────────
@@ -74,8 +97,10 @@ impl Engine {
             &self.base_image,
             self.base_image_sha256.as_deref(),
             &self.payload,
+            &self.offline_packages,
             &self.target_device,
             &self.provision,
+            &self.secrets,
         )
     }
 
@@ -85,8 +110,10 @@ impl Engine {
             &self.base_image,
             self.base_image_sha256.as_deref(),
             &self.payload,
+            &self.offline_packages,
             &self.target_device,
             &self.provision,
+            &self.secrets,
         )
     }
 
@@ -109,8 +136,10 @@ impl Engine {
             &self.base_image,
             self.base_image_sha256.as_deref(),
             &self.payload,
+            &self.offline_packages,
             &self.target_device,
             &self.provision,
+            &self.secrets,
         ))
     }
 
@@ -125,11 +154,10 @@ impl Engine {
                 "plan — generate a full customization plan",
                 "validate — verify base-image checksum, payload manifest, provision, and target",
                 "apply — validate and render the plan (dry-run only)",
+                "offline APT repository integrity, architecture, distribution, and dependency validation",
                 ".img and .img.xz immutable base-image inputs",
                 "status — show engine capabilities",
             ],
-            core_packages: model::CORE_PACKAGES,
-            optional_packages: model::OPTIONAL_PACKAGES,
             services_enable: model::SERVICES_ENABLE,
             services_disable: model::SERVICES_DISABLE,
         }

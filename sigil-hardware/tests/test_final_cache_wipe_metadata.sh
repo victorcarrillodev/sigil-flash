@@ -53,7 +53,7 @@ cat > "$CACHE_META" <<'EOF'
   "runtime": {"runtime_seconds": 123}
 }
 EOF
-chmod 0640 "$CACHE_META"
+chmod 0660 "$CACHE_META"
 
 if [ "$(id -u)" -eq 0 ]; then
     if ! getent passwd sigil >/dev/null || ! getent group sigil >/dev/null; then

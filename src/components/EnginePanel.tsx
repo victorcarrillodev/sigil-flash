@@ -14,6 +14,10 @@ import {
   engineGeneratePanelPin,
   engineWriteSecrets,
   ProvisionDocument,
+  OfflinePackageStatus,
+  offlinePackagesStatus,
+  offlinePackagesValidate,
+  offlinePackagesBuild,
 } from "../services/engineService";
 
 // ── Local types ───────────────────────────────────────────────────────────────
@@ -61,6 +65,10 @@ function uiLine(stream: LogStream, text: string): LogLine {
   return { stream, text };
 }
 
+function formatBundleSize(bytes: number): string {
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
 // ── Component ─────────────────────────────────────────────────────────────────
 
 export default function EnginePanel() {
@@ -75,6 +83,8 @@ export default function EnginePanel() {
   const [provision, setProvision] = useState("");
   const [secretsPath, setSecretsPath] = useState("");
   const [targetDevice, setTargetDevice] = useState("");
+  const [offlinePackages, setOfflinePackages] = useState("");
+  const [offlineStatus, setOfflineStatus] = useState<OfflinePackageStatus | null>(null);
 
   // Manufacturing identity (never includes credentials).
   const [serialNumber, setSerialNumber] = useState("");
@@ -169,24 +179,26 @@ export default function EnginePanel() {
       base_image: baseImage,
       base_image_sha256: sha256.trim().toLowerCase(),
       payload,
+      offline_packages: offlinePackages,
       provision: provision || null,
       secrets: secretsPath || null,
       target_device: targetDevice.trim() || null,
       dry_run: true,
     }),
-    [baseImage, sha256, payload, provision, secretsPath, targetDevice]
+    [baseImage, sha256, payload, offlinePackages, provision, secretsPath, targetDevice]
   );
 
   const requireParams = useCallback(() => {
     if (!baseImage) { addLog("ui-error", "Selecciona la imagen base primero."); return false; }
     if (!sha256.trim()) { addLog("ui-error", "Introduce el SHA-256 esperado."); return false; }
     if (!payload) { addLog("ui-error", "Selecciona el directorio del payload."); return false; }
+    if (!offlinePackages || !offlineStatus?.valid) { addLog("ui-error", "Detecta y valida el bundle de dependencias offline."); return false; }
     if (provisionErrors.length > 0) { addLog("ui-error", provisionErrors[0]); return false; }
     if (!provision) { addLog("ui-error", "Guarda el provision JSON antes de continuar."); return false; }
     if (savedProvisionJson !== provisionJson) { addLog("ui-error", "La identidad cambió; vuelve a guardar el provision JSON."); return false; }
     if (!secretsPath) { addLog("ui-error", "Guarda el secreto de acceso al panel antes de continuar."); return false; }
     return true;
-  }, [baseImage, sha256, payload, provision, secretsPath, provisionErrors, savedProvisionJson, provisionJson, addLog]);
+  }, [baseImage, sha256, payload, offlinePackages, offlineStatus, provision, secretsPath, provisionErrors, savedProvisionJson, provisionJson, addLog]);
 
   // ── Actions ──────────────────────────────────────────────────────────────────
 
@@ -231,6 +243,61 @@ export default function EnginePanel() {
       setBusy(false);
     }
   }, [busy, addLog, applyResult]);
+
+  const applyOfflineStatus = useCallback((status: OfflinePackageStatus) => {
+    setOfflinePackages(status.path);
+    setOfflineStatus(status);
+    addLog(status.valid ? "ui-success" : "ui-info", status.message);
+  }, [addLog]);
+
+  const detectOfflineBundle = useCallback(async () => {
+    if (busy) return;
+    setBusy(true);
+    addLog("ui-info", "Detectando bundle de dependencias offline…");
+    try {
+      applyOfflineStatus(await offlinePackagesStatus(
+        undefined,
+        baseImage || undefined,
+        sha256.trim() || undefined,
+      ));
+    } catch (error) {
+      addLog("ui-error", `No se pudo detectar el bundle: ${String(error)}`);
+    } finally {
+      setBusy(false);
+    }
+  }, [busy, baseImage, sha256, addLog, applyOfflineStatus]);
+
+  const validateOfflineBundle = useCallback(async () => {
+    if (busy) return;
+    setBusy(true);
+    addLog("ui-info", "Validando manifiesto, índices, hashes y arquitectura del bundle…");
+    try {
+      applyOfflineStatus(await offlinePackagesValidate(
+        offlinePackages || undefined,
+        baseImage || undefined,
+        sha256.trim() || undefined,
+      ));
+    } catch (error) {
+      setOfflineStatus((current) => current ? { ...current, valid: false, manifest_status: "invalid", message: String(error) } : current);
+      addLog("ui-error", `Bundle offline inválido: ${String(error)}. Reconstrúyelo y vuelve a validar.`);
+    } finally {
+      setBusy(false);
+    }
+  }, [busy, offlinePackages, baseImage, sha256, addLog, applyOfflineStatus]);
+
+  const buildOfflineBundle = useCallback(async (rebuild: boolean) => {
+    if (busy) return;
+    if (rebuild && !window.confirm("¿Reconstruir completamente el bundle offline existente?")) return;
+    setBusy(true);
+    addLog("ui-info", rebuild ? "Reconstruyendo bundle offline…" : "Resolviendo y descargando dependencias ARM64…");
+    try {
+      applyOfflineStatus(await offlinePackagesBuild(rebuild));
+    } catch (error) {
+      addLog("ui-error", `No se pudo construir el bundle: ${String(error)}. Verifica Internet y los keyrings APT del puesto de fabricación.`);
+    } finally {
+      setBusy(false);
+    }
+  }, [busy, addLog, applyOfflineStatus]);
 
   const runPlan = useCallback(async () => {
     if (busy || !requireParams()) return;
@@ -533,6 +600,73 @@ export default function EnginePanel() {
             </button>
           </div>
         </div>
+
+        {/* Manufacturing-owned offline dependency repository. */}
+        <section
+          className="offline-dependencies-section"
+          aria-labelledby="offline-dependencies-title"
+        >
+          <div className="offline-dependencies-header">
+            <div>
+              <h3 id="offline-dependencies-title">Dependencias offline</h3>
+              <p>Repositorio ARM64 instalado en la imagen antes del primer arranque.</p>
+            </div>
+            <span
+              className={`offline-status-badge ${offlineStatus?.valid ? "is-valid" : offlineStatus?.detected ? "is-invalid" : "is-missing"}`}
+            >
+              {offlineStatus?.valid ? "VALIDADO" : offlineStatus?.detected ? "INVÁLIDO" : "NO DETECTADO"}
+            </span>
+          </div>
+
+          <label className="form-label" htmlFor="input-offline-packages">Ruta del bundle</label>
+          <input
+            id="input-offline-packages"
+            className="form-input"
+            value={offlinePackages}
+            readOnly
+            placeholder="artifacts/offline-packages/trixie-arm64"
+          />
+
+          <div className="offline-actions" aria-label="Acciones del bundle offline">
+            <button className="btn btn-secondary" onClick={detectOfflineBundle} disabled={busy}>
+              Detectar bundle
+            </button>
+            <button className="btn btn-secondary" onClick={() => buildOfflineBundle(false)} disabled={busy}>
+              Construir bundle
+            </button>
+            <button className="btn btn-secondary" onClick={() => buildOfflineBundle(true)} disabled={busy}>
+              Reconstruir bundle
+            </button>
+            <button className="btn btn-primary" onClick={validateOfflineBundle} disabled={busy || !offlinePackages}>
+              Validar bundle
+            </button>
+          </div>
+
+          <dl className="offline-metrics">
+            <div><dt>Bundle</dt><dd>{offlineStatus?.bundle_version ?? "—"}</dd></div>
+            <div><dt>Contrato</dt><dd>{offlineStatus?.package_contract_schema_version ?? "—"}</dd></div>
+            <div><dt>Directos</dt><dd>{offlineStatus?.direct_package_count ?? 0}</dd></div>
+            <div><dt>Resueltos</dt><dd>{offlineStatus?.resolved_package_count ?? 0}</dd></div>
+            <div><dt>Arquitectura</dt><dd>{offlineStatus?.architecture ?? "—"}</dd></div>
+            <div><dt>Distribución</dt><dd>{offlineStatus?.distribution ?? "—"}</dd></div>
+            <div><dt>Tamaño</dt><dd>{offlineStatus ? formatBundleSize(offlineStatus.total_bytes) : "—"}</dd></div>
+            <div><dt>Imagen base</dt><dd>{offlineStatus?.base_image_compatible ? "compatible" : "incompatible"}</dd></div>
+            <div><dt>Keyrings</dt><dd>{offlineStatus?.keyring_status ?? "missing"}</dd></div>
+            <div><dt>Fuentes</dt><dd>{offlineStatus?.sources_status ?? "missing"}</dd></div>
+            <div><dt>No resueltos</dt><dd>{offlineStatus?.unresolved_packages.length ?? 0}</dd></div>
+            <div><dt>Manifiesto</dt><dd>{offlineStatus?.manifest_status ?? "missing"}</dd></div>
+          </dl>
+
+          {offlineStatus && (
+            <p
+              className={offlineStatus.valid ? "offline-feedback is-valid" : "offline-feedback is-invalid"}
+              role={offlineStatus.valid ? "status" : "alert"}
+              aria-live="polite"
+            >
+              {offlineStatus.message}
+            </p>
+          )}
+        </section>
 
         {/* Strict manufacturing provision */}
         <div className="form-group" style={{ gap: 8 }}>

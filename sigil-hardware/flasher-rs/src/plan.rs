@@ -1,13 +1,16 @@
 use crate::model::{self, Plan, PlanSection};
-use crate::validate::load_provision;
+use crate::offline;
+use crate::validate::{load_provision, load_secrets};
 
 /// Build a full customization plan from engine state.
 pub fn build_plan(
     base_image: &std::path::Path,
     base_image_sha256: Option<&str>,
     payload: &std::path::Path,
+    offline_packages: &Option<std::path::PathBuf>,
     target_device: &Option<std::path::PathBuf>,
     provision: &Option<std::path::PathBuf>,
+    secrets: &Option<std::path::PathBuf>,
 ) -> Plan {
     let mut sections: Vec<PlanSection> = Vec::new();
 
@@ -31,21 +34,54 @@ pub fn build_plan(
         ],
     });
 
-    // ── 2. APT Packages ───────────────────────────────────────────────
-    sections.push(PlanSection {
-        title: "APT PACKAGES".into(),
-        lines: vec![
+    // ── 2. Offline APT repository ────────────────────────────────────
+    let contract_path = payload.join("manifests/offline-package-contract.json");
+    let mut offline_lines = match offline::load_contract(payload) {
+        Ok(contract) => vec![
             format!(
-                "Core ({}): {}",
-                model::CORE_PACKAGES.len(),
-                model::CORE_PACKAGES.join(", ")
+                "Canonical contract: {} required, {} optional packages",
+                contract
+                    .packages
+                    .iter()
+                    .filter(|package| package.required)
+                    .count(),
+                contract
+                    .packages
+                    .iter()
+                    .filter(|package| !package.required)
+                    .count()
             ),
+            format!("Bundle version: {}", contract.bundle_version),
             format!(
-                "Optional ({}): {} (factory/debug only, disabled by default)",
-                model::OPTIONAL_PACKAGES.len(),
-                model::OPTIONAL_PACKAGES.join(", ")
+                "Target: {}-{}",
+                contract.distribution_codename, contract.architecture
             ),
         ],
+        Err(error) => vec![format!("Canonical package contract invalid: {error}")],
+    };
+    match offline_packages {
+        Some(repository) => match offline::validate_repository(repository, &contract_path) {
+            Ok(summary) => offline_lines.extend([
+                "Offline package repository validated.".into(),
+                format!("Repository: {}", summary.path),
+                format!(
+                    "Packages: {} direct, {} resolved",
+                    summary.direct_package_count, summary.resolved_package_count
+                ),
+                format!("Bundle version: {}", summary.bundle_version),
+                format!("Base image: {}", summary.base_image_name),
+                format!(
+                    "Distribution/architecture: {}-{}",
+                    summary.distribution, summary.architecture
+                ),
+            ]),
+            Err(error) => offline_lines.push(format!("Offline repository invalid: {error}")),
+        },
+        None => offline_lines.push("Offline repository: not provided".into()),
+    }
+    sections.push(PlanSection {
+        title: "OFFLINE DEPENDENCIES".into(),
+        lines: offline_lines,
     });
 
     // ── 3. User and Groups ─────────────────────────────────────────────
@@ -60,7 +96,7 @@ pub fn build_plan(
                 model::USER_HOME,
                 model::USER_GROUP,
             ),
-            "would not embed or set a factory password; credentials remain external to the payload"
+            "would not set a factory user password; panel access stays in the separate protected secret contract"
                 .into(),
             format!(
                 "would add {} to groups: {}",
@@ -176,6 +212,32 @@ pub fn build_plan(
         lines: provisioning_lines,
     });
 
+    let secret_lines = match secrets {
+        Some(path) => match load_secrets(path) {
+            Ok(document) => vec![
+                "secret file supplied: yes".into(),
+                "schema valid: yes".into(),
+                "panel PIN configured: yes".into(),
+                format!("panel PIN length: {} digits", document.panel_pin.len()),
+                "future image injection: pending (dry-run engine does not write images)".into(),
+            ],
+            Err(_) => vec![
+                "secret file supplied: yes".into(),
+                "schema valid: no".into(),
+                "panel PIN configured: no".into(),
+            ],
+        },
+        None => vec![
+            "secret file supplied: no".into(),
+            "schema valid: no".into(),
+            "panel PIN configured: no".into(),
+        ],
+    };
+    sections.push(PlanSection {
+        title: "PANEL ACCESS SECRET".into(),
+        lines: secret_lines,
+    });
+
     // ── 14. Firstboot Responsibilities ────────────────────────────────
     sections.push(PlanSection {
         title: "FIRSTBOOT RESPONSIBILITIES".into(),
@@ -289,7 +351,9 @@ mod tests {
             Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
             std::path::Path::new("/tmp/payload"),
             &None,
+            &None,
             &Some(provision_path.clone()),
+            &None,
         );
         let output = plan
             .sections
@@ -305,5 +369,45 @@ mod tests {
         assert!(output.contains("capabilities.i2s_dac: true"));
         assert!(!output.to_ascii_lowercase().contains("token"));
         let _ = fs::remove_file(provision_path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn plan_reports_secret_contract_without_revealing_pin_or_path() {
+        use std::os::unix::fs::PermissionsExt;
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "sigil-secret-plan-{unique}-{}.json",
+            std::process::id()
+        ));
+        fs::write(
+            &path,
+            br#"{"_schema_version":"1.0","panel_pin":"80427159"}"#,
+        )
+        .expect("secret fixture");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("mode");
+        let plan = build_plan(
+            std::path::Path::new("/tmp/base.img"),
+            None,
+            std::path::Path::new("/tmp/payload"),
+            &None,
+            &None,
+            &None,
+            &Some(path.clone()),
+        );
+        let output = plan
+            .sections
+            .iter()
+            .flat_map(|section| section.lines.iter())
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(output.contains("panel PIN configured: yes"));
+        assert!(!output.contains("80427159"));
+        assert!(!output.contains(path.to_string_lossy().as_ref()));
+        let _ = fs::remove_file(path);
     }
 }

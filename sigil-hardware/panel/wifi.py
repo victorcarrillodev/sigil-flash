@@ -21,6 +21,9 @@ WIFI_INHIBIT_FILE = os.environ.get(
 WIFI_TRANSITION_LOCK = os.environ.get(
     'SIGIL_WIFI_TRANSITION_LOCK', '/run/sigil/wifi-transition.lock'
 )
+WIFI_FALLBACK_HELPER = os.environ.get(
+    'SIGIL_WIFI_FALLBACK_HELPER', '/usr/local/bin/wifi-fallback.sh'
+)
 WIFI_CONNECT_INHIBIT_SECONDS = int(
     os.environ.get('SIGIL_WIFI_CONNECT_INHIBIT_SECONDS', '150')
 )
@@ -119,6 +122,18 @@ def _wait_for_client_stability() -> bool:
             consecutive = 0
         time.sleep(WIFI_CONNECT_CHECK_INTERVAL)
     return False
+
+
+def _record_client_handoff() -> bool:
+    """Commit the successful panel transition through the canonical owner."""
+    result = subprocess.run(
+        [WIFI_FALLBACK_HELPER, '--external-client-handoff'],
+        capture_output=True, timeout=10
+    )
+    if result.returncode != 0:
+        logger.error('Canonical WiFi client handoff failed')
+        return False
+    return True
 
 
 @contextmanager
@@ -298,6 +313,8 @@ def connect_wifi(ssid: str, password: str) -> tuple[bool, str]:
                 return False, 'NetworkManager no pudo activar la conexión'
             if not _wait_for_client_stability():
                 return False, 'La conexión no alcanzó asociación y DHCP estables'
+            if not _record_client_handoff():
+                return False, 'No se pudo confirmar el estado WiFi cliente'
             return True, f'Conectado a {ssid}'
 
         elif profile_exists:
@@ -307,6 +324,8 @@ def connect_wifi(ssid: str, password: str) -> tuple[bool, str]:
                 return False, 'NetworkManager no pudo reactivar la conexión guardada'
             if not _wait_for_client_stability():
                 return False, 'La conexión guardada no alcanzó asociación y DHCP estables'
+            if not _record_client_handoff():
+                return False, 'No se pudo confirmar el estado WiFi cliente'
             return True, f'Reconectado a {ssid}'
 
         else:
@@ -319,6 +338,8 @@ def connect_wifi(ssid: str, password: str) -> tuple[bool, str]:
                 return False, 'NetworkManager no pudo establecer la conexión'
             if not _wait_for_client_stability():
                 return False, 'La conexión no alcanzó asociación y DHCP estables'
+            if not _record_client_handoff():
+                return False, 'No se pudo confirmar el estado WiFi cliente'
             return True, f'Conectado a {ssid}'
 
     except subprocess.TimeoutExpired:
@@ -327,13 +348,13 @@ def connect_wifi(ssid: str, password: str) -> tuple[bool, str]:
         logger.error('WiFi transition failed: %s', type(e).__name__)
         return False, 'Error interno durante la transición WiFi'
     finally:
-        if operation_id:
-            _remove_fallback_inhibit(operation_id)
         if transition_handle is not None:
             try:
                 fcntl.flock(transition_handle.fileno(), fcntl.LOCK_UN)
             finally:
                 transition_handle.close()
+        if operation_id:
+            _remove_fallback_inhibit(operation_id)
 
 
 def get_current_wifi() -> str | None:

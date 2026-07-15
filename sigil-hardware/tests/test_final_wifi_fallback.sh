@@ -36,6 +36,9 @@ case "$*" in
         fi
         exit 1
         ;;
+    --passwd-file\ *\ con\ up\ KnownNet|"con up KnownNet")
+        [ ! -f "$MOCK_STATE/panel_up_fail" ]
+        ;;
     *) exit 0 ;;
 esac
 EOF
@@ -103,13 +106,28 @@ cat > "${MOCK_BIN}/sleep" <<'EOF'
 #!/bin/bash
 exit 0
 EOF
+cat > "${MOCK_BIN}/sudo" <<'EOF'
+#!/bin/bash
+printf '%s\n' "$*" >> "$MOCK_STATE/sudo_calls"
+exec "$@"
+EOF
+cat > "${MOCK_BIN}/wifi-fallback-helper" <<'EOF'
+#!/bin/bash
+exec bash "$SIGIL_TEST_WIFI_FALLBACK_SCRIPT" "$@"
+EOF
 chmod +x "${MOCK_BIN}"/*
 
 export MOCK_STATE PATH="${MOCK_BIN}:${PATH}"
+export SIGIL_TEST_WIFI_FALLBACK_SCRIPT="${ROOT}/scripts/wifi-fallback.sh"
 export SIGIL_WIFI_STATE_FILE="${TEST_ROOT}/var/state"
 export SIGIL_WIFI_INHIBIT_FILE="${TEST_ROOT}/run/inhibit.json"
 export SIGIL_WIFI_TRANSITION_LOCK="${TEST_ROOT}/run/transition.lock"
 export SIGIL_WIFI_SERVICE_LOCK="${TEST_ROOT}/run/service.lock"
+export SIGIL_WIFI_FALLBACK_HELPER="${MOCK_BIN}/wifi-fallback-helper"
+export SIGIL_WIFI_CONNECT_INHIBIT_SECONDS=30
+export SIGIL_WIFI_CONNECT_STABILIZATION_SECONDS=2
+export SIGIL_WIFI_CONNECT_STABLE_CHECKS=2
+export SIGIL_WIFI_CONNECT_CHECK_INTERVAL=0
 export SIGIL_WIFI_FAIL_THRESHOLD=3
 export SIGIL_WIFI_SUCCESS_THRESHOLD=2
 export SIGIL_WIFI_CONNECTION_GRACE_SECONDS=0
@@ -130,6 +148,8 @@ reset_case() {
     : > "${MOCK_STATE}/ip_calls"
     : > "${MOCK_STATE}/ping_calls"
     : > "${MOCK_STATE}/curl_calls"
+    : > "${MOCK_STATE}/sudo_calls"
+    : > "${MOCK_STATE}/panel_output"
 }
 
 set_online() {
@@ -302,6 +322,33 @@ write_inhibit() {
         "$pid" "$start" "$expires" > "$INHIBIT_FILE"
 }
 
+run_panel_connect() {
+    local expected_success="$1" secret="handoff-password-not-for-logs"
+    if ! PANEL_EXPECT_SUCCESS="$expected_success" PANEL_SECRET="$secret" ROOT="$ROOT" \
+        python3 - <<'PYEOF' >"${MOCK_STATE}/panel_output" 2>&1
+import importlib.util
+import os
+from unittest.mock import patch
+
+root = os.environ['ROOT']
+spec = importlib.util.spec_from_file_location(
+    'sigil_wifi_handoff_test', os.path.join(root, 'panel', 'wifi.py')
+)
+wifi = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(wifi)
+
+with patch.object(wifi.time, 'sleep', return_value=None):
+    success, _message = wifi.connect_wifi('KnownNet', os.environ['PANEL_SECRET'])
+
+expected = os.environ['PANEL_EXPECT_SUCCESS'] == '1'
+assert success is expected, (success, _message)
+PYEOF
+    then
+        cat "${MOCK_STATE}/panel_output" >&2
+        return 1
+    fi
+}
+
 test_inhibit_blocks_ap() {
     write_inhibit "$(( $(date +%s) + 120 ))"
     run_cycle; run_cycle; run_cycle
@@ -312,6 +359,109 @@ test_expired_inhibit_removed() {
     write_inhibit "$(( $(date +%s) - 1 ))"
     run_cycle
     [ ! -e "$INHIBIT_FILE" ] && state_is CLIENT_CONNECTING
+}
+
+test_panel_success_handoff_prevents_stale_ap_restart() {
+    local starts_before
+    write_ap_state "$(( $(date +%s) + 1000 ))"
+    set_online
+    run_panel_connect 1 || return 1
+    [ ! -e "$INHIBIT_FILE" ] || return 1
+    state_is CLIENT_CONNECTING || return 1
+    [ "${WIFI_STATE[AP_ACTIVE]}" = 0 ] || return 1
+    [ "${WIFI_STATE[CLIENT_STATE]}" = CLIENT_CONNECTING ] || return 1
+    grep -q '^REASON=panel_client_handoff$' "$STATE_FILE" || return 1
+    grep -q '^FAIL_COUNT=0$' "$STATE_FILE" || return 1
+    grep -q '^SUCCESS_COUNT=0$' "$STATE_FILE" || return 1
+    grep -q '^FAIL_STARTED_AT=0$' "$STATE_FILE" || return 1
+    grep -q '^NEXT_RETRY_AT=0$' "$STATE_FILE" || return 1
+    grep -q '^RECOVERY_BACKOFF=120$' "$STATE_FILE" || return 1
+    grep -q '^LOCAL_PROBE_BACKOFF=30$' "$STATE_FILE" || return 1
+    grep -q '^NEXT_PROBE_AT=0$' "$STATE_FILE" || return 1
+    grep -q '^DEAD_PROFILE=$' "$STATE_FILE" || return 1
+    grep -q '^DEAD_PROFILE_DEACTIVATED=0$' "$STATE_FILE" || return 1
+    [ -z "$(find "${TEST_ROOT}/var" -name '.wifi-fallback-state.*' -print -quit)" ] || return 1
+    starts_before=$(grep -c '^start hostapd$' "${MOCK_STATE}/systemctl_calls" || true)
+    [ "$starts_before" -eq 0 ] || return 1
+    [ "$(grep -c '^stop hostapd$' "${MOCK_STATE}/systemctl_calls")" -eq 1 ] || return 1
+    [ "$(grep -c '^stop dnsmasq$' "${MOCK_STATE}/systemctl_calls")" -eq 1 ] || return 1
+    run_cycle
+    state_is CLIENT_ONLINE \
+        && [ "${WIFI_STATE[AP_ACTIVE]}" = 0 ] \
+        && ! grep -q '^start hostapd$' "${MOCK_STATE}/systemctl_calls" \
+        && ! grep -q '^start dnsmasq$' "${MOCK_STATE}/systemctl_calls"
+}
+
+test_panel_local_only_handoff_does_not_restore_ap() {
+    write_ap_state "$(( $(date +%s) + 1000 ))"
+    set_local_only
+    run_panel_connect 1 || return 1
+    [ ! -e "$INHIBIT_FILE" ] || return 1
+    run_cycle
+    state_is CLIENT_LOCAL_ONLY \
+        && [ "${WIFI_STATE[AP_ACTIVE]}" = 0 ] \
+        && ! grep -q '^start hostapd$' "${MOCK_STATE}/systemctl_calls" \
+        && ! grep -q '^start dnsmasq$' "${MOCK_STATE}/systemctl_calls"
+}
+
+test_failed_panel_transition_restores_ap_once() {
+    local original_retry="$(( $(date +%s) + 1000 ))"
+    write_ap_state "$original_retry"
+    load_state
+    WIFI_STATE[REASON]="preexisting_ap_failure"
+    save_state
+    touch "${MOCK_STATE}/panel_up_fail"
+    run_panel_connect 0 || return 1
+    [ ! -e "$INHIBIT_FILE" ] || return 1
+    state_is AP_ACTIVE || return 1
+    [ "${WIFI_STATE[REASON]}" = preexisting_ap_failure ] || return 1
+    [ "${WIFI_STATE[RECOVERY_BACKOFF]}" = 120 ] || return 1
+    [ "${WIFI_STATE[NEXT_RETRY_AT]}" = "$original_retry" ] || return 1
+    run_cycle
+    state_is AP_ACTIVE || return 1
+    [ "$(grep -c '^start hostapd$' "${MOCK_STATE}/systemctl_calls")" -eq 1 ] || return 1
+    [ "$(grep -c '^start dnsmasq$' "${MOCK_STATE}/systemctl_calls")" -eq 1 ] || return 1
+    grep -q '^device set wlan0 managed no$' "${MOCK_STATE}/nmcli_calls" || return 1
+    run_cycle
+    [ "$(grep -c '^start hostapd$' "${MOCK_STATE}/systemctl_calls")" -eq 1 ] \
+        && [ "$(grep -c '^start dnsmasq$' "${MOCK_STATE}/systemctl_calls")" -eq 1 ]
+}
+
+test_panel_transitions_share_one_lock() {
+    ROOT="$ROOT" python3 - <<'PYEOF'
+import fcntl
+import importlib.util
+import os
+from unittest.mock import patch
+
+root = os.environ['ROOT']
+spec = importlib.util.spec_from_file_location(
+    'sigil_wifi_lock_test', os.path.join(root, 'panel', 'wifi.py')
+)
+wifi = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(wifi)
+
+os.makedirs(os.path.dirname(wifi.WIFI_TRANSITION_LOCK), exist_ok=True)
+with open(wifi.WIFI_TRANSITION_LOCK, 'a+', encoding='utf-8') as holder:
+    fcntl.flock(holder.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    with patch.object(wifi.time, 'sleep', return_value=None):
+        success, message = wifi.connect_wifi('KnownNet', 'never-used-secret')
+    assert not success
+    assert message == 'Otra transición WiFi está en progreso'
+assert not os.path.exists(wifi.WIFI_INHIBIT_FILE)
+PYEOF
+}
+
+test_panel_credentials_never_reach_logs_or_argv() {
+    local secret="handoff-password-not-for-logs"
+    write_ap_state "$(( $(date +%s) + 1000 ))"
+    set_online
+    run_panel_connect 1 || return 1
+    ! grep -R -F "$secret" \
+        "${MOCK_STATE}/sudo_calls" \
+        "${MOCK_STATE}/nmcli_calls" \
+        "${MOCK_STATE}/systemctl_calls" \
+        "${MOCK_STATE}/panel_output"
 }
 
 test_panel_transition_contract() {
@@ -408,6 +558,11 @@ run_test "active AP services are not duplicated" test_active_ap_has_no_duplicate
 run_test "a second wifi-fallback process is refused by the canonical lock" test_duplicate_fallback_process_refused
 run_test "panel inhibit prevents fallback AP activation" test_inhibit_blocks_ap
 run_test "expired inhibit is removed and monitoring resumes" test_expired_inhibit_removed
+run_test "panel handoff clears stale AP before the next online cycle" test_panel_success_handoff_prevents_stale_ap_restart
+run_test "panel local-only handoff does not reactivate AP" test_panel_local_only_handoff_does_not_restore_ap
+run_test "failed panel transition restores AP exactly once" test_failed_panel_transition_restores_ap_once
+run_test "two panel transitions serialize on the canonical lock" test_panel_transitions_share_one_lock
+run_test "panel credentials never enter logs or argv" test_panel_credentials_never_reach_logs_or_argv
 run_test "panel transition uses bounded inhibit and hides password" test_panel_transition_contract
 
 printf '\nWiFi fallback: %d passed, %d failed\n' "$PASS" "$FAIL"

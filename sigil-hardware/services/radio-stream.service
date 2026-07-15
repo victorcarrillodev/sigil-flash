@@ -1,7 +1,7 @@
 [Unit]
 Description=Sigil Radio Stream 24/7
-# radio-stream necesita que bt-connect haya conectado la bocina PRIMERO,
-# de lo contrario set-a2dp.sh falla con "No se encontró tarjeta Bluetooth".
+# Legacy rollback only. Routing is delegated to sigil-audio-route.sh by the
+# script; this unit does not preselect a sink.
 After=network-online.target pulseaudio.service bt-connect.service sound.target
 Wants=network-online.target pulseaudio.service bt-connect.service
 StartLimitIntervalSec=0
@@ -12,11 +12,9 @@ User=sigil
 Group=sigil
 # PULSE_SERVER se resuelve dinámicamente en radio-stream.sh usando `id -u sigil`
 # NO hardcodear el UID aquí — el script lo calcula en runtime.
-# Esperar 20s para que bt-connect tenga tiempo de conectar la bocina
-# antes de que set-a2dp.sh intente buscar la tarjeta Bluetooth.
 ExecStartPre=/bin/sleep 20
-ExecStartPre=/bin/bash -c '/usr/local/bin/set-a2dp.sh || true'
-ExecStart=/bin/bash -c 'pkill -9 mpg123 2>/dev/null || true; /usr/local/bin/radio-stream.sh'
+ExecStart=/usr/local/bin/radio-stream.sh
+KillMode=control-group
 Restart=always
 RestartSec=10
 StandardOutput=journal

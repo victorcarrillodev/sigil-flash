@@ -26,6 +26,8 @@
 #   audio-manager.sh --once       # single evaluation cycle, then exit
 # =============================================================================
 set -euo pipefail
+# shellcheck source=./scripts/sigil-cache-meta-perms.sh
+. "$(dirname "${BASH_SOURCE[0]}")/sigil-cache-meta-perms.sh"
 
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then
     cd /tmp 2>/dev/null || true
@@ -38,6 +40,7 @@ LOCK_FILE="/var/lock/sigil-audio-manager.lock"
 AUDIO_CONF="/etc/sigil/audio.conf"
 API_KEY_FILE="${SIGIL_API_KEY_FILE:-/etc/sigil/secrets/device-api-key}"
 AUDIO_MODE_FILE="/var/lib/sigil/audio_mode.json"
+PLAYBACK_STATE_FILE="${SIGIL_PLAYBACK_STATE_FILE:-/var/lib/sigil/playback_state.json}"
 CACHE_META_FILE="/var/lib/sigil/cache_meta.json"
 PLAYLIST_ACTIVE_FILE="/var/lib/sigil/playlist.active.json"
 
@@ -73,15 +76,6 @@ SIGIL_UID=$(id -u sigil 2>/dev/null || echo 1000)
 export XDG_RUNTIME_DIR="/run/user/${SIGIL_UID}"
 export PULSE_SERVER="unix:/run/user/${SIGIL_UID}/pulse/native"
 export PULSE_RUNTIME_PATH="/run/user/${SIGIL_UID}/pulse"
-
-AUDIO_ROUTE_HELPER="${SIGIL_AUDIO_ROUTE_HELPER:-/usr/local/bin/sigil-audio-route.sh}"
-if [ -r "$AUDIO_ROUTE_HELPER" ]; then
-    # shellcheck source=scripts/sigil-audio-route.sh
-    source "$AUDIO_ROUTE_HELPER"
-else
-    select_audio_route() { return 1; }
-    AUDIO_ROUTE_REASON="audio_route_helper_missing"
-fi
 
 # --- Runtime state ---
 CURRENT_MODE="RADIO"
@@ -392,16 +386,23 @@ read_cache_status() {
 # ── Sink check ──────────────────────────────────────────────────────────────
 
 check_sink() {
-    if select_audio_route; then
+    local available route_type route_sink route_reason
+    available=$(read_json_field "$PLAYBACK_STATE_FILE" "output.available" 2>/dev/null || true)
+    route_type=$(read_json_field "$PLAYBACK_STATE_FILE" "output.type" 2>/dev/null || true)
+    route_sink=$(read_json_field "$PLAYBACK_STATE_FILE" "output.sink" 2>/dev/null || true)
+    route_reason=$(read_json_field "$PLAYBACK_STATE_FILE" "output.reason" 2>/dev/null || true)
+
+    if [ "$available" = "true" ] && [ -n "$route_type" ] && [ "$route_type" != "null" ] \
+        && [ -n "$route_sink" ] && [ "$route_sink" != "null" ]; then
         if ! $SINK_AVAILABLE; then
-            log "INFO" "Usable audio output detected: ${AUDIO_ROUTE_TYPE}/${AUDIO_ROUTE_SINK}"
+            log "INFO" "Usable audio output published: ${route_type}/${route_sink}"
         fi
         SINK_AVAILABLE=true
-        AUDIO_OUTPUT_TYPE="$AUDIO_ROUTE_TYPE"
-        AUDIO_OUTPUT_SINK="$AUDIO_ROUTE_SINK"
+        AUDIO_OUTPUT_TYPE="$route_type"
+        AUDIO_OUTPUT_SINK="$route_sink"
     else
         if $SINK_AVAILABLE; then
-            log "WARN" "Usable audio output lost"
+            log "WARN" "Usable audio output lost (${route_reason:-not_published})"
         fi
         SINK_AVAILABLE=false
         AUDIO_OUTPUT_TYPE=""
@@ -413,20 +414,16 @@ check_sink() {
 # ── Legacy coexistence ──────────────────────────────────────────────────────
 
 check_legacy() {
-    local legacy_mpg123
-    legacy_mpg123=$(pgrep -x mpg123 2>/dev/null | head -1 || true)
-
-    local legacy_subshell
-    # Use systemctl for accuracy — pgrep -f "radio-stream.sh" matches SSH/terminal commands
+    local legacy_subshell=""
+    # radio-stream.service is the rollback owner.  Do not classify the
+    # audio-player's owned mpg123 child as legacy playback.
     if systemctl is-active --quiet radio-stream.service 2>/dev/null; then
         legacy_subshell="active"
-    else
-        legacy_subshell=""
     fi
 
-    if [ -n "$legacy_mpg123" ] || [ -n "$legacy_subshell" ]; then
+    if [ -n "$legacy_subshell" ]; then
         if ! $LEGACY_ACTIVE; then
-            log "WARN" "Legacy playback detected (mpg123: ${legacy_mpg123:--}, radio-stream.sh: ${legacy_subshell:--})"
+            log "WARN" "Legacy playback detected (radio-stream.service: ${legacy_subshell})"
             log "WARN" "MIGRATION_BLOCKED_BY_LEGACY — audio-mode set to BLOCKED_LEGACY"
         fi
         LEGACY_ACTIVE=true
@@ -512,6 +509,7 @@ with os.fdopen(fd, 'w') as f:
     os.fsync(f.fileno())
 os.replace(tmp_path, file_path)
 PYEOF
+    sigil_cache_meta_fix_permissions "$CACHE_META_FILE"
     local _rc=$?
     flock -u 201
     return $_rc
@@ -578,6 +576,7 @@ with os.fdopen(fd, "w") as f:
     os.fsync(f.fileno())
 os.replace(tmp, fp)
 PYEOF
+            sigil_cache_meta_fix_permissions "$CACHE_META_FILE"
             flock -u 201
         else
             log "WARN" "Could not acquire lock for expired_handled_uptime removal — will retry next cycle"
@@ -620,6 +619,7 @@ with os.fdopen(fd, "w") as f:
     os.fsync(f.fileno())
 os.replace(tmp, fp)
 PYEOF
+    sigil_cache_meta_fix_permissions "$CACHE_META_FILE"
     flock -u 201
     log "DEBUG" "Released cache-operation lock before wipe/fetch"
 

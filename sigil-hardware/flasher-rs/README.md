@@ -26,6 +26,9 @@ Dry-run validation hashes `.img.xz` directly and does not decompress it.
 - `--base-image-sha256`: required expected SHA-256; mismatches are fatal.
 - `--payload`: generated directory containing `payload-manifest.json`; never a
   Git checkout.
+- `--offline-packages`: manufacturing-owned local APT repository whose
+  manifest, indexes, package metadata, counts and hashes match the package
+  contract embedded in the payload.
 - `--provision`: external JSON containing factory identity; never a secret.
 - `--target-device`: operator-selected block device reference or regular-file
   fixture. Dry-run never writes it.
@@ -70,15 +73,15 @@ cargo run -- apply \
   --base-image ../artifacts/base-images/2026-06-18-raspios-trixie-arm64-lite.img.xz \
   --base-image-sha256 acff736ca7945e3b305f07cda4abdb870910e12634991da69783611756e381b3 \
   --payload ../artifacts/payloads/sigil-hardware-payload \
+  --offline-packages ../artifacts/offline-packages/trixie-arm64 \
   --provision examples/sigil_provision.sample.json \
   --target-device /tmp/sigil-target-fixture.img \
   --dry-run
 ```
 
-Real image writing, decompression/streaming, partition mounting, payload
-installation, and SD-card safety confirmation remain responsibilities of a
-future privileged writer/GUI integration and are not implemented by this
-engine.
+This engine intentionally remains non-mutating. The privileged writer in
+`sigil-flash` performs real image writing, repository injection and chroot
+installation only after these validations pass.
 
 ## Physical audio limitation
 

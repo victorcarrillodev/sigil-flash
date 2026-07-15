@@ -3,19 +3,23 @@
 # aligned with install.sh; development files and whole directories are not
 # implicitly copied.
 install.sh
+manifests/offline-package-contract.json
 panel/app.py
 panel/bluetooth.py
 panel/config.py
 panel/device_identity.py
 panel/geolocation.py
+panel/panel_auth.py
 panel/wifi.py
 panel/static/css/style.css
 panel/static/js/app.js
 panel/templates/index.html
+panel/templates/login.html
 scripts/audio-manager.sh
 scripts/audio-player.sh
 scripts/bt-connect.sh
 scripts/firstboot.sh
+scripts/install-offline-packages.sh
 scripts/radio-fetcher.sh
 scripts/radio-stream.sh
 scripts/set-a2dp.sh
@@ -35,6 +39,7 @@ services/bluetooth-panel.service
 services/bt-connect.service
 services/radio-fetcher.service
 services/radio-stream.service
+services/sigil-firstboot.service
 services/sigil-leds.service
 services/ssh-monitor.service
 services/wifi-fallback.service

@@ -89,7 +89,7 @@ sigil-hardware/
 │   └── 99-sigil-mac-fixed.conf
 │
 ├── manifests/          # Deployment metadata
-│   ├── apt-packages.txt
+│   ├── offline-package-contract.json
 │   ├── install-layout.json
 │   ├── services.json
 │   └── system-config.json
@@ -688,7 +688,7 @@ COSTOS:
 
 ```
 ACTUAL:
-├── openssh-server listed as OPTIONAL in apt-packages.txt
+├── openssh-server listed as OPTIONAL in offline-package-contract.json
 ├── No sshd.service in model.rs
 ├── No authorized_keys management
 ├── No SSH configuration

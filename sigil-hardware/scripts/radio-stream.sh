@@ -31,7 +31,6 @@ cleanup_curl_auth() {
     fi
 }
 init_curl_auth
-trap cleanup_curl_auth EXIT TERM INT
 
 # --- IDENTIFICADOR PERMANENTE DEL DISPOSITIVO ---
 IDENTITY_HELPER="${SIGIL_IDENTITY_HELPER:-/home/sigil/device_identity.py}"
@@ -69,14 +68,16 @@ log() {
 # --- FUNCIÓN ANTI-ZOMBIES ---
 stop_stream() {
     if [ -n "$STREAM_PID" ]; then
-        kill -15 "$STREAM_PID" 2>/dev/null
-        sleep 1
-        kill -9 "$STREAM_PID" 2>/dev/null
-        wait "$STREAM_PID" 2>/dev/null
+        kill -TERM "$STREAM_PID" 2>/dev/null || true
+        for _ in $(seq 1 50); do
+            kill -0 "$STREAM_PID" 2>/dev/null || break
+            sleep 0.1
+        done
+        if kill -0 "$STREAM_PID" 2>/dev/null; then
+            kill -KILL "$STREAM_PID" 2>/dev/null || true
+        fi
+        wait "$STREAM_PID" 2>/dev/null || true
     fi
-    pkill -15 -f "mpg123" 2>/dev/null
-    sleep 1
-    pkill -9 -f "mpg123" 2>/dev/null
 
     # Limpiar archivo de pista actual cuando se detiene
     echo "" > "$NOW_PLAYING_FILE" 2>/dev/null || true
@@ -87,6 +88,7 @@ stop_stream() {
 
 cleanup() {
     stop_stream
+    cleanup_curl_auth
     exit 0
 }
 trap cleanup EXIT TERM INT
@@ -119,6 +121,26 @@ while true; do
         # --- MOTOR DE PLAYLIST EN SEGUNDO PLANO ---
         (
             PLAYLIST_FILE="/tmp/rpi_playlist_$$.txt"
+            LEGACY_MPG123_PID=""
+
+            # Called indirectly from signal/EXIT traps in this subshell.
+            # shellcheck disable=SC2317
+            stop_owned_player() {
+                if [ -n "$LEGACY_MPG123_PID" ] && kill -0 "$LEGACY_MPG123_PID" 2>/dev/null; then
+                    kill -TERM "$LEGACY_MPG123_PID" 2>/dev/null || true
+                    for _ in $(seq 1 20); do
+                        kill -0 "$LEGACY_MPG123_PID" 2>/dev/null || break
+                        sleep 0.1
+                    done
+                    if kill -0 "$LEGACY_MPG123_PID" 2>/dev/null; then
+                        kill -KILL "$LEGACY_MPG123_PID" 2>/dev/null || true
+                    fi
+                    wait "$LEGACY_MPG123_PID" 2>/dev/null || true
+                fi
+                LEGACY_MPG123_PID=""
+            }
+            trap 'stop_owned_player; exit 0' TERM INT
+            trap stop_owned_player EXIT
 
             while true; do
                 if [ -n "$CURL_AUTH_CONFIG" ]; then
@@ -179,11 +201,14 @@ while true; do
                     # Reproducción blindada
                     if [ -n "$CURL_AUTH_CONFIG" ]; then
                         curl -s -m 600 --config "$CURL_AUTH_CONFIG" "${URL_BASE}${SAFE_URL}" \
-                            | mpg123 -o pulse -a "$SINK" -b 2048 -q - 2>/dev/null
+                            | mpg123 -o pulse -a "$SINK" -b 2048 -q - 2>/dev/null &
                     else
                         curl -s -m 600 "${URL_BASE}${SAFE_URL}" \
-                            | mpg123 -o pulse -a "$SINK" -b 2048 -q - 2>/dev/null
+                            | mpg123 -o pulse -a "$SINK" -b 2048 -q - 2>/dev/null &
                     fi
+                    LEGACY_MPG123_PID=$!
+                    wait "$LEGACY_MPG123_PID" 2>/dev/null || true
+                    LEGACY_MPG123_PID=""
 
                     # Verificamos si nos cortaron a la mitad
                     CURRENT_HASH=$(cat /tmp/rpi_playlist_hash.txt 2>/dev/null)
@@ -238,7 +263,7 @@ while true; do
                     if [ "$NEW_HASH" != "$CURRENT_HASH" ]; then
                         log "NUEVA LISTA DETECTADA DESDE EL PANEL! Interrumpiendo pista actual..."
                         echo "$NEW_HASH" > /tmp/rpi_playlist_hash.txt
-                        pkill -9 -f "mpg123" 2>/dev/null
+                        stop_stream
                     fi
                 fi
             fi

@@ -25,6 +25,7 @@ reqwest = { version = "0.12", features = ["stream"] }
 sha2 = "0.10"
 futures-util = "0.3"
 getrandom = "0.3"
+flasher-rs = { path = "../sigil-hardware/flasher-rs" }
 
 [profile.release]
 panic = "abort"

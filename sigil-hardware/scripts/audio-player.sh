@@ -40,7 +40,7 @@ API_KEY_FILE="${SIGIL_API_KEY_FILE:-/etc/sigil/secrets/device-api-key}"
 IDENTITY_HELPER="${SIGIL_IDENTITY_HELPER:-/home/sigil/device_identity.py}"
 DEVICE_CONF="${SIGIL_DEVICE_CONF:-/etc/sigil/device.conf}"
 AUDIO_MODE_FILE="/var/lib/sigil/audio_mode.json"
-PLAYBACK_STATE_FILE="/var/lib/sigil/playback_state.json"
+PLAYBACK_STATE_FILE="${SIGIL_PLAYBACK_STATE_FILE:-/var/lib/sigil/playback_state.json}"
 PLAYLIST_ACTIVE_FILE="/var/lib/sigil/playlist.active.json"
 NOW_PLAYING_FILE="/home/sigil/now_playing.txt"
 MUSIC_ACTIVE="/home/sigil/music/active"
@@ -101,6 +101,7 @@ STOP_REQUESTED=false
 SINK=""
 NO_AUDIO_OUTPUT_ACTIVE=false
 AUDIO_OUTPUT_RETRY_SECONDS=$AUDIO_OUTPUT_RETRY_INITIAL_SECONDS
+LAST_PUBLISHED_OUTPUT=""
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -298,10 +299,73 @@ PYEOF
 
 # ── Sink management ─────────────────────────────────────────────────────────
 
+publish_audio_output() {
+    local available="$1"
+    local route_type="${2:-}"
+    local sink="${3:-}"
+    local device="${4:-}"
+    local reason="${5:-}"
+    local signature="${available}|${route_type}|${sink}|${device}|${reason}"
+    [ "$signature" != "$LAST_PUBLISHED_OUTPUT" ] || return 0
+
+    if $DRY_RUN; then
+        log "DRY" "Would publish output: available=${available}, type=${route_type:-none}, sink=${sink:-none}"
+        LAST_PUBLISHED_OUTPUT="$signature"
+        return 0
+    fi
+
+    python3 - "$PLAYBACK_STATE_FILE" "$available" "$route_type" "$sink" "$device" "$reason" <<'PYEOF'
+import json
+import os
+import sys
+import tempfile
+from datetime import datetime, timezone
+
+out_file, available, route_type, sink, device, reason = sys.argv[1:]
+try:
+    with open(out_file, encoding="utf-8") as state_file:
+        doc = json.load(state_file)
+    if not isinstance(doc, dict):
+        doc = {}
+except (FileNotFoundError, json.JSONDecodeError, OSError):
+    doc = {}
+
+doc["output"] = {
+    "available": available == "true",
+    "type": route_type or None,
+    "sink": sink or None,
+    "device": device or None,
+    "reason": reason or None,
+    "updated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+}
+
+directory = os.path.dirname(out_file) or "."
+fd, tmp_path = tempfile.mkstemp(dir=directory, prefix=".playback-output.", suffix=".tmp")
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as state_file:
+        json.dump(doc, state_file, indent=2, ensure_ascii=False)
+        state_file.write("\n")
+        state_file.flush()
+        os.fsync(state_file.fileno())
+    os.replace(tmp_path, out_file)
+    directory_fd = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+except BaseException:
+    try:
+        os.unlink(tmp_path)
+    except FileNotFoundError:
+        pass
+    raise
+PYEOF
+    LAST_PUBLISHED_OUTPUT="$signature"
+}
+
 resolve_sink() {
-    if select_audio_route; then
-        SINK="$AUDIO_ROUTE_SINK"
-        echo "$AUDIO_ROUTE_SINK"
+    if sink_available; then
+        echo "$SINK"
         return 0
     fi
     echo "unknown"
@@ -332,9 +396,12 @@ wait_for_sink() {
 sink_available() {
     if select_audio_route; then
         SINK="$AUDIO_ROUTE_SINK"
+        publish_audio_output true "${AUDIO_ROUTE_TYPE:-}" "$SINK" \
+            "${AUDIO_ROUTE_DEVICE:-}" "${AUDIO_ROUTE_REASON:-}"
         return 0
     fi
     SINK=""
+    publish_audio_output false "" "" "" "${AUDIO_ROUTE_REASON:-no_audio_output}"
     return 1
 }
 
@@ -643,8 +710,8 @@ update_now_playing() {
 
 check_legacy_playback() {
     # Detect if radio-stream.sh or its mpg123 child owns the sink.
-    # audio-player.service is disabled — this check prevents accidental
-    # coexistence when the player is invoked manually for testing.
+    # radio-stream is disabled in production; this guard prevents accidental
+    # coexistence during an explicit rollback or manual recovery.
     #
     # Strategy: look for any mpg123 process that is NOT our own.
     local our_child=""
@@ -1199,15 +1266,15 @@ main() {
         exit 1
     fi
 
-    # Probe once at startup. Missing output is handled in the bounded main-loop
-    # backoff below; systemd is not crashed/restarted for this condition.
-    log "DEBUG" "Checking for a usable audio output..."
-    wait_for_sink 1 || true
-
     # Load or create playback state
     read_playback_state
 
     log "INFO" "Initial mode from playback_state: ${CURRENT_MODE}"
+
+    # Probe once at startup. Missing output is handled in the bounded main-loop
+    # backoff below; systemd is not crashed/restarted for this condition.
+    log "DEBUG" "Checking for a usable audio output..."
+    wait_for_sink 1 || true
 
     # ── Main loop ───────────────────────────────────────────────────────────
     # Phase 2B: player self-manages mode via playback_state.json.

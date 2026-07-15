@@ -111,6 +111,7 @@ export MOCK_CALLER_UID=1000 MOCK_SIGIL_UID=1234
 export SIGIL_AUDIO_PREFERRED_FILE="${MOCK_STATE}/preferred"
 export SIGIL_ASOUND_CARDS_FILE="${MOCK_STATE}/asound_cards"
 export SIGIL_AUDIO_ROUTE_HELPER="${ROOT}/scripts/sigil-audio-route.sh"
+export SIGIL_PLAYBACK_STATE_FILE="${MOCK_STATE}/playback_state.json"
 
 # shellcheck source=../scripts/sigil-audio-route.sh
 source "${ROOT}/scripts/sigil-audio-route.sh"
@@ -134,6 +135,7 @@ reset_fixture() {
     : > "${MOCK_STATE}/timeout_calls"
     : > "${MOCK_STATE}/sleep_calls"
     rm -f "${MOCK_STATE}/mpg123_calls"
+    printf '%s\n' '{}' > "$SIGIL_PLAYBACK_STATE_FILE"
     PAPLAY_RC=0
     export PAPLAY_RC
     MOCK_CALLER_UID=1000
@@ -376,6 +378,21 @@ test_manager_persists_no_output_reason() {
         && [[ "$LAST_ERROR" == no_audio_output:* ]]
 }
 
+test_manager_consumes_player_output_without_routing() {
+    # shellcheck source=../scripts/audio-manager.sh
+    source "${ROOT}/scripts/audio-manager.sh"
+    LOG="${MOCK_STATE}/manager.log"
+    cat > "$PLAYBACK_STATE_FILE" <<'EOF'
+{"output":{"available":true,"type":"i2s","sink":"test_i2s_sink","reason":"i2s_selected"}}
+EOF
+    check_sink
+    [ "$SINK_AVAILABLE" = true ] \
+        && [ "$AUDIO_OUTPUT_TYPE" = i2s ] \
+        && [ "$AUDIO_OUTPUT_SINK" = test_i2s_sink ] \
+        && [ ! -s "${MOCK_STATE}/pactl_calls" ] \
+        && [ ! -s "${MOCK_STATE}/paplay_calls" ]
+}
+
 test_root_uses_sigil_pulse_session() {
     MOCK_CALLER_UID=0
     export MOCK_CALLER_UID
@@ -464,6 +481,7 @@ run_test "no output keeps player stopped with bounded diagnostic" test_no_output
 run_test "player recovers when Bluetooth later connects" test_output_appears_and_player_resumes
 run_test "route changes do not duplicate an existing player" test_route_probe_does_not_duplicate_player
 run_test "manager persists no_audio_output runtime reason" test_manager_persists_no_output_reason
+run_test "manager consumes player output without activating a route" test_manager_consumes_player_output_without_routing
 run_test "root routes pactl and paplay through the sigil PulseAudio session" test_root_uses_sigil_pulse_session
 run_test "root silent probe retains the three-second timeout" test_root_silent_probe_keeps_timeout
 run_test "non-root audio routing never invokes sudo" test_non_root_does_not_use_sudo

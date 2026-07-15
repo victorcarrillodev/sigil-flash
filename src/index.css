@@ -545,6 +545,90 @@ body {
   color: var(--text-muted);
   opacity: 0.55;
 }
+
+/* Offline manufacturing dependencies */
+.offline-dependencies-section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid var(--border-dark);
+  border-radius: var(--radius-md);
+  background: var(--bg-deep);
+  box-shadow: var(--shadow-inset-sm);
+}
+.offline-dependencies-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+.offline-dependencies-header h3 {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: 14px;
+  line-height: 1.4;
+}
+.offline-dependencies-header p {
+  margin: 2px 0 0;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+.offline-status-badge {
+  flex-shrink: 0;
+  padding: 4px 9px;
+  border-radius: var(--radius-full);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+}
+.offline-status-badge.is-valid { color: var(--success); background: var(--success-bg); }
+.offline-status-badge.is-invalid { color: var(--danger); background: var(--danger-bg); }
+.offline-status-badge.is-missing { color: var(--text-muted); background: var(--surface); }
+.offline-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+.offline-actions .btn { min-height: 44px; padding: 8px 10px; }
+.offline-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+}
+.offline-metrics div {
+  min-width: 0;
+  padding: 8px;
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+.offline-metrics dt {
+  color: var(--text-muted);
+  font-size: 10px;
+  text-transform: uppercase;
+}
+.offline-metrics dd {
+  margin: 3px 0 0;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+.offline-feedback {
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  font-size: 11px;
+  line-height: 1.5;
+}
+.offline-feedback.is-valid { color: var(--success); background: var(--success-bg); }
+.offline-feedback.is-invalid { color: var(--danger); background: var(--danger-bg); }
+@media (max-width: 720px) {
+  .offline-actions,
+  .offline-metrics { grid-template-columns: 1fr; }
+}
 .neu-switch {
   position: relative;
   display: inline-block;

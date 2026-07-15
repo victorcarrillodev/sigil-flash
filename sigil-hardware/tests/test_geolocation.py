@@ -570,6 +570,18 @@ class TestDispatcherFiltering(unittest.TestCase):
         r = subprocess.run(["bash", "-n", self.dispatcher], capture_output=True, timeout=5)
         self.assertEqual(r.returncode, 0, msg=r.stderr.decode())
 
+    def test_production_worker_uses_protected_absolute_paths(self):
+        with open(self.dispatcher, encoding="utf-8") as handle:
+            dispatcher = handle.read()
+        self.assertIn(
+            'GEO_PYTHON="${SIGIL_GEO_PYTHON:-/usr/bin/python3}"', dispatcher
+        )
+        self.assertIn(
+            'GEO_SCRIPT="${SIGIL_GEO_SCRIPT:-/opt/sigil/panel/geolocation.py}"',
+            dispatcher,
+        )
+        self.assertNotIn("/home/sigil/", dispatcher)
+
 
 class TestConfigLoading(unittest.TestCase):
     def test_load_config(self):

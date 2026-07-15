@@ -125,7 +125,15 @@ EOF
     local rc=0 worker_pid
     launch_explicit_fetch || rc=$?
     [ "$rc" -eq 125 ] || return 1
-    worker_pid=$(awk -F: '/^worker-start:/ {print $2}' "$TEST_TOPOLOGY_LOG" | tail -1)
+    # The wrapper is intentionally allowed to exit before its child emits its
+    # discovery marker; poll briefly instead of making that scheduling window
+    # a false production failure.
+    worker_pid=""
+    for _ in $(seq 1 100); do
+        worker_pid=$(awk -F: '/^worker-start:/ {print $2}' "$TEST_TOPOLOGY_LOG" | tail -1)
+        [ -n "$worker_pid" ] && break
+        sleep 0.05
+    done
     [ -n "$worker_pid" ] || return 1
     for _ in $(seq 1 30); do
         kill -0 "$worker_pid" 2>/dev/null || return 0

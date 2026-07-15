@@ -1,20 +1,32 @@
 #!/bin/bash
-# bt-connect.sh — Gestor de conexion exclusiva con auto-follow
-# La bocina que se conecte (manual o automaticamente) se convierte en la preferida.
-# Todas las demas son desconectadas y se les quita la confianza.
+# Canonical SIGIL Bluetooth connection owner and automatic reconnect daemon.
+# The lock wrapper invokes operation functions by name.
+# shellcheck disable=SC2317
 
-PREFERRED=/home/sigil/preferred_bt.txt
-LOG=/var/log/bt-connect.log
-# Crear archivo de log si no existe (puede fallar si no hay permisos — fallback a journal)
-touch "$LOG" 2>/dev/null || LOG=""
-BT_SWITCH_LOCK="/tmp/bt-switching.lock"
+set -uo pipefail
+umask 077
+
+PREFERRED="${SIGIL_BT_PREFERRED_FILE:-/home/sigil/preferred_bt.txt}"
+BT_LOCK="${SIGIL_BT_LOCK_FILE:-/run/sigil/bluetooth-transition.lock}"
+LOCK_TIMEOUT="${SIGIL_BT_LOCK_TIMEOUT:-30}"
+LOG="${SIGIL_BT_LOG_FILE:-/var/log/bt-connect.log}"
+BLUETOOTHCTL="${SIGIL_BLUETOOTHCTL:-bluetoothctl}"
 PREV_MAC=""
+RESULT_CODE="internal_error"
+RESULT_MESSAGE="Error Bluetooth"
+RESULT_MAC=""
+COMMAND_MODE=0
 
-# UID del usuario sigil para PulseAudio (resuelto dinámicamente)
+if [ "${1:-}" = "request" ]; then
+    COMMAND_MODE=1
+fi
+
+touch "$LOG" 2>/dev/null || LOG=""
+
 SIGIL_UID=$(id -u sigil 2>/dev/null || echo "1000")
-export XDG_RUNTIME_DIR=/run/user/${SIGIL_UID}
-export PULSE_RUNTIME_PATH=/run/user/${SIGIL_UID}/pulse
-export PULSE_SERVER=unix:/run/user/${SIGIL_UID}/pulse/native
+export XDG_RUNTIME_DIR="/run/user/${SIGIL_UID}"
+export PULSE_RUNTIME_PATH="/run/user/${SIGIL_UID}/pulse"
+export PULSE_SERVER="unix:/run/user/${SIGIL_UID}/pulse/native"
 
 AUDIO_ROUTE_HELPER="${SIGIL_AUDIO_ROUTE_HELPER:-/usr/local/bin/sigil-audio-route.sh}"
 if [ -r "$AUDIO_ROUTE_HELPER" ]; then
@@ -27,213 +39,546 @@ fi
 log() {
     local msg
     msg="[$(date '+%Y-%m-%d %H:%M:%S')] $*"
-    if [ -n "$LOG" ]; then echo "$msg" | tee -a "$LOG"; else echo "$msg"; fi
+    if [ -n "$LOG" ]; then
+        printf '%s\n' "$msg" >> "$LOG"
+    fi
+    if [ "$COMMAND_MODE" -eq 1 ]; then
+        printf '%s\n' "$msg" >&2
+    else
+        printf '%s\n' "$msg"
+    fi
 }
 
-# Esperar a que app.py termine de hacer el cambio de bocina
-wait_switch_lock() {
-    local waited=0
-    while [ -f "$BT_SWITCH_LOCK" ] && [ $waited -lt 30 ]; do
-        log "Cambio de bocina en progreso — esperando..."
-        sleep 3
-        waited=$((waited + 3))
+normalize_mac() {
+    local mac
+    mac=$(printf '%s' "${1:-}" | tr '[:lower:]' '[:upper:]')
+    if [[ "$mac" =~ ^([0-9A-F]{2}:){5}[0-9A-F]{2}$ ]]; then
+        printf '%s\n' "$mac"
+        return 0
+    fi
+    return 1
+}
+
+read_preferred() {
+    python3 - "$PREFERRED" <<'PY'
+import os
+import re
+import stat
+import sys
+
+path = sys.argv[1]
+flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+try:
+    fd = os.open(path, flags)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError("preferred state is not a regular file")
+        value = os.read(fd, 64).decode("ascii").strip().upper()
+    finally:
+        os.close(fd)
+except (OSError, UnicodeError):
+    raise SystemExit(1)
+
+if not re.fullmatch(r"(?:[0-9A-F]{2}:){5}[0-9A-F]{2}", value):
+    raise SystemExit(1)
+print(value)
+PY
+}
+
+atomic_preferred_value() {
+    local value="$1" directory temporary
+    directory=${PREFERRED%/*}
+    [ "$directory" != "$PREFERRED" ] || directory="."
+    [ -d "$directory" ] && [ ! -L "$directory" ] || return 1
+    [ ! -L "$PREFERRED" ] || return 1
+
+    temporary=$(mktemp "${directory}/.preferred_bt.XXXXXX") || return 1
+    if ! chmod 0600 "$temporary" \
+        || ! printf '%s\n' "$value" > "$temporary" \
+        || ! sync -f "$temporary" 2>/dev/null \
+        || ! mv -fT -- "$temporary" "$PREFERRED"; then
+        rm -f -- "$temporary"
+        return 1
+    fi
+    return 0
+}
+
+write_preferred() {
+    local mac
+    mac=$(normalize_mac "${1:-}") || return 1
+    atomic_preferred_value "$mac"
+}
+
+clear_preferred() {
+    atomic_preferred_value ""
+}
+
+with_bluetooth_lock() {
+    local rc
+    if ! exec {BT_LOCK_FD}> "$BT_LOCK"; then
+        RESULT_CODE="lock_unavailable"
+        RESULT_MESSAGE="Bloqueo Bluetooth no disponible"
+        return 73
+    fi
+    if ! flock -w "$LOCK_TIMEOUT" "$BT_LOCK_FD"; then
+        exec {BT_LOCK_FD}>&-
+        RESULT_CODE="busy"
+        RESULT_MESSAGE="Otra operación Bluetooth está en progreso"
+        return 75
+    fi
+    "$@"
+    rc=$?
+    flock -u "$BT_LOCK_FD" || true
+    exec {BT_LOCK_FD}>&-
+    return "$rc"
+}
+
+run_bt() {
+    local seconds="$1" rc
+    shift
+    BT_LAST_OUTPUT=$(timeout "$seconds" "$BLUETOOTHCTL" "$@" 2>&1)
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+        log "bluetoothctl $1 falló (rc=$rc)"
+        return "$rc"
+    fi
+    if grep -qiE '(^|[[:space:]])(failed|error)([[:space:]:]|$)' \
+        <<< "$BT_LAST_OUTPUT"; then
+        log "bluetoothctl $1 informó un error"
+        return 1
+    fi
+    return 0
+}
+
+device_info() {
+    timeout 5 "$BLUETOOTHCTL" info "$1" 2>/dev/null
+}
+
+is_connected() {
+    local info
+    info=$(device_info "$1") || return 1
+    grep -qiE '^[[:space:]]*Connected:[[:space:]]*yes$' <<< "$info"
+}
+
+is_paired() {
+    local info
+    info=$(device_info "$1") || return 1
+    grep -qiE '^[[:space:]]*Paired:[[:space:]]*yes$' <<< "$info"
+}
+
+is_trusted() {
+    local info
+    info=$(device_info "$1") || return 1
+    grep -qiE '^[[:space:]]*Trusted:[[:space:]]*yes$' <<< "$info"
+}
+
+connected_devices() {
+    timeout 5 "$BLUETOOTHCTL" devices Connected 2>/dev/null \
+        | awk '$1 == "Device" && $2 ~ /^([[:xdigit:]]{2}:){5}[[:xdigit:]]{2}$/ {print toupper($2)}' \
+        | awk '!seen[$0]++'
+}
+
+# Returns 0 for confirmed audio, 1 for informative non-audio metadata, and 2
+# when BlueZ has not supplied enough metadata to decide.
+audio_device_status() {
+    local mac="$1" info class_hex class_value major_class informative=0
+    info=$(device_info "$mac") || return 2
+
+    if grep -qiE 'UUID:.*(Audio Sink|Advanced Audio|0000110[bBdD]-)' \
+        <<< "$info"; then
+        return 0
+    fi
+    if grep -qiE '^[[:space:]]*UUID:' <<< "$info"; then
+        informative=1
+    fi
+
+    class_hex=$(printf '%s\n' "$info" \
+        | awk '/^[[:space:]]*Class:[[:space:]]*0x[[:xdigit:]]+/ {sub(/^.*0x/, ""); print; exit}')
+    if [[ "$class_hex" =~ ^[[:xdigit:]]+$ ]]; then
+        informative=1
+        class_value=$((16#$class_hex))
+        major_class=$(((class_value >> 8) & 31))
+        [ "$major_class" -eq 4 ] && return 0
+    fi
+
+    [ "$informative" -eq 1 ] && return 1
+    return 2
+}
+
+wait_disconnected() {
+    local mac="$1" attempt
+    for attempt in 1 2 3 4 5 6 7 8; do
+        is_connected "$mac" || return 0
+        sleep 0.5
     done
-    [ -f "$BT_SWITCH_LOCK" ] && rm -f "$BT_SWITCH_LOCK" && log "Lock expirado, continuando."
+    return 1
+}
+
+connect_target() {
+    local mac="$1" attempt command_ok
+    for attempt in 1 2; do
+        command_ok=1
+        run_bt 15 connect "$mac" || command_ok=0
+        if [ "$attempt" -eq 1 ]; then sleep 4; else sleep 5; fi
+        if is_connected "$mac"; then
+            [ "$command_ok" -eq 1 ] || log "Conexión confirmada pese al retorno de bluetoothctl"
+            return 0
+        fi
+        log "Intento $attempt de conexión falló para $mac"
+    done
+    return 1
 }
 
 activate_a2dp() {
-    local MAC="$1"
+    local mac="$1"
     sleep 2
-    if audio_route_activate_bluetooth "$MAC"; then
-        log "Perfil A2DP activado para $MAC"
-    else
-        log "A2DP no usable para $MAC (Connected/Trusted, perfil, sink o probe falló)"
+    if audio_route_activate_bluetooth "$mac"; then
+        log "Ruta A2DP activada para $mac"
+        return 0
+    fi
+    log "A2DP no usable para $mac"
+    return 1
+}
+
+disconnect_others() {
+    local keep_mac="$1" device
+    while IFS= read -r device; do
+        [ -n "$device" ] || continue
+        [ "$device" = "$keep_mac" ] && continue
+        log "Desconectando dispositivo extra: $device"
+        run_bt 8 disconnect "$device" || return 1
+        wait_disconnected "$device" || return 1
+        run_bt 5 untrust "$device" || return 1
+        run_bt 5 block "$device" || return 1
+    done < <(connected_devices)
+    return 0
+}
+
+rollback_new_target() {
+    local mac="$1" old_preferred=""
+    old_preferred=$(read_preferred 2>/dev/null || true)
+    if [ "$old_preferred" != "$mac" ] && is_connected "$mac"; then
+        run_bt 8 disconnect "$mac" || true
     fi
 }
 
-# ── Función: esperar a que PulseAudio registre los endpoints A2DP en BlueZ ──
-# Sin esto bt-connect intenta conectar antes de que el perfil esté disponible,
-# causando: br-connection-profile-unavailable / Protocol not available
-wait_a2dp_ready() {
-    local MAX_WAIT=60  # segundos máximos
-    local waited=0
-    log "Esperando a que PulseAudio registre endpoints A2DP en BlueZ..."
-    while [ $waited -lt $MAX_WAIT ]; do
-        # Verificar que bluetoothd ya vea al menos un endpoint A2DP registrado
-        if bluetoothctl show 2>/dev/null | grep -q "UUID: Audio Sink"; then
-            log "A2DP detectado en bluetoothctl show — continuando."
+prepare_target() {
+    local mac="$1" audio_status
+    if ! is_paired "$mac"; then
+        RESULT_CODE="not_paired"
+        RESULT_MESSAGE="La bocina no está emparejada"
+        return 1
+    fi
+
+    audio_device_status "$mac"
+    audio_status=$?
+    if [ "$audio_status" -eq 1 ]; then
+        RESULT_CODE="not_audio"
+        RESULT_MESSAGE="El dispositivo no anuncia capacidad de audio"
+        return 1
+    fi
+
+    run_bt 5 unblock "$mac" || {
+        RESULT_CODE="unblock_failed"
+        RESULT_MESSAGE="No se pudo desbloquear la bocina"
+        return 1
+    }
+    run_bt 5 trust "$mac" || {
+        RESULT_CODE="trust_failed"
+        RESULT_MESSAGE="No se pudo confiar en la bocina"
+        return 1
+    }
+    if ! is_trusted "$mac"; then
+        RESULT_CODE="trust_failed"
+        RESULT_MESSAGE="BlueZ no confirmó la confianza de la bocina"
+        return 1
+    fi
+    return 0
+}
+
+complete_target_connection() {
+    local mac="$1"
+    if ! connect_target "$mac"; then
+        RESULT_CODE="connect_failed"
+        RESULT_MESSAGE="No se pudo conectar. Verifica que la bocina esté encendida y cerca."
+        return 1
+    fi
+
+    if ! activate_a2dp "$mac"; then
+        rollback_new_target "$mac"
+        RESULT_CODE="a2dp_failed"
+        RESULT_MESSAGE="La bocina conectó, pero la ruta A2DP no quedó disponible"
+        return 1
+    fi
+    if ! disconnect_others "$mac"; then
+        rollback_new_target "$mac"
+        RESULT_CODE="exclusive_failed"
+        RESULT_MESSAGE="No se pudo completar el cambio exclusivo de bocina"
+        return 1
+    fi
+    if ! write_preferred "$mac"; then
+        rollback_new_target "$mac"
+        RESULT_CODE="state_write_failed"
+        RESULT_MESSAGE="No se pudo guardar la bocina preferida"
+        return 1
+    fi
+    RESULT_MAC="$mac"
+    return 0
+}
+
+request_pair_locked() {
+    local mac="$1" audio_status
+    run_bt 5 scan off || log "No se pudo detener el escaneo; se continúa bajo flock"
+    run_bt 5 power on || {
+        RESULT_CODE="power_failed"
+        RESULT_MESSAGE="No se pudo encender Bluetooth"
+        return 1
+    }
+    if ! run_bt 20 pair "$mac" && ! is_paired "$mac"; then
+        RESULT_CODE="pair_failed"
+        RESULT_MESSAGE="No se pudo emparejar. Verifica el modo de emparejamiento."
+        return 1
+    fi
+    if ! is_paired "$mac"; then
+        RESULT_CODE="pair_failed"
+        RESULT_MESSAGE="BlueZ no confirmó el emparejamiento"
+        return 1
+    fi
+
+    audio_device_status "$mac"
+    audio_status=$?
+    if [ "$audio_status" -eq 1 ]; then
+        run_bt 8 remove "$mac" || true
+        RESULT_CODE="not_audio"
+        RESULT_MESSAGE="El dispositivo no anuncia capacidad de audio"
+        return 1
+    fi
+    prepare_target "$mac" || return 1
+    complete_target_connection "$mac" || return 1
+    RESULT_CODE="paired"
+    RESULT_MESSAGE="Bocina emparejada y conectada exitosamente"
+    return 0
+}
+
+request_connect_locked() {
+    local mac="$1"
+    run_bt 5 scan off || log "No se pudo detener el escaneo; se continúa bajo flock"
+    prepare_target "$mac" || return 1
+    complete_target_connection "$mac" || return 1
+    RESULT_CODE="connected"
+    RESULT_MESSAGE="Conectado exitosamente"
+    return 0
+}
+
+request_disconnect_locked() {
+    local mac=""
+    mac=$(read_preferred 2>/dev/null || true)
+    if [ -n "$mac" ] && is_connected "$mac"; then
+        if ! run_bt 8 disconnect "$mac" || ! wait_disconnected "$mac"; then
+            RESULT_CODE="disconnect_failed"
+            RESULT_MESSAGE="No se pudo desconectar la bocina"
+            return 1
+        fi
+    fi
+    if ! clear_preferred; then
+        RESULT_CODE="state_write_failed"
+        RESULT_MESSAGE="No se pudo deseleccionar la bocina"
+        return 1
+    fi
+    RESULT_CODE="disconnected"
+    RESULT_MESSAGE="Bocina desconectada y deseleccionada"
+    return 0
+}
+
+request_remove_locked() {
+    local mac="$1" preferred=""
+    preferred=$(read_preferred 2>/dev/null || true)
+    if is_connected "$mac"; then
+        if ! run_bt 8 disconnect "$mac" || ! wait_disconnected "$mac"; then
+            RESULT_CODE="disconnect_failed"
+            RESULT_MESSAGE="No se pudo desconectar la bocina antes de eliminarla"
+            return 1
+        fi
+    fi
+    if ! run_bt 8 remove "$mac"; then
+        RESULT_CODE="remove_failed"
+        RESULT_MESSAGE="BlueZ no pudo eliminar la bocina"
+        return 1
+    fi
+    if is_paired "$mac"; then
+        RESULT_CODE="remove_failed"
+        RESULT_MESSAGE="BlueZ no confirmó la eliminación de la bocina"
+        return 1
+    fi
+    if [ "$preferred" = "$mac" ] && ! clear_preferred; then
+        RESULT_CODE="state_write_failed"
+        RESULT_MESSAGE="La bocina se eliminó, pero no se pudo limpiar el estado preferido"
+        return 1
+    fi
+    RESULT_CODE="removed"
+    RESULT_MESSAGE="Bocina eliminada"
+    RESULT_MAC="$mac"
+    return 0
+}
+
+emit_result() {
+    local success="$1"
+    python3 - "$success" "$RESULT_CODE" "$RESULT_MESSAGE" "$RESULT_MAC" <<'PY'
+import json
+import sys
+
+print(json.dumps({
+    "success": sys.argv[1] == "true",
+    "code": sys.argv[2],
+    "message": sys.argv[3],
+    "mac": sys.argv[4] or None,
+}, ensure_ascii=False))
+PY
+}
+
+handle_request() {
+    local operation="${1:-}" raw_mac="${2:-}" mac="" rc=0
+    case "$operation" in
+        pair|connect|remove)
+            mac=$(normalize_mac "$raw_mac") || {
+                RESULT_CODE="invalid_mac"
+                RESULT_MESSAGE="MAC inválida"
+                emit_result false
+                return 2
+            }
+            ;;
+        disconnect)
+            [ -z "$raw_mac" ] || {
+                RESULT_CODE="invalid_request"
+                RESULT_MESSAGE="La desconexión no acepta una MAC"
+                emit_result false
+                return 2
+            }
+            ;;
+        *)
+            RESULT_CODE="invalid_request"
+            RESULT_MESSAGE="Operación Bluetooth inválida"
+            emit_result false
+            return 2
+            ;;
+    esac
+
+    case "$operation" in
+        pair)       with_bluetooth_lock request_pair_locked "$mac" || rc=$? ;;
+        connect)    with_bluetooth_lock request_connect_locked "$mac" || rc=$? ;;
+        disconnect) with_bluetooth_lock request_disconnect_locked || rc=$? ;;
+        remove)     with_bluetooth_lock request_remove_locked "$mac" || rc=$? ;;
+    esac
+    if [ "$rc" -eq 0 ]; then
+        emit_result true
+    else
+        emit_result false
+    fi
+    return "$rc"
+}
+
+prepare_adapter_locked() {
+    local attempt
+    for attempt in 1 2 3 4 5 6 7 8 9 10; do
+        sudo rfkill unblock bluetooth 2>/dev/null || true
+        sudo hciconfig hci0 up 2>/dev/null || true
+        run_bt 5 power on || true
+        sleep 3
+        if hciconfig hci0 2>/dev/null | grep -q 'UP RUNNING'; then
+            log "Adaptador Bluetooth listo (intento $attempt)"
             return 0
         fi
-        # Alternativa: verificar vía pactl que PulseAudio levantó el módulo BT
-        if PULSE_RUNTIME_PATH=/run/user/${SIGIL_UID}/pulse pactl list modules short 2>/dev/null \
-                | grep -q "module-bluetooth"; then
-            log "Módulo Bluetooth de PulseAudio activo — continuando."
+    done
+    log "ERROR: no se pudo levantar hci0"
+    return 1
+}
+
+wait_a2dp_ready() {
+    local waited=0 max_wait=60
+    log "Esperando endpoints A2DP de PulseAudio"
+    while [ "$waited" -lt "$max_wait" ]; do
+        if "$BLUETOOTHCTL" show 2>/dev/null | grep -q "UUID: Audio Sink"; then
+            return 0
+        fi
+        if pactl list modules short 2>/dev/null | grep -q "module-bluetooth"; then
             return 0
         fi
         sleep 3
         waited=$((waited + 3))
     done
-    log "Advertencia: A2DP no se detectó en ${MAX_WAIT}s — intentando de todos modos."
+    log "A2DP no apareció en ${max_wait}s; se intentará de todos modos"
 }
 
-log "bt-connect iniciado"
+auto_cycle_locked() {
+    local connected preferred="" current="" audio_status
+    connected=$(connected_devices)
+    preferred=$(read_preferred 2>/dev/null || true)
 
-# Levantar el adaptador BT con retry — BlueZ puede no estar listo al boot
-bt_up=0
-for i in $(seq 1 10); do
-    # 1. Desbloquear por rfkill (software block)
-    sudo rfkill unblock bluetooth 2>/dev/null || true
-    # 2. Levantar el adaptador a nivel de kernel
-    sudo hciconfig hci0 up 2>/dev/null || true
-    # 3. Encender via BlueZ (capa de software)
-    bluetoothctl power on 2>/dev/null || true
-    sleep 3
-    if hciconfig hci0 2>/dev/null | grep -q 'UP RUNNING'; then
-        log "Adaptador BT listo (intento $i)"
-        bt_up=1
-        break
-    fi
-    log "Adaptador BT aun DOWN, reintentando ($i/10)..."
-done
-
-if [ $bt_up -eq 0 ]; then
-    log "ERROR: No se pudo levantar hci0 despues de 10 intentos. Abortando."
-    exit 1
-fi
-
-# ── ESPERAR A2DP antes de cualquier intento de conexión ──────────────────────
-# Este es el punto crítico: sin esto, bt-connect falla con
-# "br-connection-profile-unavailable" porque PulseAudio aún no registró A2DP.
-wait_a2dp_ready
-
-# Si app.py esta cambiando bocina ahorita, esperar a que termine
-wait_switch_lock
-
-# Verificar y corregir permisos del archivo preferred_bt.txt
-# bt-connect corre como sigil, el archivo puede estar owned por root si se creó con sudo
-if [ -f "$PREFERRED" ] && [ ! -w "$PREFERRED" ]; then
-    log "ADVERTENCIA: $PREFERRED no tiene permisos de escritura para sigil. Intentando corregir..."
-    sudo chown sigil:sigil "$PREFERRED" 2>/dev/null || true
-    sudo chmod 644 "$PREFERRED" 2>/dev/null || true
-fi
-
-# Conectar al preferido al arrancar (solo si no esta conectado ya)
-if [ -f "$PREFERRED" ]; then
-    INIT_MAC=$(tr -d '[:space:]' < "$PREFERRED")
-    if [ -n "$INIT_MAC" ]; then
-        CONNECTED_MACS=$(bluetoothctl devices Connected 2>/dev/null | grep -oE '([0-9A-F]{2}:){5}[0-9A-F]{2}')
-        if echo "$CONNECTED_MACS" | grep -qI "$INIT_MAC" || bluetoothctl info "$INIT_MAC" 2>/dev/null | grep -qI "Connected: yes"; then
-            log "Preferido inicial $INIT_MAC ya conectado al arrancar"
-            activate_a2dp "$INIT_MAC"
-        else
-            log "Conectando al preferido inicial: $INIT_MAC"
-            bluetoothctl unblock "$INIT_MAC" 2>/dev/null
-            bluetoothctl trust "$INIT_MAC" 2>/dev/null
-            bluetoothctl connect "$INIT_MAC" 2>/dev/null
-            sleep 6
-            # Doble verificación: devices Connected + bluetoothctl info
-            PREF_CONNECTED=0
-            CONNECTED_CHECK=$(bluetoothctl devices Connected 2>/dev/null | grep -oE '([0-9A-F]{2}:){5}[0-9A-F]{2}')
-            if echo "$CONNECTED_CHECK" | grep -qI "$INIT_MAC"; then
-                PREF_CONNECTED=1
-            elif bluetoothctl info "$INIT_MAC" 2>/dev/null | grep -qI 'Connected: yes'; then
-                PREF_CONNECTED=1
-            fi
-            if [ "$PREF_CONNECTED" -eq 1 ]; then
-                log "Conexión inicial exitosa: $INIT_MAC"
-                activate_a2dp "$INIT_MAC"
-            else
-                log "Conexión inicial fallida para $INIT_MAC (se reintentará en el loop)"
-            fi
+    if [ -z "$connected" ]; then
+        [ -n "$preferred" ] || return 0
+        log "Sin conexión; reconectando a $preferred"
+        prepare_target "$preferred" || return 1
+        if connect_target "$preferred" && activate_a2dp "$preferred"; then
+            PREV_MAC="$preferred"
+            return 0
         fi
-    fi
-fi
-
-while true; do
-    sleep 5
-
-    # Si app.py esta haciendo un cambio de bocina, no interferir
-    if [ -f "$BT_SWITCH_LOCK" ]; then
-        log "Cambio de bocina en progreso — saltando ciclo"
-        continue
+        log "Reconexión automática fallida para $preferred"
+        PREV_MAC=""
+        return 1
     fi
 
-    # Ver cuales bocinas estan conectadas ahora mismo
-    CONNECTED_MACS=$(bluetoothctl devices Connected 2>/dev/null | grep -oE '([0-9A-F]{2}:){5}[0-9A-F]{2}')
-
-    # Leer el preferido actual
-    PREF=""
-    if [ -f "$PREFERRED" ]; then
-        PREF=$(tr -d '[:space:]' < "$PREFERRED")
-    fi
-
-    if [ -z "$CONNECTED_MACS" ]; then
-        # Nadie conectado: intentar reconectar al preferido
-        if [ -n "$PREF" ]; then
-            # Verificar por segunda vez usando info por si fue un retraso de bluetoothctl
-            if bluetoothctl info "$PREF" 2>/dev/null | grep -qI "Connected: yes"; then
-                log "Omitiendo reconexion: $PREF ya esta conectado segun info."
-                PREV_MAC="$PREF"
-                continue
-            fi
-
-            log "Sin conexion — reconectando a $PREF..."
-            bluetoothctl unblock "$PREF" 2>/dev/null
-            bluetoothctl trust "$PREF" 2>/dev/null
-            bluetoothctl connect "$PREF" 2>/dev/null
-
-            # Dar un breve margen y verificar si la conexión pegó
-            sleep 6
-            CONNECTED_MACS_CHECK=$(bluetoothctl devices Connected 2>/dev/null | grep -oE '([0-9A-F]{2}:){5}[0-9A-F]{2}')
-            # Doble verificación: devices Connected + bluetoothctl info (más confiable)
-            PREF_CONNECTED=0
-            if echo "$CONNECTED_MACS_CHECK" | grep -qI "$PREF"; then
-                PREF_CONNECTED=1
-            elif bluetoothctl info "$PREF" 2>/dev/null | grep -qI 'Connected: yes'; then
-                PREF_CONNECTED=1
-            fi
-            if [ "$PREF_CONNECTED" -eq 1 ]; then
-                log "Conexion exitosa a $PREF"
-                activate_a2dp "$PREF"
-                PREV_MAC="$PREF"
-            else
-                # Si fallo, esperar un tiempo aleatorio para evitar bucles de colision
-                # con los propios intentos de auto-conexion de la bocina
-                COOLDOWN=$(( (RANDOM % 10) + 12 ))
-                log "Fallo al conectar. Cooldown de ${COOLDOWN}s para romper sincronia..."
-                sleep "$COOLDOWN"
-                PREV_MAC=""
-            fi
-        fi
-        continue
-    fi
-
-    # Determinar cual es el dispositivo activo (CURRENT_MAC)
-    # Si el preferido está en la lista de conectados, ese es el activo.
-    # Si no, tomamos el primero de la lista.
-    CURRENT_MAC=""
-    if [ -n "$PREF" ] && echo "$CONNECTED_MACS" | grep -qI "$PREF"; then
-        CURRENT_MAC="$PREF"
+    if [ -n "$preferred" ] && printf '%s\n' "$connected" | grep -qxF "$preferred"; then
+        current="$preferred"
     else
-        CURRENT_MAC=$(echo "$CONNECTED_MACS" | head -1)
+        current=$(printf '%s\n' "$connected" | head -n 1)
     fi
 
-    # Desconectar cualquier otro dispositivo conectado que no sea el activo
-    echo "$CONNECTED_MACS" | while read -r DEV; do
-        if [ -n "$DEV" ] && [ "$DEV" != "$CURRENT_MAC" ]; then
-            log "Desconectando conexion extra: $DEV"
-            bluetoothctl disconnect "$DEV" 2>/dev/null
+    audio_device_status "$current"
+    audio_status=$?
+    if [ "$audio_status" -eq 1 ]; then
+        log "Rechazando dispositivo conectado sin capacidad de audio: $current"
+        run_bt 8 disconnect "$current" || return 1
+        return 1
+    fi
+    run_bt 5 trust "$current" || return 1
+    is_trusted "$current" || return 1
+    disconnect_others "$current" || return 1
+    if [ "$current" != "$PREV_MAC" ]; then
+        activate_a2dp "$current" || return 1
+        write_preferred "$current" || return 1
+        PREV_MAC="$current"
+    fi
+    return 0
+}
+
+run_daemon() {
+    log "bt-connect iniciado"
+    with_bluetooth_lock prepare_adapter_locked || return 1
+    wait_a2dp_ready
+    with_bluetooth_lock auto_cycle_locked || true
+    if [ "${SIGIL_BT_RUN_ONCE:-0}" = "1" ]; then
+        return 0
+    fi
+    while true; do
+        sleep 5
+        if ! with_bluetooth_lock auto_cycle_locked; then
+            sleep $(((RANDOM % 10) + 12))
         fi
     done
+}
 
-    # Si el dispositivo activo cambio: actualizar preferido y activar A2DP
-    if [ "$CURRENT_MAC" != "$PREV_MAC" ]; then
-        log "Nueva bocina activa: $CURRENT_MAC — guardando como preferido"
-        echo "$CURRENT_MAC" > "$PREFERRED"
-
-        # Volver a confiar en el nuevo preferido
-        bluetoothctl trust "$CURRENT_MAC" 2>/dev/null
-        activate_a2dp "$CURRENT_MAC"
-        PREV_MAC="$CURRENT_MAC"
-    fi
-done
+case "${1:-}" in
+    request)
+        shift
+        handle_request "$@"
+        exit $?
+        ;;
+    "")
+        run_daemon
+        exit $?
+        ;;
+    *)
+        printf 'usage: %s [request pair|connect|disconnect|remove [MAC]]\n' "$0" >&2
+        exit 2
+        ;;
+esac

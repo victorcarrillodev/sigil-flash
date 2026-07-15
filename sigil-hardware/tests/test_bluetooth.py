@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Focused tests for privileged PulseAudio calls from the Bluetooth panel."""
+"""Focused tests for the panel-to-Bluetooth-owner contract."""
+import json
 import os
 import sys
+import tempfile
 import unittest
-from types import SimpleNamespace
+from pathlib import Path
 from unittest.mock import MagicMock, call, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "panel"))
@@ -11,70 +13,78 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "panel"))
 import bluetooth
 
 
-class PulseAudioCommandTests(unittest.TestCase):
-    @patch("bluetooth.pwd.getpwnam")
-    def test_command_sets_target_user_session_after_sudo(self, getpwnam):
-        getpwnam.return_value = SimpleNamespace(
-            pw_uid=1234,
-            pw_dir="/srv/sigil user",
+FAKE_MAC = "02:00:00:00:00:01"
+
+
+class BluetoothOwnerContractTests(unittest.TestCase):
+    @patch("bluetooth.subprocess.run")
+    def test_connect_uses_bounded_structured_owner_request(self, run):
+        run.return_value = MagicMock(
+            returncode=0,
+            stdout=json.dumps({
+                "success": True,
+                "code": "connected",
+                "message": "Conectado exitosamente",
+                "mac": FAKE_MAC,
+            }),
+            stderr="",
         )
 
-        command = bluetooth._sigil_pactl_command("list", "cards", "short")
+        success, message = bluetooth.connect_device(FAKE_MAC.lower())
 
-        self.assertEqual(command, [
-            "sudo", "-H", "-u", "sigil", "--",
-            "env",
-            "HOME=/srv/sigil user",
-            "XDG_RUNTIME_DIR=/run/user/1234",
-            "PULSE_SERVER=unix:/run/user/1234/pulse/native",
-            "PULSE_RUNTIME_PATH=/run/user/1234/pulse",
-            "pactl", "list", "cards", "short",
-        ])
+        self.assertTrue(success)
+        self.assertEqual(message, "Conectado exitosamente")
+        self.assertEqual(run.call_args_list, [call(
+            [bluetooth.BT_OWNER_COMMAND, "request", "connect", FAKE_MAC],
+            capture_output=True,
+            text=True,
+            timeout=bluetooth.BT_OWNER_TIMEOUT_SECONDS,
+            check=False,
+        )])
+        self.assertNotIn("shell", run.call_args.kwargs)
 
     @patch("bluetooth.subprocess.run")
-    @patch("bluetooth.pwd.getpwnam")
-    def test_a2dp_calls_use_argument_lists_without_shell(
-        self, getpwnam, run
-    ):
-        getpwnam.return_value = SimpleNamespace(
-            pw_uid=1001,
-            pw_dir="/home/sigil",
+    def test_owner_failure_cannot_be_reported_as_success(self, run):
+        run.return_value = MagicMock(
+            returncode=1,
+            stdout=json.dumps({
+                "success": False,
+                "code": "connect_failed",
+                "message": "No se pudo conectar",
+                "mac": None,
+            }),
+            stderr="",
         )
-        run.side_effect = [
-            MagicMock(stdout="1 bluez_card.AA_BB_CC_DD_EE_FF module\n"),
-            MagicMock(stdout=""),
-        ]
 
-        bluetooth.set_a2dp_profile()
+        self.assertEqual(
+            bluetooth.connect_device(FAKE_MAC),
+            (False, "No se pudo conectar"),
+        )
 
-        prefix = [
-            "sudo", "-H", "-u", "sigil", "--",
-            "env",
-            "HOME=/home/sigil",
-            "XDG_RUNTIME_DIR=/run/user/1001",
-            "PULSE_SERVER=unix:/run/user/1001/pulse/native",
-            "PULSE_RUNTIME_PATH=/run/user/1001/pulse",
-            "pactl",
-        ]
-        self.assertEqual(run.call_args_list, [
-            call(
-                prefix + ["list", "cards", "short"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-            ),
-            call(
-                prefix + [
-                    "set-card-profile",
-                    "bluez_card.AA_BB_CC_DD_EE_FF",
-                    "a2dp_sink",
-                ],
-                capture_output=True,
-                timeout=5,
-            ),
-        ])
-        for invocation in run.call_args_list:
-            self.assertNotIn("shell", invocation.kwargs)
+    @patch("bluetooth.subprocess.run")
+    def test_owner_timeout_is_bounded_and_reported(self, run):
+        run.side_effect = bluetooth.subprocess.TimeoutExpired(
+            cmd="bt-connect.sh", timeout=bluetooth.BT_OWNER_TIMEOUT_SECONDS
+        )
+
+        success, message = bluetooth.pair_device(FAKE_MAC)
+
+        self.assertFalse(success)
+        self.assertIn("Timeout", message)
+
+    def test_preferred_reader_normalizes_and_rejects_symlinks(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            preferred = Path(temp_dir) / "preferred_bt.txt"
+            preferred.write_text(FAKE_MAC.lower() + "\n", encoding="ascii")
+            with patch.object(bluetooth, "PREFERRED_BT_FILE", str(preferred)):
+                self.assertEqual(bluetooth.get_preferred_device(), FAKE_MAC)
+
+            target = Path(temp_dir) / "target"
+            target.write_text(FAKE_MAC + "\n", encoding="ascii")
+            preferred.unlink()
+            preferred.symlink_to(target)
+            with patch.object(bluetooth, "PREFERRED_BT_FILE", str(preferred)):
+                self.assertIsNone(bluetooth.get_preferred_device())
 
 
 if __name__ == "__main__":

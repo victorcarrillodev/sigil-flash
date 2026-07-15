@@ -4,5 +4,7 @@ src-tauri/target/
 .tauri/
 *.log
 artifacts/secrets/
+artifacts/offline-packages/
+*.deb
 .DS_Store
 bun.lockb

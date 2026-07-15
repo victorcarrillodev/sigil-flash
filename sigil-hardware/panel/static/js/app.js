@@ -41,6 +41,13 @@ function setResult(id, msg, isError) {
   el.className   = 'result-msg' + (isError ? ' error' : '');
 }
 
+function csrfHeaders(extra) {
+  var meta = document.querySelector('meta[name="sigil-csrf-token"]');
+  var headers = extra || {};
+  headers['X-Sigil-CSRF'] = meta ? meta.getAttribute('content') : '';
+  return headers;
+}
+
 
 // ── Bluetooth: build row ───────────────────────────────────────────────────
 
@@ -147,7 +154,7 @@ document.getElementById('bt-table').addEventListener('click', function(e) {
     var mac = target.getAttribute('data-mac');
     target.disabled = true;
     setResult('bt-result', 'Conectando…');
-    fetch('/connect/' + encodeURIComponent(mac))
+    fetch('/connect/' + encodeURIComponent(mac), { headers: csrfHeaders() })
       .then(function(r) { return r.json(); })
       .then(function(d) {
         setResult('bt-result', d.message, !d.success);
@@ -158,7 +165,7 @@ document.getElementById('bt-table').addEventListener('click', function(e) {
   } else if (target.classList.contains('disconnect-bt-btn')) {
     target.disabled = true;
     setResult('bt-result', 'Desconectando…');
-    fetch('/disconnect_active')
+    fetch('/disconnect_active', { headers: csrfHeaders() })
       .then(function(r) { return r.json(); })
       .then(function(d) {
         setResult('bt-result', d.message, !d.success);
@@ -170,7 +177,7 @@ document.getElementById('bt-table').addEventListener('click', function(e) {
     if (!confirm('¿Seguro que deseas eliminar este altavoz?')) return;
     var mac = target.getAttribute('data-mac');
     target.disabled = true;
-    fetch('/remove/' + encodeURIComponent(mac))
+    fetch('/remove/' + encodeURIComponent(mac), { headers: csrfHeaders() })
       .then(function(r) { return r.json(); })
       .then(function(d) {
         if (d.success) setTimeout(function() { location.reload(); }, 800);
@@ -184,7 +191,7 @@ document.getElementById('bt-table').addEventListener('click', function(e) {
     setResult('bt-result', 'Emparejando…');
     fetch('/pair', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      headers: csrfHeaders({ 'Content-Type': 'application/x-www-form-urlencoded' }),
       body: 'mac=' + encodeURIComponent(mac) + '&name=' + encodeURIComponent(name)
     })
     .then(function(r) { return r.json(); })
@@ -197,13 +204,12 @@ document.getElementById('bt-table').addEventListener('click', function(e) {
 });
 
 
-// ── Música: estado y control ───────────────────────────────────────────────
+// ── Música: estado de solo lectura ─────────────────────────────────────────
 
 var _musicDisc      = document.getElementById('music-disc');
 var _musicTrack     = document.getElementById('music-track');
 var _speakerDot     = document.getElementById('speaker-dot');
 var _speakerLabel   = document.getElementById('speaker-label');
-var _musicNextBtn   = document.getElementById('music-next-btn');
 var _lastTrackName  = '';
 
 function updateMusicStatus() {
@@ -228,32 +234,12 @@ function updateMusicStatus() {
       if (data.speaker_connected) {
         _speakerDot.className  = 'speaker-dot connected';
         _speakerLabel.textContent = 'Bocina conectada' + (data.speaker_mac ? ' — ' + data.speaker_mac : '');
-        _musicNextBtn.disabled = false;
       } else {
         _speakerDot.className  = 'speaker-dot';
         _speakerLabel.textContent = 'Bocina no conectada';
-        _musicNextBtn.disabled = true;
       }
     })
     .catch(function() { /* ignorar silenciosamente */ });
-}
-
-// Botón siguiente pista
-if (_musicNextBtn) {
-  _musicNextBtn.addEventListener('click', function() {
-    this.disabled = true;
-    var self = this;
-    fetch('/music/next', { method: 'POST' })
-      .then(function(r) { return r.json(); })
-      .then(function(d) {
-        // Actualizar status después de 2s para que mpg123 avance
-        setTimeout(function() {
-          updateMusicStatus();
-          self.disabled = false;
-        }, 2000);
-      })
-      .catch(function() { self.disabled = false; });
-  });
 }
 
 // Polling inicial y cada 10s
@@ -356,7 +342,7 @@ function connectWifi(ssid, password) {
 
   fetch('/wifi/connect', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: csrfHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify({ ssid: ssid, password: password })
   })
   .then(function(r) { return r.json(); })

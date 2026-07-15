@@ -1,6 +1,6 @@
 #!/bin/bash
-# sigil-phase2-rollback.sh — Reversible rollback from Phase 2 services
-# (radio-fetcher + audio-manager + audio-player) back to radio-stream.
+# sigil-phase2-rollback.sh — Explicit emergency rollback from the production
+# Phase 2 runtime (radio-fetcher + audio-manager + audio-player) to radio-stream.
 #
 # Shares restoration logic with sigil-phase2-cutover.sh:
 #   restore_service_from_snapshot() — handles all 4 active/enabled combos

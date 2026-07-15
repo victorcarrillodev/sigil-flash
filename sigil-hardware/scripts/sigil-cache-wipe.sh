@@ -10,6 +10,8 @@
 #   sigil-cache-wipe.sh --help       # show this message
 # =============================================================================
 set -euo pipefail
+# shellcheck source=./scripts/sigil-cache-meta-perms.sh
+. "$(dirname "${BASH_SOURCE[0]}")/sigil-cache-meta-perms.sh"
 
 MUSIC_DIR="${SIGIL_MUSIC_DIR:-/home/sigil/music}"
 ACTIVE_DIR="${MUSIC_DIR}/active/tracks"
@@ -101,19 +103,18 @@ fp = sys.argv[1]
 dirn = os.path.dirname(fp) or "."
 
 if os.path.exists(fp):
-    metadata = os.stat(fp)
-    target_uid = metadata.st_uid
-    target_gid = metadata.st_gid
-    target_mode = stat.S_IMODE(metadata.st_mode)
     with open(fp, encoding="utf-8") as handle:
         doc = json.load(handle)
-else:
-    try:
-        target_uid = pwd.getpwnam("sigil").pw_uid
-        target_gid = grp.getgrnam("sigil").gr_gid
-    except KeyError as error:
-        raise RuntimeError("canonical sigil user/group is unavailable") from error
-    target_mode = 0o660
+try:
+    target_uid = pwd.getpwnam("sigil").pw_uid
+    target_gid = grp.getgrnam("sigil").gr_gid
+except KeyError:
+    existing = os.stat(fp) if os.path.exists(fp) else None
+    if existing is None:
+        raise RuntimeError("canonical sigil user/group is unavailable")
+    target_uid, target_gid = existing.st_uid, existing.st_gid
+target_mode = 0o660
+if not os.path.exists(fp):
     doc = {
         "_schema_version": "1.0",
         "cache_policy": {
@@ -189,6 +190,7 @@ finally:
         except FileNotFoundError:
             pass
 PYEOF
+    sigil_cache_meta_fix_permissions "$CACHE_META"
     log "INFO" "cache_meta.json updated"
 }
 

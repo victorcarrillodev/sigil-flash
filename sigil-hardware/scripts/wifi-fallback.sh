@@ -30,6 +30,7 @@ HTTPS_ENDPOINT_2="${SIGIL_WIFI_HTTPS_ENDPOINT_2:-https://www.debian.org/}"
 
 DRY_RUN=0
 ONE_SHOT=0
+EXTERNAL_CLIENT_HANDOFF=0
 PROBE_STATE="CLIENT_CONNECTING"
 PROBE_REASON="not_checked"
 PROBE_GATEWAY=""
@@ -105,8 +106,44 @@ persist_state() {
     WIFI_STATE[STATE]="$state"
     WIFI_STATE[REASON]="$reason"
     WIFI_STATE[UPDATED_AT]="$now"
-    save_state
+    save_state || {
+        log "state persistence failed for state=${state} reason=${reason}"
+        return 1
+    }
     log "state=${state} reason=${reason} fail=${WIFI_STATE[FAIL_COUNT]} success=${WIFI_STATE[SUCCESS_COUNT]} next_retry=${WIFI_STATE[NEXT_RETRY_AT]}"
+}
+
+record_external_client_handoff() {
+    local now lock_probe_fd
+    inhibit_active || {
+        log "external client handoff rejected: no active panel inhibit"
+        return 1
+    }
+
+    # The panel must still own the canonical transition lock.  A successful
+    # non-blocking acquisition proves it does not, so reject the handoff.
+    if acquire_transition_lock lock_probe_fd; then
+        release_transition_lock "$lock_probe_fd"
+        log "external client handoff rejected: transition lock not held"
+        return 1
+    fi
+
+    now=$(date +%s)
+    load_state
+    WIFI_STATE[STATE]="CLIENT_CONNECTING"
+    WIFI_STATE[CLIENT_STATE]="CLIENT_CONNECTING"
+    WIFI_STATE[REASON]="panel_client_handoff"
+    WIFI_STATE[FAIL_COUNT]="0"
+    WIFI_STATE[SUCCESS_COUNT]="0"
+    WIFI_STATE[FAIL_STARTED_AT]="0"
+    WIFI_STATE[AP_ACTIVE]="0"
+    WIFI_STATE[NEXT_RETRY_AT]="0"
+    WIFI_STATE[RECOVERY_BACKOFF]="$AP_RECOVERY_INTERVAL"
+    WIFI_STATE[LOCAL_PROBE_BACKOFF]="$LOCAL_PROBE_INITIAL_BACKOFF"
+    WIFI_STATE[NEXT_PROBE_AT]="0"
+    WIFI_STATE[DEAD_PROFILE]=""
+    WIFI_STATE[DEAD_PROFILE_DEACTIVATED]="0"
+    persist_state "CLIENT_CONNECTING" "panel_client_handoff" "$now"
 }
 
 remove_stale_inhibit() {
@@ -269,9 +306,21 @@ stop_ap_services() {
 }
 
 ensure_ap_services() {
+    local lock_fd rc=0
     [ "$DRY_RUN" -eq 0 ] || return 0
-    systemctl is-active --quiet hostapd || systemctl start hostapd || return 1
-    systemctl is-active --quiet dnsmasq || systemctl start dnsmasq || return 1
+    if systemctl is-active --quiet hostapd \
+        && systemctl is-active --quiet dnsmasq; then
+        return 0
+    fi
+    inhibit_active && return 1
+    acquire_transition_lock lock_fd || return 1
+    if inhibit_active; then
+        release_transition_lock "$lock_fd"
+        return 1
+    fi
+    start_ap_services || rc=$?
+    release_transition_lock "$lock_fd"
+    return "$rc"
 }
 
 deactivate_dead_profile_once() {
@@ -425,10 +474,7 @@ run_cycle() {
     previous_state="${WIFI_STATE[STATE]}"
 
     if inhibit_active; then
-        WIFI_STATE[FAIL_COUNT]="0"
-        WIFI_STATE[FAIL_STARTED_AT]="0"
-        WIFI_STATE[CLIENT_STATE]="CLIENT_CONNECTING"
-        persist_state "CLIENT_CONNECTING" "panel_connection_inhibited" "$now"
+        log "panel connection inhibited; transition owner retains canonical state"
         return 0
     fi
 
@@ -475,7 +521,7 @@ run_cycle() {
 }
 
 usage() {
-    printf 'Usage: %s [--oneshot|--dry-run]\n' "$(basename "$0")"
+    printf 'Usage: %s [--oneshot|--dry-run|--external-client-handoff]\n' "$(basename "$0")"
 }
 
 parse_args() {
@@ -483,6 +529,7 @@ parse_args() {
         case "$1" in
             --oneshot) ONE_SHOT=1 ;;
             --dry-run) DRY_RUN=1; ONE_SHOT=1 ;;
+            --external-client-handoff) EXTERNAL_CLIENT_HANDOFF=1 ;;
             -h|--help) usage; return 1 ;;
             *) printf 'unknown option: %s\n' "$1" >&2; return 2 ;;
         esac
@@ -492,6 +539,10 @@ parse_args() {
 
 main() {
     parse_args "$@" || return $?
+    if [ "$EXTERNAL_CLIENT_HANDOFF" -eq 1 ]; then
+        record_external_client_handoff
+        return
+    fi
     mkdir -p "$(dirname "$SERVICE_LOCK")" || return 1
     exec 8>"$SERVICE_LOCK" || return 1
     flock -n 8 || { log "another wifi-fallback process is active"; return 1; }

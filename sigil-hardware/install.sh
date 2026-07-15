@@ -2,7 +2,7 @@
 # =============================================================================
 # install.sh — Instalador completo de Sigil en Raspberry Pi Zero 2 W
 # Ejecutar desde la raíz del repositorio clonado:
-#   sudo bash install.sh
+#   sudo bash install.sh --offline-repo /opt/sigil/offline-repo
 # =============================================================================
 set -euo pipefail
 
@@ -35,13 +35,37 @@ fi
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 log_info "Directorio del repositorio: ${REPO_DIR}"
 
-for dir in panel scripts services conf; do
+OFFLINE_REPO=""
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --offline-repo)
+            [ "$#" -ge 2 ] || { log_err "Falta el valor de --offline-repo"; exit 1; }
+            OFFLINE_REPO="$2"
+            shift 2
+            ;;
+        --help|-h)
+            printf 'Uso: sudo bash install.sh --offline-repo <directorio>\n'
+            exit 0
+            ;;
+        *)
+            log_err "Argumento desconocido: $1"
+            exit 1
+            ;;
+    esac
+done
+
+for dir in panel scripts services conf manifests; do
     if [[ ! -d "${REPO_DIR}/${dir}" ]]; then
         log_err "No se encontró la carpeta '${dir}'. Ejecuta desde la raíz del repositorio."
         exit 1
     fi
 done
 log_ok "Estructura del repositorio verificada"
+
+if [ -z "$OFFLINE_REPO" ]; then
+    log_err "La instalación requiere --offline-repo; nunca descarga paquetes de Internet"
+    exit 1
+fi
 
 AUDIO_CAPABILITY_HELPER="${REPO_DIR}/scripts/sigil-audio-capability.sh"
 IDENTITY_HELPER="${REPO_DIR}/panel/device_identity.py"
@@ -60,61 +84,25 @@ fi
 SIGIL_USER="sigil"
 SIGIL_HOME="/home/sigil"
 SIGIL_UID=1001          # UID fijo para evitar conflictos
+PANEL_INSTALL_DIR="/opt/sigil/panel"
 
-SERVICES="bluetooth-panel bt-connect radio-stream sigil-leds wifi-fallback ssh-monitor"
-# Phase 1 skeleton services (disabled by default — enabled after extraction)
-NEW_SERVICES="audio-manager radio-fetcher audio-player"
+SERVICES="bluetooth-panel bt-connect sigil-leds wifi-fallback ssh-monitor"
+PHASE2_AUDIO_SERVICES="radio-fetcher audio-manager audio-player"
 
 # ── Paso 1: Paquetes del sistema ──────────────────────────────────────────────
-log_step "Instalando paquetes del sistema"
+log_step "Instalando contrato de paquetes desde repositorio local"
 
-apt-get update -qq
-
-PKGS=(
-    python3 python3-pip python3-venv
-    bluetooth bluez bluez-tools
-    pulseaudio pulseaudio-module-bluetooth
-    mpg123
-    network-manager
-    hostapd dnsmasq
-    iw rfkill wireless-tools
-    curl wget
-    git
-    raspi-utils
-    logrotate
-)
-
-# Instalar solo los que falten
-MISSING=()
-for pkg in "${PKGS[@]}"; do
-    if ! dpkg -s "$pkg" &>/dev/null; then
-        MISSING+=("$pkg")
-    fi
-done
-
-if [[ ${#MISSING[@]} -gt 0 ]]; then
-    log_info "Instalando: ${MISSING[*]}"
-    apt-get install -y --no-install-recommends "${MISSING[@]}" 2>&1 | grep -E '(Instalando|Setting up|installed)' || true
-else
-    log_ok "Todos los paquetes del sistema ya están instalados"
-fi
+SIGIL_PACKAGE_CONTRACT="${REPO_DIR}/manifests/offline-package-contract.json" \
+    bash "${REPO_DIR}/scripts/install-offline-packages.sh" "$OFFLINE_REPO"
 
 # Verificar que pinctrl quedó disponible tras instalar raspi-utils
 if ! command -v pinctrl &>/dev/null; then
     log_warn "pinctrl no disponible tras instalar raspi-utils — los LEDs pueden no funcionar"
 fi
 
-log_ok "Paquetes del sistema listos"
+log_ok "Paquetes del sistema y Python listos sin acceso a Internet"
 
-# ── Paso 2: Dependencias Python ───────────────────────────────────────────────
-log_step "Instalando dependencias Python"
-
-python3 -m pip install --quiet --break-system-packages flask "qrcode[pil]" 2>/dev/null \
-    || python3 -m pip install --quiet flask "qrcode[pil]"
-
-log_ok "flask y qrcode instalados"
-
-# ── Paso 3: Usuario sigil ─────────────────────────────────────────────────────
+# ── Paso 2: Usuario sigil ─────────────────────────────────────────────────────
 log_step "Configurando usuario '${SIGIL_USER}'"
 
 if id "${SIGIL_USER}" &>/dev/null; then
@@ -160,9 +148,11 @@ configure_bluetooth_user() {
 
     # Habilitar lingering para el usuario (necesario para PulseAudio
     # cuando no hay sesión activa)
-    if command -v loginctl &>/dev/null; then
+    if [ "${SIGIL_IMAGE_PREPARATION:-0}" = "1" ]; then
+        log_info "Preparación de imagen: user lingering se aplicará en firstboot"
+    elif command -v loginctl &>/dev/null; then
         local linger_state
-        linger_state=$(loginctl show-user "$user" 2>/dev/null | grep "^Linger=" | cut -d= -f2)
+        linger_state=$(loginctl show-user "$user" 2>/dev/null | grep "^Linger=" | cut -d= -f2 || true)
         if [[ "$linger_state" == "yes" ]]; then
             log_ok "User lingering ya habilitado para '${user}'"
         else
@@ -180,17 +170,48 @@ configure_bluetooth_user() {
 configure_bluetooth_user "${SIGIL_USER}"
 
 
-mkdir -p "${SIGIL_HOME}/templates"
-
 # ── Paso 4: Panel Python ──────────────────────────────────────────────────────
-log_step "Instalando panel Python → ${SIGIL_HOME}"
+log_step "Instalando panel Python → ${PANEL_INSTALL_DIR}"
 
-cp "${REPO_DIR}/panel/"*.py                      "${SIGIL_HOME}/"
-cp -r "${REPO_DIR}/panel/templates"              "${SIGIL_HOME}/"
-cp -r "${REPO_DIR}/panel/static"                 "${SIGIL_HOME}/"
+# Flask and the root-run NetworkManager dispatcher import code only from this
+# root-owned tree.  SIGIL_HOME remains writable for service runtime state.
+install -d -o root -g root -m 0755 \
+    "/opt/sigil" \
+    "${PANEL_INSTALL_DIR}" \
+    "${PANEL_INSTALL_DIR}/templates" \
+    "${PANEL_INSTALL_DIR}/static" \
+    "${PANEL_INSTALL_DIR}/static/css" \
+    "${PANEL_INSTALL_DIR}/static/js"
 
-chown -R "${SIGIL_USER}:${SIGIL_USER}" "${SIGIL_HOME}"
-log_ok "Panel web y sus dependencias locales copiados a ${SIGIL_HOME}"
+for panel_file in "${REPO_DIR}"/panel/*.py; do
+    install -o root -g root -m 0644 \
+        "$panel_file" "${PANEL_INSTALL_DIR}/$(basename "$panel_file")"
+done
+
+for template_file in "${REPO_DIR}"/panel/templates/*; do
+    install -o root -g root -m 0644 \
+        "$template_file" "${PANEL_INSTALL_DIR}/templates/$(basename "$template_file")"
+done
+
+for asset_dir in css js; do
+    for asset_file in "${REPO_DIR}/panel/static/${asset_dir}"/*; do
+        install -o root -g root -m 0644 \
+            "$asset_file" "${PANEL_INSTALL_DIR}/static/${asset_dir}/$(basename "$asset_file")"
+    done
+done
+
+# Re-assert the complete tree on every install so an interrupted or legacy
+# installation cannot leave a writable file on a privileged import path.
+chown -R root:root "${PANEL_INSTALL_DIR}"
+find "${PANEL_INSTALL_DIR}" -type d -exec chmod 0755 {} +
+find "${PANEL_INSTALL_DIR}" -type f -exec chmod 0644 {} +
+
+# Compatibility for existing non-root runtime and provisioning scripts.  The
+# NetworkManager dispatcher imports this helper from PANEL_INSTALL_DIR instead.
+install -o root -g root -m 0644 \
+    "${REPO_DIR}/panel/device_identity.py" "${SIGIL_HOME}/device_identity.py"
+
+log_ok "Panel web instalado root:root y de solo lectura en ${PANEL_INSTALL_DIR}"
 
 # ── Paso 5: Scripts de sistema ────────────────────────────────────────────────
 log_step "Instalando scripts → /usr/local/bin"
@@ -226,12 +247,17 @@ log_step "Instalando servicios systemd → /etc/systemd/system"
 
 for svc_file in "${REPO_DIR}"/services/*.service; do
     svc_name=$(basename "$svc_file")
-    cp "$svc_file" "/etc/systemd/system/${svc_name}"
+    install -o root -g root -m 0644 \
+        "$svc_file" "/etc/systemd/system/${svc_name}"
     log_ok "${svc_name} copiado"
 done
 
-systemctl daemon-reload
-log_ok "systemd daemon recargado"
+if [ "${SIGIL_IMAGE_PREPARATION:-0}" = "1" ]; then
+    log_info "Preparación de imagen: daemon-reload se aplicará en firstboot"
+else
+    systemctl daemon-reload
+    log_ok "systemd daemon recargado"
+fi
 
 # ── Paso 7: Configuración del sistema ────────────────────────────────────────
 log_step "Aplicando configuración del sistema"
@@ -298,8 +324,8 @@ log_ok "red: /etc/hostapd/hostapd.conf"
 # 7f. Sudoers
 for sudoers_file in sigil-network.sudoers sigil.sudoers; do
     target="/etc/sudoers.d/${sudoers_file%.sudoers}"
-    cp "${REPO_DIR}/conf/${sudoers_file}" "$target"
-    chmod 440 "$target"
+    install -o root -g root -m 0440 \
+        "${REPO_DIR}/conf/${sudoers_file}" "$target"
     if visudo -c -f "$target" &>/dev/null; then
         log_ok "sudoers: ${target} (chmod 440, validado)"
     else
@@ -326,7 +352,10 @@ if [ -z "$I2S_PROVISION_FILE" ]; then
     done
 fi
 
-if [ -n "$I2S_PROVISION_FILE" ]; then
+if [ "${SIGIL_IMAGE_PREPARATION:-0}" = "1" ]; then
+    I2S_DAC_PRESENT=0
+    log_info "Preparación de imagen: identidad y capacidad I2S se aplicarán en firstboot"
+elif [ -n "$I2S_PROVISION_FILE" ]; then
     if ! I2S_DAC_PRESENT=$(python3 "$IDENTITY_HELPER" \
         --device-conf /etc/sigil/device.conf \
         --persist-provision "$I2S_PROVISION_FILE"); then
@@ -379,14 +408,19 @@ mkdir -p /home/sigil/music/archive
 chown -R "${SIGIL_USER}:${SIGIL_USER}" /home/sigil/music
 log_ok "/home/sigil/music/{active,staging,archive}/tracks/"
 
-# Archivos de estado de Sigil (ownership correcto)
-# IMPORTANTE: bt-connect.sh corre como usuario 'sigil' y necesita escribir aquí.
-# Si este archivo queda owned por root, aparece:
-# "bt-connect.sh: Permission denied" en /home/sigil/preferred_bt.txt
-touch "${SIGIL_HOME}/preferred_bt.txt" 2>/dev/null || true
-chown "${SIGIL_USER}:${SIGIL_USER}" "${SIGIL_HOME}/preferred_bt.txt" 2>/dev/null || true
-chmod 644 "${SIGIL_HOME}/preferred_bt.txt" 2>/dev/null || true
-log_ok "${SIGIL_HOME}/preferred_bt.txt (estado BT, owner: ${SIGIL_USER}, perms: 644)"
+# bt-connect.sh is the sole writer of this state. Reject a legacy symlink,
+# preserve a regular file across upgrades, and enforce private permissions.
+if [ -L "${SIGIL_HOME}/preferred_bt.txt" ]; then
+    rm -f -- "${SIGIL_HOME}/preferred_bt.txt"
+fi
+if [ ! -f "${SIGIL_HOME}/preferred_bt.txt" ]; then
+    install -o "${SIGIL_USER}" -g "${SIGIL_USER}" -m 0600 \
+        /dev/null "${SIGIL_HOME}/preferred_bt.txt"
+else
+    chown "${SIGIL_USER}:${SIGIL_USER}" "${SIGIL_HOME}/preferred_bt.txt"
+    chmod 0600 "${SIGIL_HOME}/preferred_bt.txt"
+fi
+log_ok "${SIGIL_HOME}/preferred_bt.txt (estado BT, owner: ${SIGIL_USER}, perms: 600)"
 
 touch "${SIGIL_HOME}/now_playing.txt" 2>/dev/null || true
 chown "${SIGIL_USER}:${SIGIL_USER}" "${SIGIL_HOME}/now_playing.txt" 2>/dev/null || true
@@ -402,7 +436,7 @@ for logfile in bt-connect radio-stream; do
     log_ok "/var/log/${logfile}.log (owner: ${SIGIL_USER})"
 done
 
-# Phase 1: Log file for audio-manager (legacy path)
+# Compatibility log path retained for existing diagnostics.
 touch /var/log/audio-manager.log
 chown "${SIGIL_USER}:${SIGIL_USER}" /var/log/audio-manager.log
 chmod 644 /var/log/audio-manager.log
@@ -426,6 +460,8 @@ log_step "Configurando secrets del panel"
 
 mkdir -p /etc/sigil
 chmod 755 /etc/sigil
+install -d -o root -g sigil -m 0750 /etc/sigil/secrets
+install -d -o root -g root -m 0700 /etc/sigil/manufacturing
 
 if [[ -f /etc/sigil/panel.env ]]; then
     log_ok "/etc/sigil/panel.env ya existe"
@@ -463,7 +499,6 @@ chmod 640 /etc/sigil/audio.conf
 log_ok "/etc/sigil/audio.conf (640, root:sigil, I2S=${I2S_DAC_PRESENT})"
 
 # The device API token has one canonical location and is never part of provision JSON.
-install -d -o root -g sigil -m 750 /etc/sigil/secrets
 DEVICE_API_KEY_FILE=/etc/sigil/secrets/device-api-key
 legacy_api_key=""
 if [ -f /etc/sigil/audio.conf ]; then
@@ -533,9 +568,9 @@ fi
 # ── Dispatcher de geolocalización WiFi ───────────────────────────────────────
 log_step "Instalando dispatcher de geolocalización WiFi"
 DISPATCHER_DIR="/etc/NetworkManager/dispatcher.d"
-mkdir -p "$DISPATCHER_DIR"
-cp "${REPO_DIR}/conf/90-sigil-geolocate" "${DISPATCHER_DIR}/90-sigil-geolocate"
-chmod 755 "${DISPATCHER_DIR}/90-sigil-geolocate"
+install -d -o root -g root -m 0755 "$DISPATCHER_DIR"
+install -o root -g root -m 0755 \
+    "${REPO_DIR}/conf/90-sigil-geolocate" "${DISPATCHER_DIR}/90-sigil-geolocate"
 log_ok "Instalado: ${DISPATCHER_DIR}/90-sigil-geolocate (se ejecuta al conectar WiFi)"
 
 # ── Estado y logs de geolocalización ────────────────────────────────────────
@@ -565,11 +600,26 @@ for svc in $SERVICES; do
     fi
 done
 
-# Phase 1 skeleton services: disabled by default
-for svc in $NEW_SERVICES; do
-    systemctl disable "${svc}.service" 2>/dev/null || true
-    log_info "${svc}.service: instalado pero deshabilitado (Phase 1 skeleton)"
+# Phase 2 is the production audio runtime.  The legacy unit remains installed
+# as an explicit rollback path, but it must never coexist with audio-player.
+systemctl disable radio-stream.service 2>/dev/null || true
+log_ok "radio-stream.service: inactivo y deshabilitado (rollback explícito)"
+
+for svc in $PHASE2_AUDIO_SERVICES; do
+    if systemctl enable "${svc}.service" 2>/dev/null; then
+        log_ok "${svc}.service habilitado"
+    else
+        log_err "No se pudo habilitar ${svc}.service"
+        exit 1
+    fi
 done
+
+if systemctl enable sigil-firstboot.service 2>/dev/null; then
+    log_ok "sigil-firstboot.service habilitado para identidad y secretos del primer arranque"
+else
+    log_err "No se pudo habilitar sigil-firstboot.service"
+    exit 1
+fi
 
 # ── Paso 12: Variables de entorno opcionales ──────────────────────────────────
 log_step "Variables de entorno"
@@ -582,23 +632,13 @@ if ! grep -q "SIGIL_SECRET_KEY" /etc/systemd/system/bluetooth-panel.service 2>/d
     log_info "  Environment=SIGIL_SECRET_KEY=tu_clave_segura"
 fi
 
-# ── Paso 12b: Firstboot provisioning ──────────────────────────────────────────
-log_step "Ejecutando firstboot provisioning"
-
-if [ -f /usr/local/bin/firstboot.sh ]; then
-    bash /usr/local/bin/firstboot.sh 2>&1 | awk '{print "  " $0}'
-    log_ok "Firstboot provisioning ejecutado"
-else
-    log_warn "firstboot.sh no encontrado en /usr/local/bin/"
-fi
-
 # ── Resumen ───────────────────────────────────────────────────────────────────
 echo ""
 echo -e "${BOLD}${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo -e "${BOLD}${GREEN}  ✔  Instalación completada${NC}"
 echo -e "${BOLD}${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo ""
-echo -e "  ${CYAN}Archivos del panel:${NC}  ${SIGIL_HOME}/app.py"
+echo -e "  ${CYAN}Archivos del panel:${NC}  ${PANEL_INSTALL_DIR}/app.py"
 echo -e "  ${CYAN}Scripts:${NC}             /usr/local/bin/*.sh"
 echo -e "  ${CYAN}Servicios:${NC}           /etc/systemd/system/"
 echo ""
@@ -606,7 +646,7 @@ echo -e "  ${BOLD}Próximo paso — reiniciar el dispositivo:${NC}"
 echo -e "  ${YELLOW}  sudo reboot${NC}"
 echo ""
 echo -e "  ${BOLD}O para arrancar los servicios sin reiniciar:${NC}"
-echo -e "  ${YELLOW}  sudo systemctl start bluetooth-panel bt-connect radio-stream sigil-leds wifi-fallback${NC}"
+echo -e "  ${YELLOW}  sudo systemctl start bluetooth-panel bt-connect sigil-leds wifi-fallback ssh-monitor${NC}"
 echo ""
 echo -e "  ${BOLD}Panel web:${NC} conectarte al WiFi ${CYAN}Sigil${NC} (pass: ${CYAN}sigil1234${NC}) → ${CYAN}http://192.168.4.1${NC}"
 echo ""

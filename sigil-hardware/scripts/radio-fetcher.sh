@@ -24,6 +24,8 @@
 #     (see scripts/radio-stream.sh line 116-119).
 # =============================================================================
 set -euo pipefail
+# shellcheck source=./scripts/sigil-cache-meta-perms.sh
+. "$(dirname "${BASH_SOURCE[0]}")/sigil-cache-meta-perms.sh"
 
 # --- Paths ---
 LOG_DIR="/var/log/sigil"
@@ -354,6 +356,7 @@ ensure_cache_meta() {
 EOF
 )
     echo "$default_meta" > "$CACHE_META_FILE"
+    sigil_cache_meta_fix_permissions "$CACHE_META_FILE"
 }
 
 update_cache_meta() {
@@ -428,6 +431,7 @@ except Exception:
         pass
     raise
 PYEOF
+    sigil_cache_meta_fix_permissions "$CACHE_META_FILE"
     local rc=$?
     if [ $rc -ne 0 ]; then
         log "ERROR" "update_cache_meta failed (key='$key', rc=$rc) — cache_meta.json NOT modified"
