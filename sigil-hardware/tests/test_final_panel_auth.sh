@@ -17,5 +17,7 @@ grep -q 'panel/panel_auth.py' "${ROOT}/manifests/flasher-payload-files.txt"
 grep -q 'install -d -o root -g sigil -m 0750 /etc/sigil/secrets' "${ROOT}/install.sh"
 grep -q 'install -d -o root -g root -m 0700 /etc/sigil/manufacturing' "${ROOT}/install.sh"
 grep -q 'IDENTITY_HELPER="${SIGIL_IDENTITY_HELPER:-/opt/sigil/panel/device_identity.py}"' "${ROOT}/scripts/firstboot.sh"
+grep -Fq 'except (FileNotFoundError, PermissionError):' "${ROOT}/panel/app.py"
+grep -Fq '_secret_key = os.environ.get("SIGIL_SECRET_KEY") or _env.get("SIGIL_SECRET_KEY")' "${ROOT}/panel/app.py"
 
 echo "panel authentication contract: PASS"

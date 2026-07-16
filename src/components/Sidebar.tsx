@@ -205,7 +205,7 @@ export default function Sidebar({
         <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
           <div className="form-group">
             <label className="form-label">USUARIO</label>
-            <input type="text" className="form-input" value={username} onChange={(e) => setUsername(e.target.value)} placeholder="Introduce el nombre de usuario" />
+            <input type="text" className="form-input" value={username} onChange={(e) => setUsername(e.target.value)} readOnly aria-readonly="true" title="La imagen SIGIL usa la cuenta de sistema fija sigil" />
           </div>
           <div className="form-group">
             <label className="form-label">CONTRASEÑA</label>

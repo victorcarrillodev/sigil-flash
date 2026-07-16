@@ -33,8 +33,9 @@ pub struct FlashProgress {
     pub message: String,
 }
 
-/// Device configuration to be written to boot partition as device-config.json
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Manufacturing configuration consumed by the elevated image-preparation flow.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DeviceConfig {
     pub hostname: String,
     pub username: String,
@@ -49,4 +50,6 @@ pub struct DeviceConfig {
     pub rpi_model: Option<String>,
     #[serde(rename = "serialNumber")]
     pub serial_number: Option<String>,
+    #[serde(rename = "panelPin")]
+    pub panel_pin: Option<String>,
 }

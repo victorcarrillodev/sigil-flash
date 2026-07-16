@@ -230,6 +230,7 @@ SCRIPTS=(
     sigil-healthcheck.sh
     sigil-audio-route.sh
     sigil-audio-capability.sh
+    sigil-cache-meta-perms.sh
     sigil-cache-wipe.sh
     sigil-logout-fetch-operation.sh
     ssh-monitor.sh
@@ -547,6 +548,11 @@ log_step "Configurando NetworkManager"
 # Deshabilitar MAC randomization en WiFi — la Pi debe presentar siempre
 # su MAC real para que el servidor y el router la reconozcan de forma estable.
 mkdir -p /etc/NetworkManager/conf.d
+if grep -Eq '^[[:space:]]*unmanaged-devices[[:space:]]*=.*wlan0' \
+    "${REPO_DIR}/conf/99-sigil-mac-fixed.conf"; then
+    log_err "La política MAC no puede marcar wlan0 permanentemente como unmanaged"
+    exit 1
+fi
 cp "${REPO_DIR}/conf/99-sigil-mac-fixed.conf" /etc/NetworkManager/conf.d/99-sigil-mac-fixed.conf
 log_ok "MAC randomization deshabilitada (/etc/NetworkManager/conf.d/99-sigil-mac-fixed.conf)"
 

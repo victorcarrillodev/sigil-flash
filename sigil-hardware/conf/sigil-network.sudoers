@@ -1,10 +1,9 @@
-# Privileged commands invoked by the existing panel implementation. Keep this
-# list synchronized with panel/wifi.py and panel/app.py.
+# Privileged commands invoked by the panel. AP/client ownership is delegated
+# only to the canonical wifi-fallback helper.
 sigil ALL=(root) NOPASSWD: /usr/bin/nmcli
-sigil ALL=(root) NOPASSWD: /usr/bin/systemctl stop hostapd
-sigil ALL=(root) NOPASSWD: /usr/bin/systemctl stop dnsmasq
-sigil ALL=(root) NOPASSWD: /sbin/ip addr flush dev wlan0
-sigil ALL=(root) NOPASSWD: /usr/sbin/ip addr flush dev wlan0
+sigil ALL=(root) NOPASSWD: /usr/local/bin/wifi-fallback.sh --prepare-client
+sigil ALL=(root) NOPASSWD: /usr/local/bin/wifi-fallback.sh --restore-ap
+sigil ALL=(root) NOPASSWD: /usr/local/bin/wifi-fallback.sh --external-client-handoff
 sigil ALL=(root) NOPASSWD: /usr/sbin/iwlist wlan0 scan
 sigil ALL=(root) NOPASSWD: /sbin/iwlist wlan0 scan
 sigil ALL=(root) NOPASSWD: /usr/sbin/iw dev wlan0 set power_save off

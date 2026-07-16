@@ -121,13 +121,20 @@ class PanelPrivilegeSeparationTests(unittest.TestCase):
         self.assertNotRegex(policies, r"(?m)^.*NOPASSWD: /usr/bin/pactl\s*$")
         self.assertNotRegex(policies, r"(?m)^.*NOPASSWD: /usr/bin/pinctrl\s*$")
         for command in (
-            "/usr/bin/systemctl stop hostapd",
-            "/usr/bin/systemctl stop dnsmasq",
-            "/usr/sbin/ip addr flush dev wlan0",
+            "/usr/local/bin/wifi-fallback.sh --prepare-client",
+            "/usr/local/bin/wifi-fallback.sh --restore-ap",
+            "/usr/local/bin/wifi-fallback.sh --external-client-handoff",
             "/usr/sbin/iwlist wlan0 scan",
             "/usr/sbin/iw dev wlan0 set power_save off",
         ):
             self.assertIn(f"sigil ALL=(root) NOPASSWD: {command}", policies)
+
+        for ownership_bypass in (
+            "/usr/bin/systemctl stop hostapd",
+            "/usr/bin/systemctl stop dnsmasq",
+            "/usr/sbin/ip addr flush dev wlan0",
+        ):
+            self.assertNotIn(ownership_bypass, policies)
 
         for obsolete_command in (
             "/usr/bin/systemctl stop bt-connect",

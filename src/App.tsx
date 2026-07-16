@@ -80,11 +80,11 @@ export default function App() {
 
   // Custom OS configuration states
   const [sshEnabled, setSshEnabled] = useState(true);
-  const [username, setUsername] = useState("");
+  const [username, setUsername] = useState("sigil");
   const [password, setPassword] = useState("");
   const [pinPanel, setPinPanel] = useState("");
   const [logPassword, setLogPassword] = useState("");
-  const [hostname, setHostname] = useState("");
+  const [hostname, setHostname] = useState("sigil");
   const [serialNumber, setSerialNumber] = useState("");
   const [wifiSsid, setWifiSsid] = useState("");
   const [wifiPassword, setWifiPassword] = useState("");
@@ -133,6 +133,19 @@ export default function App() {
 
   const handleFlashClick = () => {
     if (!image || !device || isFlashing || flashRequestActive.current) return;
+    const validationError = validateManufacturingInputs({
+      rpiModel,
+      sshEnabled,
+      username,
+      password,
+      panelPin: pinPanel,
+      hostname,
+      serialNumber,
+    });
+    if (validationError) {
+      addLog(validationError, "error");
+      return;
+    }
     setShowConfirm(true);
   };
 
@@ -147,29 +160,27 @@ export default function App() {
     addLog(`Iniciando flasheo: ${image.name} → ${device.path}`, "info");
     addLog("Solicitando permisos de administrador...", "warning");
     try {
-      await invoke("start_flash", { imagePath: image.path, devicePath: device.path });
-      
-      if (!rpiModel.includes("Pico")) {
-        try {
-          addLog("Inyectando configuración y optimizaciones en la partición boot...", "warning");
-          const config = {
-            hostname,
-            username,
-            password: password || null,
-            wifiSsid: wifiSsid || null,
-            wifiPassword: wifiPassword || null,
-            sshEnabled,
-            rpiModel,
-            serialNumber: serialNumber || null,
-          };
-          await invoke("save_device_config", { mountPath: device.path, config });
-          addLog("¡Configuración y optimizaciones inyectadas con éxito!", "success");
-        } catch (configErr) {
-          addLog(`Advertencia: No se pudo inyectar la configuración: ${configErr}`, "warning");
-        }
-      }
+      const config = {
+        hostname,
+        username,
+        password: sshEnabled ? password || null : null,
+        wifiSsid: wifiSsid || null,
+        wifiPassword: wifiSsid ? wifiPassword || null : null,
+        sshEnabled,
+        rpiModel,
+        serialNumber: serialNumber || null,
+        panelPin: pinPanel || null,
+      };
+      await invoke("start_flash", {
+        imagePath: image.path,
+        devicePath: device.path,
+        config,
+      });
 
       setStep("done");
+      setPassword("");
+      setPinPanel("");
+      setLogPassword("");
       addLog("¡Proceso completado exitosamente!", "success");
     } catch (err) {
       addLog(`Error: ${err}`, "error");
@@ -197,9 +208,12 @@ export default function App() {
     setIsFlashing(false);
     setActiveTab("vista-previa");
     setSshEnabled(true);
-    setUsername("pi");
-    setPassword("raspberry");
-    setHostname("raspberrypi");
+    setUsername("sigil");
+    setPassword("");
+    setPinPanel("");
+    setLogPassword("");
+    setHostname("sigil");
+    setSerialNumber("");
     setWifiSsid("");
     setWifiPassword("");
   };
@@ -282,4 +296,47 @@ export default function App() {
       )}
     </div>
   );
+}
+
+interface ManufacturingInputs {
+  rpiModel: RPiModel;
+  sshEnabled: boolean;
+  username: string;
+  password: string;
+  panelPin: string;
+  hostname: string;
+  serialNumber: string;
+}
+
+export function validateManufacturingInputs(inputs: ManufacturingInputs): string | null {
+  if (inputs.rpiModel.includes("Pico")) {
+    return "El flujo de fabricación Linux no admite Raspberry Pi Pico.";
+  }
+  if (inputs.username !== "sigil") {
+    return "El usuario del sistema debe ser 'sigil'.";
+  }
+  if (!/^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$/.test(inputs.hostname)) {
+    return "El hostname debe tener entre 1 y 63 caracteres seguros.";
+  }
+  if (!/^[A-Za-z0-9._-]{1,64}$/.test(inputs.serialNumber)) {
+    return "El número de serie es obligatorio y solo admite letras, números, punto, guion y guion bajo.";
+  }
+  if (!/^\d{6,12}$/.test(inputs.panelPin)) {
+    return "El PIN del panel debe contener entre 6 y 12 dígitos.";
+  }
+  const repeatedPin = [...inputs.panelPin].every((digit) => digit === inputs.panelPin[0]);
+  const ascendingPin = "12345678901234567890".includes(inputs.panelPin);
+  const descendingPin = "98765432109876543210".includes(inputs.panelPin);
+  if (repeatedPin || ascendingPin || descendingPin) {
+    return "El PIN del panel es demasiado predecible.";
+  }
+  if (inputs.sshEnabled) {
+    if (inputs.password.length < 6 || inputs.password.length > 128) {
+      return "La contraseña SSH debe tener entre 6 y 128 caracteres.";
+    }
+    if (/[\r\n\0]/.test(inputs.password)) {
+      return "La contraseña SSH contiene caracteres no permitidos.";
+    }
+  }
+  return null;
 }

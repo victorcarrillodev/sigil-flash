@@ -21,12 +21,20 @@ cat > "${MOCK_BIN}/nmcli" <<'EOF'
 printf '%s\n' "$*" >> "$MOCK_STATE/nmcli_calls"
 case "$*" in
     "-t -f GENERAL.STATE device show wlan0")
-        if [ -f "$MOCK_STATE/associated" ]; then echo 'GENERAL.STATE:100 (connected)'; else echo 'GENERAL.STATE:30 (disconnected)'; fi
+        if [ -f "$MOCK_STATE/nm_unmanaged" ]; then
+            echo 'GENERAL.STATE:10 (unmanaged)'
+        elif [ -f "$MOCK_STATE/associated" ]; then
+            echo 'GENERAL.STATE:100 (connected)'
+        else
+            echo 'GENERAL.STATE:30 (disconnected)'
+        fi
         ;;
     "-t -f NAME,DEVICE connection show --active")
         [ -f "$MOCK_STATE/active_profile" ] && echo 'KnownNet:wlan0'
         ;;
-    "-t -f NAME,TYPE connection show") echo 'KnownNet:802-11-wireless' ;;
+    "-t -f NAME,TYPE connection show")
+        [ -f "$MOCK_STATE/no_saved_profiles" ] || echo 'KnownNet:802-11-wireless'
+        ;;
     "connection down id KnownNet") exit 0 ;;
     "connection up id KnownNet")
         if [ -f "$MOCK_STATE/recovery_success" ]; then
@@ -36,7 +44,7 @@ case "$*" in
         fi
         exit 1
         ;;
-    --passwd-file\ *\ con\ up\ KnownNet|"con up KnownNet")
+    con\ up\ KnownNet\ passwd-file\ *|"con up KnownNet")
         [ ! -f "$MOCK_STATE/panel_up_fail" ]
         ;;
     *) exit 0 ;;
@@ -246,6 +254,14 @@ test_threshold_starts_ap() {
         && [ "$(grep -c '^start dnsmasq$' "${MOCK_STATE}/systemctl_calls")" -eq 1 ]
 }
 
+test_fresh_boot_without_profile_starts_ap() {
+    touch "${MOCK_STATE}/no_saved_profiles"
+    run_cycle; run_cycle; run_cycle
+    state_is AP_ACTIVE \
+        && [ -f "${MOCK_STATE}/service_hostapd" ] \
+        && [ -f "${MOCK_STATE}/service_dnsmasq" ]
+}
+
 test_connected_dead_gateway_is_link_dead_transition() {
     set_dead_gateway
     run_cycle; run_cycle; run_cycle
@@ -297,6 +313,24 @@ test_failed_recovery_restores_ap_once() {
 
 test_active_ap_has_no_duplicate_services() {
     write_ap_state "$(( $(date +%s) + 1000 ))"
+    run_cycle
+    ! grep -q '^start hostapd$' "${MOCK_STATE}/systemctl_calls" \
+        && ! grep -q '^start dnsmasq$' "${MOCK_STATE}/systemctl_calls"
+}
+
+test_ap_ownership_is_exclusive() {
+    run_cycle; run_cycle; run_cycle
+    state_is AP_ACTIVE \
+        && grep -q '^device set wlan0 managed no$' "${MOCK_STATE}/nmcli_calls" \
+        && grep -q '^addr add 192.168.4.1/24 dev wlan0$' "${MOCK_STATE}/ip_calls" \
+        && [ -f "${MOCK_STATE}/service_hostapd" ] \
+        && [ -f "${MOCK_STATE}/service_dnsmasq" ] \
+        && ! grep -q '^device set wlan0 managed yes$' "${MOCK_STATE}/nmcli_calls"
+}
+
+test_repeated_ap_reconciliation_is_idempotent() {
+    write_ap_state "$(( $(date +%s) + 1000 ))"
+    run_cycle
     run_cycle
     ! grep -q '^start hostapd$' "${MOCK_STATE}/systemctl_calls" \
         && ! grep -q '^start dnsmasq$' "${MOCK_STATE}/systemctl_calls"
@@ -404,6 +438,36 @@ test_panel_local_only_handoff_does_not_restore_ap() {
         && ! grep -q '^start dnsmasq$' "${MOCK_STATE}/systemctl_calls"
 }
 
+test_panel_uses_canonical_ownership_helper() {
+    write_ap_state "$(( $(date +%s) + 1000 ))"
+    set_online
+    run_panel_connect 1 || return 1
+    grep -qxF "${SIGIL_WIFI_FALLBACK_HELPER} --prepare-client" \
+        "${MOCK_STATE}/sudo_calls" || return 1
+    grep -qxF "${SIGIL_WIFI_FALLBACK_HELPER} --external-client-handoff" \
+        "${MOCK_STATE}/sudo_calls" || return 1
+    ! grep -q '^systemctl stop \|^ip addr flush \|^nmcli device set wlan0 managed' \
+        "${MOCK_STATE}/sudo_calls"
+}
+
+test_client_ownership_is_exclusive() {
+    write_ap_state "$(( $(date +%s) + 1000 ))"
+    set_online
+    run_panel_connect 1 || return 1
+    [ ! -f "${MOCK_STATE}/service_hostapd" ] \
+        && [ ! -f "${MOCK_STATE}/service_dnsmasq" ] \
+        && grep -q '^device set wlan0 managed yes$' "${MOCK_STATE}/nmcli_calls" \
+        && ! grep -q '^device set wlan0 managed no$' "${MOCK_STATE}/nmcli_calls"
+}
+
+test_static_mac_policy_never_blocks_client_ownership() {
+    local policy="${ROOT}/conf/99-sigil-mac-fixed.conf"
+    grep -qx 'wifi.scan-rand-mac-address=no' "$policy" \
+        && grep -qx 'wifi.cloned-mac-address=permanent' "$policy" \
+        && ! grep -Eq 'unmanaged-devices|managed[[:space:]]*=[[:space:]]*false' "$policy" \
+        && grep -q 'unmanaged-devices.*wlan0' "${ROOT}/install.sh"
+}
+
 test_failed_panel_transition_restores_ap_once() {
     local original_retry="$(( $(date +%s) + 1000 ))"
     write_ap_state "$original_retry"
@@ -413,6 +477,7 @@ test_failed_panel_transition_restores_ap_once() {
     touch "${MOCK_STATE}/panel_up_fail"
     run_panel_connect 0 || return 1
     [ ! -e "$INHIBIT_FILE" ] || return 1
+    [ "$(grep -c -- '--restore-ap$' "${MOCK_STATE}/sudo_calls")" -eq 1 ] || return 1
     state_is AP_ACTIVE || return 1
     [ "${WIFI_STATE[REASON]}" = preexisting_ap_failure ] || return 1
     [ "${WIFI_STATE[RECOVERY_BACKOFF]}" = 120 ] || return 1
@@ -425,6 +490,16 @@ test_failed_panel_transition_restores_ap_once() {
     run_cycle
     [ "$(grep -c '^start hostapd$' "${MOCK_STATE}/systemctl_calls")" -eq 1 ] \
         && [ "$(grep -c '^start dnsmasq$' "${MOCK_STATE}/systemctl_calls")" -eq 1 ]
+}
+
+test_unmanaged_client_preparation_fails_closed_to_ap() {
+    write_ap_state "$(( $(date +%s) + 1000 ))"
+    touch "${MOCK_STATE}/nm_unmanaged"
+    run_panel_connect 0 || return 1
+    state_is AP_ACTIVE \
+        && [ -f "${MOCK_STATE}/service_hostapd" ] \
+        && [ -f "${MOCK_STATE}/service_dnsmasq" ] \
+        && [ "$(grep -c -- '--restore-ap$' "${MOCK_STATE}/sudo_calls")" -eq 1 ]
 }
 
 test_panel_transitions_share_one_lock() {
@@ -502,9 +577,9 @@ def fake_run(args, **_kwargs):
     joined = ' '.join(args)
     if 'connection show' in joined:
         return Result(stdout='KnownNet:802-11-wireless\n')
-    if '--passwd-file' in args:
+    if 'passwd-file' in args:
         inhibit_seen = inhibit_seen or os.path.exists(wifi.WIFI_INHIBIT_FILE)
-        password_file = args[args.index('--passwd-file') + 1]
+        password_file = args[args.index('passwd-file') + 1]
         assert oct(os.stat(password_file).st_mode & 0o777) == '0o600'
         return Result(1 if fail_up else 0)
     if 'GENERAL.STATE' in args:
@@ -523,6 +598,9 @@ secret = 'test-password-not-for-logs'
 with patch.object(subprocess, 'run', side_effect=fake_run), patch.object(wifi.time, 'sleep', return_value=None):
     success, _message = wifi.connect_wifi('KnownNet', secret)
 assert success and inhibit_seen
+activation = next(command for command in commands if 'passwd-file' in command)
+assert activation[:6] == ['sudo', 'nmcli', 'con', 'up', 'KnownNet', 'passwd-file']
+assert '--passwd-file' not in activation
 assert not os.path.exists(wifi.WIFI_INHIBIT_FILE)
 assert not any(
     'systemctl' in command and 'wifi-fallback' in command
@@ -549,18 +627,25 @@ run_test "Internet-only outage remains CLIENT_LOCAL_ONLY without AP flapping" te
 run_test "CLIENT_LOCAL_ONLY requires consecutive Internet recovery probes" test_local_only_requires_stable_recovery
 run_test "one or two temporary failures do not start AP" test_temporary_failures_do_not_start_ap
 run_test "no client link after threshold enters AP_ACTIVE once" test_threshold_starts_ap
+run_test "fresh boot without a client profile starts the provisioning AP" test_fresh_boot_without_profile_starts_ap
 run_test "connected NM state with dead gateway confirms link-dead transition" test_connected_dead_gateway_is_link_dead_transition
 run_test "dead profile is deactivated at most once per transition" test_dead_profile_deactivated_once
 run_test "AP recovery respects persisted retry cooldown" test_recovery_cooldown_respected
 run_test "known-profile recovery leaves AP and enters client mode" test_successful_ap_recovery
 run_test "failed recovery restores AP exactly once with backoff" test_failed_recovery_restores_ap_once
 run_test "active AP services are not duplicated" test_active_ap_has_no_duplicate_services
+run_test "AP mode owns wlan0 exclusively" test_ap_ownership_is_exclusive
+run_test "repeated AP reconciliation is idempotent" test_repeated_ap_reconciliation_is_idempotent
 run_test "a second wifi-fallback process is refused by the canonical lock" test_duplicate_fallback_process_refused
 run_test "panel inhibit prevents fallback AP activation" test_inhibit_blocks_ap
 run_test "expired inhibit is removed and monitoring resumes" test_expired_inhibit_removed
 run_test "panel handoff clears stale AP before the next online cycle" test_panel_success_handoff_prevents_stale_ap_restart
 run_test "panel local-only handoff does not reactivate AP" test_panel_local_only_handoff_does_not_restore_ap
+run_test "panel delegates ownership only to wifi-fallback" test_panel_uses_canonical_ownership_helper
+run_test "client mode gives NetworkManager exclusive wlan0 ownership" test_client_ownership_is_exclusive
+run_test "stable MAC policy contains no permanent unmanaged rule" test_static_mac_policy_never_blocks_client_ownership
 run_test "failed panel transition restores AP exactly once" test_failed_panel_transition_restores_ap_once
+run_test "permanently unmanaged client preparation fails closed to AP" test_unmanaged_client_preparation_fails_closed_to_ap
 run_test "two panel transitions serialize on the canonical lock" test_panel_transitions_share_one_lock
 run_test "panel credentials never enter logs or argv" test_panel_credentials_never_reach_logs_or_argv
 run_test "panel transition uses bounded inhibit and hides password" test_panel_transition_contract

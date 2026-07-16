@@ -42,6 +42,10 @@ check "payload manifest is generated" test -f "${PAYLOAD}/payload-manifest.json"
 check "installer is included" test -x "${PAYLOAD}/install.sh"
 check "runtime panel is included" test -f "${PAYLOAD}/panel/geolocation.py"
 check "runtime scripts are included" test -f "${PAYLOAD}/scripts/firstboot.sh"
+check "runtime cache metadata helper is included" \
+    test -f "${PAYLOAD}/scripts/sigil-cache-meta-perms.sh"
+check "installer installs runtime cache metadata helper" \
+    grep -Eq '^[[:space:]]+sigil-cache-meta-perms\.sh$' "${PAYLOAD}/install.sh"
 check "systemd units are included" test -f "${PAYLOAD}/services/ssh-monitor.service"
 check "runtime configuration is included" test -f "${PAYLOAD}/conf/sigil-tmpfiles.conf"
 check "development trees are excluded" test ! -e "${PAYLOAD}/tests"

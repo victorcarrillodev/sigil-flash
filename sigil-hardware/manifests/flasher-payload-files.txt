@@ -25,6 +25,7 @@ scripts/radio-stream.sh
 scripts/set-a2dp.sh
 scripts/sigil-audio-route.sh
 scripts/sigil-audio-capability.sh
+scripts/sigil-cache-meta-perms.sh
 scripts/sigil-cache-wipe.sh
 scripts/sigil-healthcheck.sh
 scripts/sigil-leds.sh

@@ -91,6 +91,7 @@ bluetooth.remove_device = lambda _mac: (True, "ok")
 sys.modules["bluetooth"] = bluetooth
 
 wifi = types.ModuleType("wifi")
+wifi.WifiScanBusy = type("WifiScanBusy", (RuntimeError,), {})
 wifi.scan_wifi_networks = lambda: []
 wifi.connect_wifi = lambda _ssid, _password: (True, "ok")
 wifi.get_current_wifi = lambda: ""

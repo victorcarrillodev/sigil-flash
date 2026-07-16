@@ -261,6 +261,10 @@ document.getElementById('scanWifiBtn').addEventListener('click', function() {
   fetch('/wifi/scan')
     .then(function(r) { return r.json(); })
     .then(function(data) {
+      if (data.busy) {
+        scanEl.textContent = data.message || 'Radio ocupado; reintenta en breve.';
+        return;
+      }
       if (data.networks.length === 0) {
         tableEl.innerHTML = '<div class="no-devices">No se encontraron redes.</div>';
       } else {

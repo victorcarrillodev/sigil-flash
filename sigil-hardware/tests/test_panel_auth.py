@@ -113,6 +113,7 @@ def load_panel_app(hash_path: Path):
     sys.modules["bluetooth"] = bluetooth
 
     wifi = types.ModuleType("wifi")
+    wifi.WifiScanBusy = type("WifiScanBusy", (RuntimeError,), {})
     wifi.scan_wifi_networks = lambda: []
     wifi.connect_wifi = lambda _ssid, _password: (True, "ok")
     wifi.get_current_wifi = lambda: ""
@@ -185,9 +186,12 @@ class FlaskAuthenticationTests(unittest.TestCase):
         self.assertEqual(self.client.get("/").status_code, 302)
         captive = self.client.get("/generate_204")
         self.assertEqual(captive.status_code, 302)
-        self.assertTrue(captive.headers["Location"].endswith("/login"))
+        self.assertEqual(captive.headers["Location"], "http://192.168.4.1/login")
         external_host = self.client.get("/generate_204", headers={"Host": "connectivity-check.invalid"})
         self.assertEqual(external_host.status_code, 302)
+        self.assertEqual(
+            external_host.headers["Location"], "http://192.168.4.1/login"
+        )
 
     def test_correct_pin_creates_session_csrf_protects_mutation_and_logout_clears_it(self):
         response = self.authenticate()
@@ -218,6 +222,22 @@ class FlaskAuthenticationTests(unittest.TestCase):
             base_url="https://localhost",
         )
         self.assertIn("Secure", response.headers.get("Set-Cookie", ""))
+
+    def test_busy_wifi_scan_returns_bounded_retry_without_side_effects(self):
+        self.authenticate()
+
+        def busy_scan():
+            raise self.module.WifiScanBusy("Radio ocupado")
+
+        self.module.scan_wifi_networks = busy_scan
+        response = self.client.get("/wifi/scan")
+        self.assertEqual(response.status_code, 409)
+        document = response.get_json()
+        self.assertFalse(document["success"])
+        self.assertTrue(document["busy"])
+        self.assertEqual(document["networks"], [])
+        self.assertGreater(document["retry_after_ms"], 0)
+        self.assertLessEqual(document["retry_after_ms"], 5000)
 
     def test_failed_attempts_have_bounded_backoff_and_logs_do_not_contain_pin(self):
         token = self.csrf_from_login()

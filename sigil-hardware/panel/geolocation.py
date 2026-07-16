@@ -18,7 +18,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-from wifi import scan_wifi_aps
+from wifi import WifiScanBusy, scan_wifi_aps
 from device_identity import resolve_device_id
 
 logger = logging.getLogger(__name__)
@@ -151,7 +151,16 @@ def geolocate(server_url: str, api_key: str, device_id: str, config: dict) -> di
     max_aps = int(config.get("SIGIL_GEOLOCATION_MAX_APS", 30))
     timeout_sec = int(config.get("SIGIL_GEOLOCATION_TIMEOUT_SECONDS", 10))
 
-    aps = scan_wifi_aps()
+    try:
+        aps = scan_wifi_aps()
+    except WifiScanBusy:
+        logger.info("WiFi scan deferred: radio scan or transition is busy")
+        return {
+            "success": False,
+            "error": "wifi_scan_busy",
+            "retryable": True,
+            "ap_count": 0,
+        }
 
     if len(aps) < min_aps:
         return {

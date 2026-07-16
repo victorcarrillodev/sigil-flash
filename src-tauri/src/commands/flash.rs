@@ -1,7 +1,7 @@
-use crate::models::ImageInfo;
 use crate::errors::AppResult;
-use crate::services::flash_service::{FlashService, get_xz_uncompressed_size};
-use tauri::{State, AppHandle};
+use crate::models::{DeviceConfig, ImageInfo};
+use crate::services::flash_service::{get_xz_uncompressed_size, FlashService};
+use tauri::{AppHandle, State};
 
 #[tauri::command]
 pub async fn get_image_info(path: String) -> AppResult<ImageInfo> {
@@ -32,17 +32,18 @@ pub async fn get_image_info(path: String) -> AppResult<ImageInfo> {
 pub async fn start_flash(
     image_path: String,
     device_path: String,
+    config: DeviceConfig,
     app: AppHandle,
     flash_service: State<'_, FlashService>,
 ) -> AppResult<()> {
     tracing::info!("Iniciando escritura de: {} en: {}", image_path, device_path);
-    flash_service.start_flash(&image_path, &device_path, app).await
+    flash_service
+        .start_flash(&image_path, &device_path, &config, app)
+        .await
 }
 
 #[tauri::command]
-pub async fn cancel_flash(
-    flash_service: State<'_, FlashService>
-) -> AppResult<()> {
+pub async fn cancel_flash(flash_service: State<'_, FlashService>) -> AppResult<()> {
     tracing::info!("Comando de cancelación de flasheo invocado.");
     flash_service.cancel_flash().await
 }
@@ -51,7 +52,7 @@ pub async fn cancel_flash(
 pub async fn get_hardware_size() -> AppResult<u64> {
     let path = "/home/dev-pro/Escritorio/sigil-flash/sigil-hardware";
     let mut total_size = 0;
-    
+
     fn dir_size(dir: &std::path::Path) -> std::io::Result<u64> {
         let mut size = 0;
         if dir.is_dir() {
@@ -67,10 +68,10 @@ pub async fn get_hardware_size() -> AppResult<u64> {
         }
         Ok(size)
     }
-    
+
     if let Ok(size) = dir_size(std::path::Path::new(path)) {
         total_size = size;
     }
-    
+
     Ok(total_size)
 }

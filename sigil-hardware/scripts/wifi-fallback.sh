@@ -3,7 +3,7 @@
 set -uo pipefail
 IFS=$'\n\t'
 
-VERSION="3.0.0"
+VERSION="3.1.0"
 LOG_TAG="[wifi-fallback]"
 AP_INTERFACE="${SIGIL_WIFI_INTERFACE:-wlan0}"
 AP_IP="${SIGIL_WIFI_AP_IP:-192.168.4.1}"
@@ -23,6 +23,7 @@ LOCAL_PROBE_MAX_BACKOFF="${SIGIL_WIFI_LOCAL_PROBE_MAX_BACKOFF:-300}"
 PROBE_TIMEOUT="${SIGIL_WIFI_PROBE_TIMEOUT:-4}"
 RECOVERY_STABILIZATION_SECONDS="${SIGIL_WIFI_RECOVERY_STABILIZATION_SECONDS:-60}"
 RECOVERY_CHECK_INTERVAL="${SIGIL_WIFI_RECOVERY_CHECK_INTERVAL:-5}"
+CLIENT_OWNERSHIP_TIMEOUT="${SIGIL_WIFI_CLIENT_OWNERSHIP_TIMEOUT:-10}"
 DNS_HOST_1="${SIGIL_WIFI_DNS_HOST_1:-deb.debian.org}"
 DNS_HOST_2="${SIGIL_WIFI_DNS_HOST_2:-www.raspberrypi.com}"
 HTTPS_ENDPOINT_1="${SIGIL_WIFI_HTTPS_ENDPOINT_1:-https://connectivitycheck.gstatic.com/generate_204}"
@@ -31,6 +32,8 @@ HTTPS_ENDPOINT_2="${SIGIL_WIFI_HTTPS_ENDPOINT_2:-https://www.debian.org/}"
 DRY_RUN=0
 ONE_SHOT=0
 EXTERNAL_CLIENT_HANDOFF=0
+PREPARE_EXTERNAL_CLIENT=0
+RESTORE_EXTERNAL_AP=0
 PROBE_STATE="CLIENT_CONNECTING"
 PROBE_REASON="not_checked"
 PROBE_GATEWAY=""
@@ -113,10 +116,10 @@ persist_state() {
     log "state=${state} reason=${reason} fail=${WIFI_STATE[FAIL_COUNT]} success=${WIFI_STATE[SUCCESS_COUNT]} next_retry=${WIFI_STATE[NEXT_RETRY_AT]}"
 }
 
-record_external_client_handoff() {
-    local now lock_probe_fd
+panel_transition_context_active() {
+    local lock_probe_fd
     inhibit_active || {
-        log "external client handoff rejected: no active panel inhibit"
+        log "panel ownership request rejected: no active panel inhibit"
         return 1
     }
 
@@ -124,9 +127,43 @@ record_external_client_handoff() {
     # non-blocking acquisition proves it does not, so reject the handoff.
     if acquire_transition_lock lock_probe_fd; then
         release_transition_lock "$lock_probe_fd"
-        log "external client handoff rejected: transition lock not held"
+        log "panel ownership request rejected: transition lock not held"
         return 1
     fi
+}
+
+prepare_external_client_ownership() {
+    panel_transition_context_active || return 1
+    stop_ap_services || {
+        log "panel client preparation failed: NetworkManager did not take ${AP_INTERFACE}"
+        return 1
+    }
+    log "panel client preparation complete: NetworkManager owns ${AP_INTERFACE}"
+}
+
+restore_external_ap_ownership() {
+    local now
+    panel_transition_context_active || return 1
+    load_state
+    start_ap_services || {
+        log "panel rollback failed: AP ownership could not be restored"
+        return 1
+    }
+    if [ "${WIFI_STATE[AP_ACTIVE]}" != "1" ]; then
+        now=$(date +%s)
+        WIFI_STATE[AP_ACTIVE]="1"
+        WIFI_STATE[CLIENT_STATE]="CLIENT_CONNECTING"
+        WIFI_STATE[FAIL_COUNT]="0"
+        WIFI_STATE[SUCCESS_COUNT]="0"
+        WIFI_STATE[NEXT_RETRY_AT]="$((now + AP_RECOVERY_INTERVAL))"
+        persist_state "AP_ACTIVE" "panel_client_rollback" "$now"
+    fi
+    log "panel rollback complete: AP ownership restored"
+}
+
+record_external_client_handoff() {
+    local now
+    panel_transition_context_active || return 1
 
     now=$(date +%s)
     load_state
@@ -303,6 +340,24 @@ stop_ap_services() {
     ip addr flush dev "$AP_INTERFACE" >/dev/null 2>&1 || true
     nmcli device set "$AP_INTERFACE" managed yes >/dev/null 2>&1 || return 1
     rfkill unblock wifi >/dev/null 2>&1 || true
+    wait_for_nm_ownership
+}
+
+nm_owns_interface() {
+    local state
+    state=$(nmcli -t -f GENERAL.STATE device show "$AP_INTERFACE" 2>/dev/null) \
+        || return 1
+    [[ "$state" != *unmanaged* && "$state" != *":10 "* && "$state" != "10 "* ]]
+}
+
+wait_for_nm_ownership() {
+    local elapsed=0
+    while (( elapsed <= CLIENT_OWNERSHIP_TIMEOUT )); do
+        nm_owns_interface && return 0
+        sleep 1
+        elapsed=$((elapsed + 1))
+    done
+    return 1
 }
 
 ensure_ap_services() {
@@ -521,7 +576,7 @@ run_cycle() {
 }
 
 usage() {
-    printf 'Usage: %s [--oneshot|--dry-run|--external-client-handoff]\n' "$(basename "$0")"
+    printf 'Usage: %s [--oneshot|--dry-run|--prepare-client|--restore-ap|--external-client-handoff]\n' "$(basename "$0")"
 }
 
 parse_args() {
@@ -529,6 +584,8 @@ parse_args() {
         case "$1" in
             --oneshot) ONE_SHOT=1 ;;
             --dry-run) DRY_RUN=1; ONE_SHOT=1 ;;
+            --prepare-client) PREPARE_EXTERNAL_CLIENT=1 ;;
+            --restore-ap) RESTORE_EXTERNAL_AP=1 ;;
             --external-client-handoff) EXTERNAL_CLIENT_HANDOFF=1 ;;
             -h|--help) usage; return 1 ;;
             *) printf 'unknown option: %s\n' "$1" >&2; return 2 ;;
@@ -539,6 +596,14 @@ parse_args() {
 
 main() {
     parse_args "$@" || return $?
+    if [ "$PREPARE_EXTERNAL_CLIENT" -eq 1 ]; then
+        prepare_external_client_ownership
+        return
+    fi
+    if [ "$RESTORE_EXTERNAL_AP" -eq 1 ]; then
+        restore_external_ap_ownership
+        return
+    fi
     if [ "$EXTERNAL_CLIENT_HANDOFF" -eq 1 ]; then
         record_external_client_handoff
         return

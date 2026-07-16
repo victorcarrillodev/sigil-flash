@@ -1,8 +1,9 @@
 use crate::errors::{AppError, AppResult};
-use crate::models::FlashProgress;
+use crate::models::{DeviceConfig, FlashProgress};
 use sha2::{Digest, Sha256};
 use std::io::{ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
+use std::process::{Output, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter};
@@ -21,6 +22,55 @@ pub struct FlashService {
 
 const ELEVATED_LAUNCHER_GRACE: Duration = Duration::from_secs(2);
 const DETACHED_WRITER_TIMEOUT: Duration = Duration::from_secs(45 * 60);
+const MAX_PRIVATE_CONFIG_BYTES: u64 = 16 * 1024;
+
+struct PrivateConfigFile {
+    path: PathBuf,
+}
+
+impl PrivateConfigFile {
+    #[cfg(unix)]
+    fn create(config: &DeviceConfig) -> AppResult<Self> {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_nanos());
+        let path = std::env::temp_dir().join(format!(
+            "sigil-manufacturing-config-{}-{nonce}.json",
+            std::process::id()
+        ));
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)?;
+        if let Err(error) = serde_json::to_writer(&mut file, config) {
+            let _ = std::fs::remove_file(&path);
+            return Err(error.into());
+        }
+        file.sync_all()?;
+        Ok(Self { path })
+    }
+
+    #[cfg(not(unix))]
+    fn create(config: &DeviceConfig) -> AppResult<Self> {
+        let _ = config;
+        Err(AppError::Validation(
+            "El aprovisionamiento seguro integrado requiere un host Unix".into(),
+        ))
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for PrivateConfigFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
 
 #[derive(Debug, PartialEq, Eq)]
 enum FlashCompletion {
@@ -87,6 +137,7 @@ impl FlashService {
         &self,
         image_path: &str,
         device_path: &str,
+        config: &DeviceConfig,
         app: AppHandle,
     ) -> AppResult<()> {
         let _operation_guard = self.operation_lock.try_lock().map_err(|_| {
@@ -104,7 +155,9 @@ impl FlashService {
                 "La ruta del archivo de imagen no existe".to_string(),
             ));
         }
+        validate_device_config(config)?;
         validate_bundle_for_image(&image_p, &self.offline_packages, &self.package_contract)?;
+        let private_config = PrivateConfigFile::create(config)?;
 
         // 1. Establish progress monitoring file in temp directory
         let progress_file = unique_progress_path();
@@ -135,6 +188,8 @@ impl FlashService {
             progress_file.to_string_lossy().to_string(),
             "--offline-packages".to_string(),
             self.offline_packages.to_string_lossy().to_string(),
+            "--config-file".to_string(),
+            private_config.path().to_string_lossy().to_string(),
         ];
 
         // 3. Spawn elevated command depending on platform
@@ -349,6 +404,158 @@ fn unique_progress_path() -> PathBuf {
     ))
 }
 
+fn validate_device_config(config: &DeviceConfig) -> AppResult<()> {
+    if config.username != "sigil" {
+        return Err(AppError::Validation(
+            "El usuario del sistema debe ser 'sigil'".into(),
+        ));
+    }
+    if !is_valid_hostname(&config.hostname) {
+        return Err(AppError::Validation(
+            "El hostname debe tener entre 1 y 63 caracteres seguros".into(),
+        ));
+    }
+    let serial = config.serial_number.as_deref().ok_or_else(|| {
+        AppError::Validation("El número de serie de fabricación es obligatorio".into())
+    })?;
+    if serial.is_empty()
+        || serial.len() > 64
+        || !serial
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || "._-".contains(character))
+    {
+        return Err(AppError::Validation(
+            "El número de serie contiene caracteres no permitidos".into(),
+        ));
+    }
+    let rpi_model = config
+        .rpi_model
+        .as_deref()
+        .ok_or_else(|| AppError::Validation("El modelo de Raspberry Pi es obligatorio".into()))?;
+    if !matches!(
+        rpi_model,
+        "Raspberry Pi 5 (64-bit)"
+            | "Raspberry Pi 4 (64-bit)"
+            | "Raspberry Pi 3 (64-bit)"
+            | "Raspberry Pi Zero 2 W (64-bit)"
+    ) {
+        return Err(AppError::Validation(
+            "El bundle ARM64 solo admite modelos Raspberry Pi de 64 bits compatibles".into(),
+        ));
+    }
+    validate_panel_pin(config.panel_pin.as_deref())?;
+
+    if config.ssh_enabled {
+        let password = config.password.as_deref().ok_or_else(|| {
+            AppError::Validation("La contraseña SSH es obligatoria cuando SSH está activo".into())
+        })?;
+        if !(6..=128).contains(&password.len())
+            || password
+                .chars()
+                .any(|character| matches!(character, '\r' | '\n' | '\0'))
+        {
+            return Err(AppError::Validation(
+                "La contraseña SSH debe tener entre 6 y 128 caracteres válidos".into(),
+            ));
+        }
+    }
+
+    match (&config.wifi_ssid, &config.wifi_password) {
+        (None, None) => {}
+        (Some(ssid), Some(password))
+            if !ssid.is_empty()
+                && ssid.len() <= 32
+                && !ssid
+                    .chars()
+                    .any(|character| matches!(character, '\r' | '\n' | '\0'))
+                && (8..=63).contains(&password.len())
+                && !password
+                    .chars()
+                    .any(|character| matches!(character, '\r' | '\n' | '\0')) => {}
+        _ => {
+            return Err(AppError::Validation(
+                "La red Wi-Fi requiere SSID y contraseña WPA válidos".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn is_valid_hostname(hostname: &str) -> bool {
+    let bytes = hostname.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= 63
+        && bytes.first().is_some_and(u8::is_ascii_alphanumeric)
+        && bytes.last().is_some_and(u8::is_ascii_alphanumeric)
+        && bytes
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'-')
+}
+
+fn validate_panel_pin(pin: Option<&str>) -> AppResult<()> {
+    let pin = pin.ok_or_else(|| {
+        AppError::Validation("El PIN del panel es obligatorio para fabricación".into())
+    })?;
+    if !(6..=12).contains(&pin.len()) || !pin.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(AppError::Validation(
+            "El PIN del panel debe contener entre 6 y 12 dígitos".into(),
+        ));
+    }
+    let repeated = pin.bytes().all(|byte| Some(byte) == pin.bytes().next());
+    let ascending = "12345678901234567890".contains(pin);
+    let descending = "98765432109876543210".contains(pin);
+    if repeated || ascending || descending {
+        return Err(AppError::Validation(
+            "El PIN del panel es demasiado predecible".into(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn read_private_device_config(path: &Path) -> AppResult<DeviceConfig> {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+
+    let before = std::fs::symlink_metadata(path)?;
+    if !before.file_type().is_file() || before.file_type().is_symlink() {
+        return Err(AppError::Validation(
+            "La configuración temporal debe ser un archivo regular".into(),
+        ));
+    }
+    if before.len() > MAX_PRIVATE_CONFIG_BYTES || before.permissions().mode() & 0o077 != 0 {
+        return Err(AppError::Validation(
+            "La configuración temporal tiene tamaño o permisos inseguros".into(),
+        ));
+    }
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .open(path)?;
+    let opened = file.metadata()?;
+    if before.dev() != opened.dev() || before.ino() != opened.ino() {
+        return Err(AppError::Validation(
+            "La configuración temporal cambió mientras se abría".into(),
+        ));
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_PRIVATE_CONFIG_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_PRIVATE_CONFIG_BYTES {
+        return Err(AppError::Validation(
+            "La configuración temporal excede el tamaño permitido".into(),
+        ));
+    }
+    serde_json::from_slice(&bytes).map_err(Into::into)
+}
+
+#[cfg(not(unix))]
+fn read_private_device_config(path: &Path) -> AppResult<DeviceConfig> {
+    let _ = path;
+    Err(AppError::Validation(
+        "El aprovisionamiento seguro integrado requiere un host Unix".into(),
+    ))
+}
+
 /// Prevents independent application instances from writing the same device.
 ///
 /// The elevated writer owns this lock for the complete write and post-install
@@ -447,7 +654,16 @@ pub async fn run_raw_flash_cli(
     dest: &str,
     progress_file: &str,
     offline_packages: &str,
+    config_file: &str,
 ) -> AppResult<()> {
+    let config = read_private_device_config(Path::new(config_file))?;
+    validate_device_config(&config)?;
+    std::fs::remove_file(config_file).map_err(|error| {
+        AppError::Validation(format!(
+            "No se pudo eliminar la configuración temporal después de consumirla: {error}"
+        ))
+    })?;
+
     // Safety verification check: Block writing to critical mountpoints on Linux/macOS
     #[cfg(unix)]
     {
@@ -593,7 +809,7 @@ pub async fn run_raw_flash_cli(
     }
 
     // Perform offline installation of sigil-hardware on the microSD
-    if let Err(e) = install_sigil_hardware(dest, Path::new(offline_packages)) {
+    if let Err(e) = install_sigil_hardware(dest, Path::new(offline_packages), &config) {
         let err_progress = FlashProgress {
             bytes_written: total_bytes,
             total_bytes,
@@ -752,7 +968,349 @@ pub fn get_xz_uncompressed_size(path: &str) -> AppResult<u64> {
     ))
 }
 
-fn install_sigil_hardware(device: &str, offline_packages: &Path) -> AppResult<()> {
+fn write_manufacturing_provision(root: &Path, config: &DeviceConfig) -> AppResult<()> {
+    let serial = config.serial_number.as_deref().ok_or_else(|| {
+        AppError::Validation("El número de serie de fabricación es obligatorio".into())
+    })?;
+    let provision = serde_json::json!({
+        "_schema_version": "1.0",
+        "serial_number": serial,
+        "model": "Sigil-Streamer",
+        "model_version": "v1",
+        "batch": format!("flash-{}", chrono::Utc::now().format("%Y-%m")),
+        "capabilities": {
+            "i2s_dac": false
+        }
+    });
+    let boot = root.join("boot/firmware");
+    std::fs::create_dir_all(&boot)?;
+    std::fs::write(
+        boot.join("sigil_provision.json"),
+        serde_json::to_vec_pretty(&provision)?,
+    )?;
+    Ok(())
+}
+
+fn apply_hostname(root: &Path, hostname: &str) -> AppResult<()> {
+    if !is_valid_hostname(hostname) {
+        return Err(AppError::Validation("Hostname inválido".into()));
+    }
+    std::fs::write(root.join("etc/hostname"), format!("{hostname}\n"))?;
+    let hosts_path = root.join("etc/hosts");
+    let original = std::fs::read_to_string(&hosts_path).unwrap_or_default();
+    let mut found = false;
+    let mut lines = original
+        .lines()
+        .map(|line| {
+            if line
+                .split_whitespace()
+                .next()
+                .is_some_and(|address| address == "127.0.1.1")
+            {
+                found = true;
+                format!("127.0.1.1\t{hostname}")
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>();
+    if !found {
+        lines.push(format!("127.0.1.1\t{hostname}"));
+    }
+    std::fs::write(hosts_path, format!("{}\n", lines.join("\n")))?;
+    Ok(())
+}
+
+fn apply_rpi_model_optimizations(boot: &Path, rpi_model: Option<&str>) -> AppResult<()> {
+    let settings = match rpi_model {
+        Some("Raspberry Pi 5 (64-bit)") => "arm_64bit=1\ndtparam=pciex1_gen=3\ngpu_mem=64\n",
+        Some("Raspberry Pi 4 (64-bit)") => "arm_64bit=1\ngpu_mem=64\n",
+        Some("Raspberry Pi 3 (64-bit)" | "Raspberry Pi Zero 2 W (64-bit)") => {
+            "arm_64bit=1\ngpu_mem=32\nmax_usb_current=1\n"
+        }
+        _ => {
+            return Err(AppError::Validation(
+                "El modelo físico no es compatible con la imagen ARM64".into(),
+            ));
+        }
+    };
+    let config_path = boot.join("config.txt");
+    let mut config = std::fs::read_to_string(&config_path).unwrap_or_default();
+    config.push_str("\n# --- Sigil Flash Auto-Optimizations ---\n");
+    config.push_str(settings);
+    config.push_str("# --- End Sigil Flash Auto-Optimizations ---\n");
+    std::fs::write(config_path, config)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn write_private_root_file(path: &Path, contents: &[u8]) -> AppResult<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)?;
+    file.write_all(contents)?;
+    file.sync_all()?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn write_private_root_file(path: &Path, contents: &[u8]) -> AppResult<()> {
+    let _ = (path, contents);
+    Err(AppError::Validation(
+        "El aprovisionamiento seguro requiere un host Unix".into(),
+    ))
+}
+
+fn erase_plaintext_file(path: &Path) {
+    if let Ok(metadata) = std::fs::symlink_metadata(path) {
+        if metadata.file_type().is_file() && !metadata.file_type().is_symlink() {
+            if let Ok(mut file) = std::fs::OpenOptions::new().write(true).open(path) {
+                let zeroes = vec![0_u8; metadata.len() as usize];
+                let _ = file.write_all(&zeroes);
+                let _ = file.sync_all();
+            }
+        }
+    }
+    let _ = std::fs::remove_file(path);
+}
+
+fn run_target_command(
+    root: &Path,
+    program: &str,
+    args: &[&str],
+    stdin: Option<&[u8]>,
+) -> AppResult<Output> {
+    let mut command = std::process::Command::new("chroot");
+    command.arg(root);
+    if std::env::consts::ARCH != "aarch64" {
+        command.arg("/usr/bin/qemu-aarch64-static");
+    }
+    command
+        .arg(program)
+        .args(args)
+        .env("DEBIAN_FRONTEND", "noninteractive")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if stdin.is_some() {
+        command.stdin(Stdio::piped());
+    } else {
+        command.stdin(Stdio::null());
+    }
+    let mut child = command
+        .spawn()
+        .map_err(|error| AppError::Flash(format!("No se pudo iniciar {program}: {error}")))?;
+    if let Some(input) = stdin {
+        let mut child_stdin = child.stdin.take().ok_or_else(|| {
+            AppError::Flash(format!("No se pudo abrir la entrada estándar de {program}"))
+        })?;
+        if let Err(error) = child_stdin.write_all(input) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(AppError::Flash(format!(
+                "No se pudo suministrar la entrada protegida a {program}: {error}"
+            )));
+        }
+    }
+    child
+        .wait_with_output()
+        .map_err(|error| AppError::Flash(format!("No se pudo esperar a {program}: {error}")))
+}
+
+fn provision_panel_credential(root: &Path, config: &DeviceConfig) -> AppResult<()> {
+    let pin = config.panel_pin.as_deref().ok_or_else(|| {
+        AppError::Validation("El PIN del panel es obligatorio para fabricación".into())
+    })?;
+    let manufacturing_dir = root.join("etc/sigil/manufacturing");
+    std::fs::create_dir_all(&manufacturing_dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&manufacturing_dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    let input_path = manufacturing_dir.join("sigil_secrets.json");
+    let document = serde_json::json!({
+        "_schema_version": "1.0",
+        "panel_pin": pin
+    });
+    write_private_root_file(&input_path, &serde_json::to_vec(&document)?)?;
+
+    let output = run_target_command(
+        root,
+        "/usr/bin/python3",
+        &[
+            "/opt/sigil/panel/panel_auth.py",
+            "--input",
+            "/etc/sigil/manufacturing/sigil_secrets.json",
+            "--output",
+            "/etc/sigil/secrets/panel-pin.hash",
+        ],
+        None,
+    );
+    let output = match output {
+        Ok(output) => output,
+        Err(error) => {
+            erase_plaintext_file(&input_path);
+            return Err(error);
+        }
+    };
+    if !output.status.success() {
+        erase_plaintext_file(&input_path);
+        let detail = summarize_command_failure(&output.stdout, &output.stderr);
+        return Err(AppError::Flash(format!(
+            "No se pudo generar el hash Argon2id del panel: {detail}"
+        )));
+    }
+    if input_path.exists() || !root.join("etc/sigil/secrets/panel-pin.hash").is_file() {
+        erase_plaintext_file(&input_path);
+        return Err(AppError::Flash(
+            "La credencial del panel no quedó consumida de forma segura".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn escape_network_manager_value(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for (index, character) in value.chars().enumerate() {
+        match character {
+            '\\' => escaped.push_str("\\\\"),
+            '\t' => escaped.push_str("\\t"),
+            ' ' if index == 0 => escaped.push_str("\\s"),
+            other => escaped.push(other),
+        }
+    }
+    if value.ends_with(' ') && value.len() > 1 {
+        escaped.pop();
+        escaped.push_str("\\s");
+    }
+    escaped
+}
+
+fn provision_wifi_profile(root: &Path, config: &DeviceConfig) -> AppResult<()> {
+    let (Some(ssid), Some(password)) = (&config.wifi_ssid, &config.wifi_password) else {
+        return Ok(());
+    };
+    let serial = config.serial_number.as_deref().ok_or_else(|| {
+        AppError::Validation("El número de serie de fabricación es obligatorio".into())
+    })?;
+    let mut hasher = Sha256::new();
+    hasher.update(serial.as_bytes());
+    hasher.update([0]);
+    hasher.update(ssid.as_bytes());
+    let digest = format!("{:x}", hasher.finalize());
+    let uuid = format!(
+        "{}-{}-{}-{}-{}",
+        &digest[0..8],
+        &digest[8..12],
+        &digest[12..16],
+        &digest[16..20],
+        &digest[20..32]
+    );
+    let contents = format!(
+        "[connection]\nid=sigil-manufacturing\nuuid={uuid}\ntype=wifi\ninterface-name=wlan0\nautoconnect=true\nautoconnect-priority=100\n\n[wifi]\nmode=infrastructure\nssid={}\n\n[wifi-security]\nkey-mgmt=wpa-psk\npsk={}\n\n[ipv4]\nmethod=auto\n\n[ipv6]\nmethod=auto\n",
+        escape_network_manager_value(ssid),
+        escape_network_manager_value(password)
+    );
+    let directory = root.join("etc/NetworkManager/system-connections");
+    std::fs::create_dir_all(&directory)?;
+    let path = directory.join("sigil-manufacturing.nmconnection");
+    if path.exists() {
+        std::fs::remove_file(&path)?;
+    }
+    write_private_root_file(&path, contents.as_bytes())
+}
+
+fn write_ssh_dropin(root: &Path, enabled: bool) -> AppResult<()> {
+    let dropin_dir = root.join("etc/ssh/sshd_config.d");
+    std::fs::create_dir_all(&dropin_dir)?;
+    let dropin = dropin_dir.join("90-sigil-access.conf");
+    let contents = if enabled {
+        "PasswordAuthentication yes\nPubkeyAuthentication yes\nPermitRootLogin no\nAllowUsers sigil\n"
+    } else {
+        "PasswordAuthentication no\nPubkeyAuthentication yes\nPermitRootLogin no\nAllowUsers sigil\n"
+    };
+    std::fs::write(&dropin, contents)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dropin, std::fs::Permissions::from_mode(0o644))?;
+    }
+    Ok(())
+}
+
+fn provision_ssh_access(root: &Path, config: &DeviceConfig) -> AppResult<()> {
+    write_ssh_dropin(root, config.ssh_enabled)?;
+
+    let systemctl_status = std::process::Command::new("systemctl")
+        .arg("--root")
+        .arg(root)
+        .arg(if config.ssh_enabled {
+            "enable"
+        } else {
+            "disable"
+        })
+        .arg("ssh.service")
+        .status()
+        .map_err(|error| AppError::Flash(format!("No se pudo configurar ssh.service: {error}")))?;
+    if !systemctl_status.success() {
+        return Err(AppError::Flash(
+            "No se pudo configurar el inicio automático de SSH".into(),
+        ));
+    }
+    if !config.ssh_enabled {
+        return Ok(());
+    }
+
+    if !std::fs::read_to_string(root.join("etc/passwd"))
+        .is_ok_and(|passwd| passwd.lines().any(|line| line.starts_with("sigil:")))
+    {
+        return Err(AppError::Flash(
+            "El instalador no creó el usuario de sistema sigil".into(),
+        ));
+    }
+    let password = config.password.as_deref().ok_or_else(|| {
+        AppError::Validation("La contraseña SSH es obligatoria cuando SSH está activo".into())
+    })?;
+    let credential = format!("sigil:{password}\n");
+    let output = run_target_command(
+        root,
+        "/usr/sbin/chpasswd",
+        &["-c", "YESCRYPT"],
+        Some(credential.as_bytes()),
+    )?;
+    if !output.status.success() {
+        let detail = summarize_command_failure(&output.stdout, &output.stderr);
+        return Err(AppError::Flash(format!(
+            "No se pudo establecer la contraseña del usuario sigil: {detail}"
+        )));
+    }
+
+    let run_sshd = root.join("run/sshd");
+    let created_run_sshd = !run_sshd.exists();
+    std::fs::create_dir_all(&run_sshd)?;
+    let validation = run_target_command(root, "/usr/sbin/sshd", &["-t"], None);
+    if created_run_sshd {
+        let _ = std::fs::remove_dir(&run_sshd);
+    }
+    let validation = validation?;
+    if !validation.status.success() {
+        let detail = summarize_command_failure(&validation.stdout, &validation.stderr);
+        return Err(AppError::Flash(format!(
+            "La configuración SSH generada no es válida: {detail}"
+        )));
+    }
+    Ok(())
+}
+
+fn install_sigil_hardware(
+    device: &str,
+    offline_packages: &Path,
+    config: &DeviceConfig,
+) -> AppResult<()> {
     let root_partition = partition_path(device, 2);
     let boot_partition = partition_path(device, 1);
     let flash_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -792,6 +1350,13 @@ fn install_sigil_hardware(device: &str, offline_packages: &Path) -> AppResult<()
         std::fs::create_dir_all(&boot_mount)?;
         mount_checked(&boot_partition, &boot_mount)?;
         mounted.push(boot_mount);
+
+        write_manufacturing_provision(&mount_dir, config)?;
+        apply_hostname(&mount_dir, &config.hostname)?;
+        apply_rpi_model_optimizations(
+            &mount_dir.join("boot/firmware"),
+            config.rpi_model.as_deref(),
+        )?;
 
         println!("Copiando payload sigil-hardware sin artefactos de desarrollo...");
         let hardware_target = mount_dir.join("opt/sigil-hardware");
@@ -878,6 +1443,9 @@ fn install_sigil_hardware(device: &str, offline_packages: &Path) -> AppResult<()
                     output.status
                 )));
             }
+            provision_panel_credential(&mount_dir, config)?;
+            provision_wifi_profile(&mount_dir, config)?;
+            provision_ssh_access(&mount_dir, config)?;
             Ok(())
         })();
         let _ = std::fs::remove_file(&policy_path);
@@ -1096,12 +1664,156 @@ fn unmount_all(mounted: &mut Vec<PathBuf>) -> AppResult<()> {
 mod tests {
     use super::*;
 
+    fn manufacturing_config() -> DeviceConfig {
+        DeviceConfig {
+            hostname: "sigil-lab-01".to_string(),
+            username: "sigil".to_string(),
+            password: Some("ssh-test-80427159".to_string()),
+            wifi_ssid: None,
+            wifi_password: None,
+            ssh_enabled: true,
+            rpi_model: Some("Raspberry Pi 4 (64-bit)".to_string()),
+            serial_number: Some("SIGIL-TEST-0001".to_string()),
+            panel_pin: Some("80427159".to_string()),
+        }
+    }
+
     fn isolated_lock_dir(test_name: &str) -> PathBuf {
         let path =
             std::env::temp_dir().join(format!("sigil-flash-{test_name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path).expect("create isolated lock directory");
         path
+    }
+
+    #[test]
+    fn manufacturing_contract_accepts_complete_configuration() {
+        assert!(validate_device_config(&manufacturing_config()).is_ok());
+    }
+
+    #[test]
+    fn manufacturing_contract_rejects_missing_panel_pin() {
+        let mut config = manufacturing_config();
+        config.panel_pin = None;
+
+        let error = validate_device_config(&config).expect_err("missing PIN must fail");
+
+        assert!(error.to_string().contains("PIN del panel"));
+    }
+
+    #[test]
+    fn manufacturing_contract_rejects_wrong_system_user() {
+        let mut config = manufacturing_config();
+        config.username = "pi".to_string();
+
+        let error = validate_device_config(&config).expect_err("wrong user must fail");
+
+        assert!(error.to_string().contains("usuario del sistema"));
+    }
+
+    #[test]
+    fn manufacturing_contract_rejects_ssh_without_password() {
+        let mut config = manufacturing_config();
+        config.password = None;
+
+        let error = validate_device_config(&config).expect_err("missing password must fail");
+
+        assert!(error.to_string().contains("contraseña SSH"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_manufacturing_config_uses_mode_0600_and_is_removed_on_drop() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let private = PrivateConfigFile::create(&manufacturing_config())
+            .expect("create private manufacturing config");
+        let path = private.path().to_path_buf();
+
+        assert_eq!(
+            std::fs::metadata(&path)
+                .expect("private config metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        let parsed = read_private_device_config(&path).expect("read private config");
+        assert_eq!(parsed.serial_number.as_deref(), Some("SIGIL-TEST-0001"));
+        drop(private);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn provision_contains_identity_but_never_login_secrets() {
+        let root = isolated_lock_dir("provision-identity-only");
+        write_manufacturing_provision(&root, &manufacturing_config())
+            .expect("write manufacturing provision");
+
+        let raw = std::fs::read_to_string(root.join("boot/firmware/sigil_provision.json"))
+            .expect("read manufacturing provision");
+        let provision: serde_json::Value =
+            serde_json::from_str(&raw).expect("parse manufacturing provision");
+        assert_eq!(provision["serial_number"], "SIGIL-TEST-0001");
+        assert_eq!(provision["model"], "Sigil-Streamer");
+        assert_eq!(provision["model_version"], "v1");
+        assert!(provision["capabilities"]["i2s_dac"].is_boolean());
+        assert!(!raw.contains("ssh-test-80427159"));
+        assert!(!raw.contains("80427159"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn hostname_is_applied_to_hostname_and_hosts() {
+        let root = isolated_lock_dir("hostname");
+        std::fs::create_dir_all(root.join("etc")).expect("create etc");
+        std::fs::write(
+            root.join("etc/hosts"),
+            "127.0.0.1\tlocalhost\n127.0.1.1\traspberrypi\n",
+        )
+        .expect("write hosts fixture");
+
+        apply_hostname(&root, "sigil-lab-01").expect("apply hostname");
+
+        assert_eq!(
+            std::fs::read_to_string(root.join("etc/hostname")).expect("read hostname"),
+            "sigil-lab-01\n"
+        );
+        let hosts = std::fs::read_to_string(root.join("etc/hosts")).expect("read hosts");
+        assert!(hosts.contains("127.0.1.1\tsigil-lab-01"));
+        assert!(!hosts.contains("raspberrypi"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wifi_profile_and_ssh_dropin_have_safe_contents_and_modes() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = isolated_lock_dir("network-config");
+        let mut config = manufacturing_config();
+        config.wifi_ssid = Some("SIGIL Lab".to_string());
+        config.wifi_password = Some("wifi-test-password".to_string());
+
+        provision_wifi_profile(&root, &config).expect("write Wi-Fi profile");
+        write_ssh_dropin(&root, true).expect("write SSH drop-in");
+
+        let wifi =
+            root.join("etc/NetworkManager/system-connections/sigil-manufacturing.nmconnection");
+        assert_eq!(
+            std::fs::metadata(&wifi)
+                .expect("Wi-Fi metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        let ssh = std::fs::read_to_string(root.join("etc/ssh/sshd_config.d/90-sigil-access.conf"))
+            .expect("read SSH drop-in");
+        assert!(ssh.contains("PasswordAuthentication yes"));
+        assert!(ssh.contains("AllowUsers sigil"));
+        assert!(!ssh.contains("ssh-test-80427159"));
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

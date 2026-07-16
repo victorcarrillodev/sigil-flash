@@ -136,6 +136,20 @@ class TestBSSIDNormalization(unittest.TestCase):
 
 
 class TestAPDedupAndSorting(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls._lock_dir = tempfile.mkdtemp(prefix="sigil-geolocation-scan-")
+        cls._transition_lock = wifi_mod.WIFI_TRANSITION_LOCK
+        cls._scan_lock = wifi_mod.WIFI_SCAN_LOCK
+        wifi_mod.WIFI_TRANSITION_LOCK = os.path.join(cls._lock_dir, "transition.lock")
+        wifi_mod.WIFI_SCAN_LOCK = os.path.join(cls._lock_dir, "scan.lock")
+
+    @classmethod
+    def tearDownClass(cls):
+        wifi_mod.WIFI_TRANSITION_LOCK = cls._transition_lock
+        wifi_mod.WIFI_SCAN_LOCK = cls._scan_lock
+        shutil.rmtree(cls._lock_dir)
+
     def _make_scan_output(self, cells):
         lines = []
         for i, (bssid, signal, channel) in enumerate(cells):
@@ -181,6 +195,15 @@ class TestAPLimits(unittest.TestCase):
         result = geo.geolocate("http://server", "key", "dev", {"SIGIL_GEOLOCATION_MIN_APS": "2"})
         self.assertFalse(result["success"])
         self.assertIn("not_enough_aps", result["error"])
+
+    def test_busy_scan_is_deferred_without_network_request(self):
+        with patch.object(geo, "scan_wifi_aps", side_effect=wifi_mod.WifiScanBusy("busy")):
+            with patch("urllib.request.urlopen") as request:
+                result = geo.geolocate("http://server", "key", "dev", {})
+        self.assertFalse(result["success"])
+        self.assertTrue(result["retryable"])
+        self.assertEqual(result["error"], "wifi_scan_busy")
+        request.assert_not_called()
 
     def test_over_max_aps_truncated(self):
         many = [{"bssid": f"AA:BB:CC:DD:EE:{i:02d}", "signal_dbm": -50} for i in range(35)]

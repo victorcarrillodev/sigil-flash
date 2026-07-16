@@ -32,7 +32,7 @@ from bluetooth import (
     stream_bluetooth_scan, pair_device, connect_device, disconnect_device,
     remove_device,
 )
-from wifi import scan_wifi_networks, connect_wifi, get_current_wifi
+from wifi import WifiScanBusy, scan_wifi_networks, connect_wifi, get_current_wifi
 from panel_auth import panel_hash_is_provisioned, verify_panel_pin_hash
 
 
@@ -53,14 +53,16 @@ def _load_env(path: str) -> dict:
                 if "=" in line:
                     key, _, val = line.partition("=")
                     env[key.strip()] = val.strip()
-    except FileNotFoundError:
+    # systemd reads the root-only EnvironmentFile and exports its values to the
+    # unprivileged panel process. A direct read is therefore optional.
+    except (FileNotFoundError, PermissionError):
         pass
     return env
 
 
 # Cargar env file; si falta SIGIL_SECRET_KEY, falla con error claro
 _env = _load_env("/etc/sigil/panel.env")
-_secret_key = _env.get("SIGIL_SECRET_KEY") or os.environ.get("SIGIL_SECRET_KEY")
+_secret_key = os.environ.get("SIGIL_SECRET_KEY") or _env.get("SIGIL_SECRET_KEY")
 if not _secret_key:
     raise RuntimeError(
         "SIGIL_SECRET_KEY no definido. "
@@ -363,10 +365,14 @@ _CAPTIVE_URLS = [
     "/redirect",
     "/canonical.html",
 ]
+_CAPTIVE_LOGIN_URL = "http://192.168.4.1/login"
 
 
 def _captive_redirect():
-    return redirect(url_for("login"), code=302)
+    # Captive-network probes arrive with public Host headers. A relative
+    # redirect would preserve that untrusted host and the security filter would
+    # correctly reject /login. Always move the browser to the fixed AP origin.
+    return redirect(_CAPTIVE_LOGIN_URL, code=302)
 
 
 for _url in _CAPTIVE_URLS:
@@ -507,7 +513,16 @@ def api_remove(mac):
 
 @app.route("/wifi/scan")
 def wifi_scan():
-    return jsonify({"networks": scan_wifi_networks()})
+    try:
+        return jsonify({"success": True, "busy": False, "networks": scan_wifi_networks()})
+    except WifiScanBusy as error:
+        return jsonify({
+            "success": False,
+            "busy": True,
+            "retry_after_ms": 1500,
+            "message": str(error),
+            "networks": [],
+        }), 409
 
 
 @app.route("/wifi/connect", methods=["POST"])
