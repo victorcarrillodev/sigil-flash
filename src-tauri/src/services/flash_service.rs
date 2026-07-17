@@ -19,6 +19,7 @@ pub struct FlashService {
     offline_packages: PathBuf,
     hardware_payload: PathBuf,
     package_contract: PathBuf,
+    api_key_file: PathBuf,
 }
 
 const ELEVATED_LAUNCHER_GRACE: Duration = Duration::from_secs(2);
@@ -170,6 +171,10 @@ impl FlashService {
                 .join("trixie-arm64"),
             hardware_payload,
             package_contract,
+            api_key_file: flash_root
+                .join("artifacts")
+                .join("secrets")
+                .join("device-api-key"),
         }
     }
 
@@ -196,14 +201,14 @@ impl FlashService {
                 "La ruta del archivo de imagen no existe".to_string(),
             ));
         }
-        validate_device_config(config)?;
+        let manufacturing_config = manufacturing_config_with_api_key(config, &self.api_key_file)?;
         validate_bundle_for_image(
             &image_p,
             &self.hardware_payload,
             &self.offline_packages,
             &self.package_contract,
         )?;
-        let private_config = PrivateConfigFile::create(config)?;
+        let private_config = PrivateConfigFile::create(&manufacturing_config)?;
 
         // 1. Establish progress monitoring file in temp directory
         let progress_file = unique_progress_path();
@@ -492,6 +497,7 @@ fn validate_device_config(config: &DeviceConfig) -> AppResult<()> {
         ));
     }
     validate_panel_pin(config.panel_pin.as_deref())?;
+    validate_device_api_key(config.api_key.as_deref())?;
 
     if config.ssh_enabled {
         let password = config.password.as_deref().ok_or_else(|| {
@@ -527,6 +533,89 @@ fn validate_device_config(config: &DeviceConfig) -> AppResult<()> {
         }
     }
     Ok(())
+}
+
+fn manufacturing_config_with_api_key(
+    config: &DeviceConfig,
+    api_key_file: &Path,
+) -> AppResult<DeviceConfig> {
+    let mut manufacturing_config = config.clone();
+    manufacturing_config.api_key = Some(read_local_device_api_key(api_key_file)?);
+    validate_device_config(&manufacturing_config)?;
+    Ok(manufacturing_config)
+}
+
+fn validate_device_api_key(api_key: Option<&str>) -> AppResult<()> {
+    let api_key = api_key.ok_or_else(|| {
+        AppError::Validation(
+            "Falta artifacts/secrets/device-api-key para fabricar la imagen".into(),
+        )
+    })?;
+    if !(8..=256).contains(&api_key.len()) || !api_key.bytes().all(|byte| byte.is_ascii_graphic()) {
+        return Err(AppError::Validation(
+            "La API key debe contener entre 8 y 256 caracteres ASCII sin espacios".into(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn read_local_device_api_key(path: &Path) -> AppResult<String> {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+
+    let before = std::fs::symlink_metadata(path).map_err(|error| {
+        AppError::Validation(format!(
+            "No se pudo leer el secreto local {}: {error}",
+            path.display()
+        ))
+    })?;
+    if !before.file_type().is_file()
+        || before.file_type().is_symlink()
+        || before.permissions().mode() & 0o777 != 0o600
+        // SAFETY: `geteuid` reads process credentials and accepts no pointers.
+        || before.uid() != unsafe { libc::geteuid() }
+        || before.len() > 512
+    {
+        return Err(AppError::Validation(
+            "artifacts/secrets/device-api-key debe ser un archivo regular del usuario actual, modo 0600 y máximo 512 bytes"
+                .into(),
+        ));
+    }
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .open(path)?;
+    let opened = file.metadata()?;
+    if before.dev() != opened.dev() || before.ino() != opened.ino() {
+        return Err(AppError::Validation(
+            "artifacts/secrets/device-api-key cambió mientras se abría".into(),
+        ));
+    }
+    let mut bytes = Vec::new();
+    file.take(513).read_to_end(&mut bytes)?;
+    if bytes.len() > 512 {
+        return Err(AppError::Validation(
+            "artifacts/secrets/device-api-key excede 512 bytes".into(),
+        ));
+    }
+    if bytes.last() == Some(&b'\n') {
+        bytes.pop();
+        if bytes.last() == Some(&b'\r') {
+            bytes.pop();
+        }
+    }
+    let api_key = String::from_utf8(bytes)
+        .map_err(|_| AppError::Validation("La API key debe ser UTF-8 válido".into()))?;
+    validate_device_api_key(Some(&api_key))?;
+    Ok(api_key)
+}
+
+#[cfg(not(unix))]
+fn read_local_device_api_key(path: &Path) -> AppResult<String> {
+    let _ = path;
+    Err(AppError::Validation(
+        "El secreto local de fabricación requiere un host Unix".into(),
+    ))
 }
 
 fn is_valid_hostname(hostname: &str) -> bool {
@@ -1238,6 +1327,45 @@ fn provision_panel_credential(root: &Path, config: &DeviceConfig) -> AppResult<(
     Ok(())
 }
 
+fn provision_device_api_key(root: &Path, config: &DeviceConfig) -> AppResult<()> {
+    let api_key = config.api_key.as_deref().ok_or_else(|| {
+        AppError::Validation(
+            "Falta artifacts/secrets/device-api-key para fabricar la imagen".into(),
+        )
+    })?;
+    validate_device_api_key(Some(api_key))?;
+    let secrets_dir = root.join("etc/sigil/secrets");
+    std::fs::create_dir_all(&secrets_dir)?;
+    if std::fs::symlink_metadata(&secrets_dir)?
+        .file_type()
+        .is_symlink()
+    {
+        return Err(AppError::Validation(
+            "El directorio de secretos dentro de la imagen no puede ser un symlink".into(),
+        ));
+    }
+    let target = secrets_dir.join("device-api-key");
+    if target.exists() {
+        let metadata = std::fs::symlink_metadata(&target)?;
+        if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+            return Err(AppError::Validation(
+                "El destino device-api-key dentro de la imagen no es un archivo regular".into(),
+            ));
+        }
+    }
+    let temporary = secrets_dir.join(format!(".device-api-key.{}", std::process::id()));
+    if temporary.exists() {
+        std::fs::remove_file(&temporary)?;
+    }
+    let contents = format!("{api_key}\n");
+    let write_result = write_private_root_file(&temporary, contents.as_bytes())
+        .and_then(|()| std::fs::rename(&temporary, &target).map_err(Into::into));
+    if write_result.is_err() {
+        erase_plaintext_file(&temporary);
+    }
+    write_result
+}
+
 fn escape_network_manager_value(value: &str) -> String {
     let mut escaped = String::with_capacity(value.len());
     for (index, character) in value.chars().enumerate() {
@@ -1445,6 +1573,7 @@ fn install_sigil_hardware(
         mounted.push(boot_mount);
 
         write_manufacturing_provision(&mount_dir, config)?;
+        provision_device_api_key(&mount_dir, config)?;
         apply_hostname(&mount_dir, &config.hostname)?;
         apply_rpi_model_optimizations(
             &mount_dir.join("boot/firmware"),
@@ -1977,6 +2106,7 @@ mod tests {
             rpi_model: Some("Raspberry Pi 4 (64-bit)".to_string()),
             serial_number: Some("SIGIL-TEST-0001".to_string()),
             panel_pin: Some("80427159".to_string()),
+            api_key: Some("synthetic-device-api-key".to_string()),
         }
     }
 
@@ -2001,6 +2131,91 @@ mod tests {
         let error = validate_device_config(&config).expect_err("missing PIN must fail");
 
         assert!(error.to_string().contains("PIN del panel"));
+    }
+
+    #[test]
+    fn manufacturing_contract_rejects_missing_device_api_key() {
+        let mut config = manufacturing_config();
+        config.api_key = None;
+
+        let error = validate_device_config(&config).expect_err("missing API key must fail");
+
+        assert!(error.to_string().contains("device-api-key"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_device_api_key_accepts_current_user_mode_0600_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = isolated_lock_dir("local-api-key-valid");
+        let path = root.join("device-api-key");
+        std::fs::write(&path, "synthetic-device-api-key\n").expect("write API key fixture");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            .expect("set private mode");
+
+        let result = read_local_device_api_key(&path);
+
+        assert_eq!(result.expect("valid API key"), "synthetic-device-api-key");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_device_api_key_rejects_group_readable_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = isolated_lock_dir("local-api-key-mode");
+        let path = root.join("device-api-key");
+        std::fs::write(&path, "synthetic-device-api-key\n").expect("write API key fixture");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640))
+            .expect("set insecure mode");
+
+        let error = read_local_device_api_key(&path).expect_err("mode 0640 must fail");
+
+        assert!(error.to_string().contains("modo 0600"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn manufacturing_config_loads_api_key_from_local_artifact() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = isolated_lock_dir("manufacturing-config-api-key");
+        let path = root.join("device-api-key");
+        std::fs::write(&path, "synthetic-device-api-key\n").expect("write API key fixture");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            .expect("set private mode");
+        let mut config = manufacturing_config();
+        config.api_key = None;
+
+        let prepared = manufacturing_config_with_api_key(&config, &path).expect("prepare config");
+
+        assert_eq!(
+            prepared.api_key.as_deref(),
+            Some("synthetic-device-api-key")
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn provision_device_api_key_writes_private_image_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = isolated_lock_dir("provision-api-key");
+
+        provision_device_api_key(&root, &manufacturing_config()).expect("provision API key");
+
+        let path = root.join("etc/sigil/secrets/device-api-key");
+        let mode = std::fs::metadata(&path)
+            .expect("API key metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

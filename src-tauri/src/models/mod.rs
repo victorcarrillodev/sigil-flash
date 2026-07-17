@@ -52,4 +52,6 @@ pub struct DeviceConfig {
     pub serial_number: Option<String>,
     #[serde(rename = "panelPin")]
     pub panel_pin: Option<String>,
+    #[serde(rename = "apiKey")]
+    pub api_key: Option<String>,
 }

@@ -463,6 +463,7 @@ mod tests {
             rpi_model: Some("Raspberry Pi 4 (64-bit)".to_string()),
             serial_number: Some("SS-TEST-001".to_string()),
             panel_pin: Some("80427159".to_string()),
+            api_key: None,
         }
     }
 

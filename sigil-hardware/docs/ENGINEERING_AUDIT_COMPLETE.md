@@ -299,7 +299,7 @@ En Fase 2, implementar ciclo completo:
 ```bash
 # radio-stream.sh línea 7-8
 URL_BASE="https://devproserver.tail942ea3.ts.net"
-API_KEY="LeonelSecret123"
+API_KEY="<provisioned-in-/etc/sigil/secrets/device-api-key>"
 ```
 
 **Problema:**
