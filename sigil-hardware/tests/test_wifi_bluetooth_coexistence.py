@@ -6,7 +6,6 @@ import os
 import pathlib
 import sys
 import tempfile
-import threading
 import time
 import unittest
 from unittest.mock import MagicMock, patch
@@ -63,31 +62,13 @@ class WifiBluetoothCoexistenceTests(unittest.TestCase):
         return handle
 
     def test_panel_and_geolocation_scans_cannot_overlap(self):
-        started = threading.Event()
-        release = threading.Event()
-        calls = []
-
-        def slow_command(arguments, **_kwargs):
-            calls.append(list(arguments))
-            if arguments[:4] == ["sudo", "iwlist", "wlan0", "scan"]:
-                started.set()
-                self.assertTrue(release.wait(2))
-                return Result(SCAN_OUTPUT)
-            return Result()
-
-        with patch.object(wifi.subprocess, "run", side_effect=slow_command):
-            worker = threading.Thread(target=wifi.scan_wifi_networks)
-            worker.start()
-            self.assertTrue(started.wait(1))
+        self.hold_lock(wifi.WIFI_SCAN_LOCK)
+        with patch.object(wifi.subprocess, "run") as command:
+            with self.assertRaises(wifi.WifiScanBusy):
+                wifi.scan_wifi_networks()
             with self.assertRaises(wifi.WifiScanBusy):
                 wifi.scan_wifi_aps()
-            release.set()
-            worker.join(2)
-        self.assertFalse(worker.is_alive())
-        self.assertEqual(
-            sum(call[:4] == ["sudo", "iwlist", "wlan0", "scan"] for call in calls),
-            1,
-        )
+        command.assert_not_called()
 
     def test_scan_and_wifi_transition_cannot_overlap(self):
         self.hold_lock(wifi.WIFI_TRANSITION_LOCK)

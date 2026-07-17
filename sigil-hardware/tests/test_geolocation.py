@@ -35,12 +35,20 @@ def _fake_scan(*args, **kwargs):
     return _fake_scan._aps
 
 
-# Patch module-level AND save original for dedup tests
-wifi_mod.scan_wifi_aps = _fake_scan
 import geolocation as geo
-# Also patch geolocation's namespace copy (from-import creates a local reference)
-geo.scan_wifi_aps = _fake_scan
+_original_geo_scan = geo.scan_wifi_aps
 import urllib.error
+
+
+def setUpModule():
+    # Apply the deterministic scan fixture only while this module's tests run.
+    wifi_mod.scan_wifi_aps = _fake_scan
+    geo.scan_wifi_aps = _fake_scan
+
+
+def tearDownModule():
+    wifi_mod.scan_wifi_aps = _original_scan
+    geo.scan_wifi_aps = _original_geo_scan
 
 
 def _reset_aps():

@@ -75,7 +75,14 @@ valid_target = manifest["target"] == {
 raise SystemExit(0 if declared == actual and valid_target else 1)
 PYEOF
 
-FLASH_SERVICE="${ROOT}/../src-tauri/src/services/flash_service.rs"
+if [ -n "${SIGIL_FLASH_SERVICE:-}" ]; then
+    FLASH_SERVICE="${SIGIL_FLASH_SERVICE}"
+elif [ -f "${ROOT}/../src-tauri/src/services/flash_service.rs" ]; then
+    FLASH_SERVICE="${ROOT}/../src-tauri/src/services/flash_service.rs"
+else
+    FLASH_SERVICE="${ROOT}/../sigil-flash/src-tauri/src/services/flash_service.rs"
+fi
+check "real flasher source is available" test -f "$FLASH_SERVICE"
 check "real flasher resolves the generated payload artifact" \
     grep -q 'join("payloads")' "$FLASH_SERVICE"
 check "real flasher copies the validated payload, not the source tree" \
