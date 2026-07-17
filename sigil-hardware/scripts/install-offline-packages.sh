@@ -5,6 +5,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CONTRACT="${SIGIL_PACKAGE_CONTRACT:-${ROOT}/manifests/offline-package-contract.json}"
 REPOSITORY="${1:-}"
+REQUESTED_PROFILES="${SIGIL_PACKAGE_PROFILES:-}"
 APT_STATE=""
 SOURCE_LIST=""
 
@@ -27,7 +28,7 @@ trap cleanup EXIT HUP INT TERM
 command -v dpkg-deb >/dev/null || die "dpkg-deb is required"
 command -v gpgv >/dev/null || die "gpgv is required"
 
-mapfile -t CONTRACT_VALUES < <(python3 - "$CONTRACT" "$REPOSITORY" <<'PYEOF'
+mapfile -t CONTRACT_VALUES < <(python3 - "$CONTRACT" "$REPOSITORY" "$REQUESTED_PROFILES" <<'PYEOF'
 import gzip
 import hashlib
 import json
@@ -38,6 +39,10 @@ import sys
 
 contract_path = pathlib.Path(sys.argv[1]).resolve()
 repository = pathlib.Path(sys.argv[2]).resolve()
+requested_profiles = {profile for profile in sys.argv[3].split(",") if profile}
+unknown_profiles = requested_profiles - {"factory-debug", "optional"}
+if unknown_profiles:
+    raise SystemExit("unsupported package profile selection: " + ", ".join(sorted(unknown_profiles)))
 try:
     contract_bytes = contract_path.read_bytes()
     contract = json.loads(contract_bytes)
@@ -65,6 +70,7 @@ if (
 if contract["install_recommends"] is not False or contract["version_policy"] != "distribution-candidate":
     raise SystemExit("unsupported installation policy")
 
+required_names = []
 names = []
 versions = {}
 all_names = set()
@@ -80,10 +86,12 @@ for package in contract["packages"]:
     if package["version"] is not None and not isinstance(package["version"], str):
         raise SystemExit(f"invalid version contract: {name}")
     if package["required"]:
+        required_names.append(name)
+    if package["required"] or package["profile"] in requested_profiles:
         names.append(name)
         versions[name] = package["version"]
-if len(names) != 23:
-    raise SystemExit(f"expected 23 required packages, found {len(names)}")
+if len(required_names) != 23:
+    raise SystemExit(f"expected 23 required packages, found {len(required_names)}")
 
 manifest_path = repository / "package-manifest.json"
 try:
@@ -111,7 +119,7 @@ if manifest["package_contract_schema_version"] != contract["schema_version"]:
     raise SystemExit("bundle package-contract schema version is incompatible")
 if manifest["package_contract_sha256"] != hashlib.sha256(contract_bytes).hexdigest():
     raise SystemExit("bundle was generated from a different package contract")
-if manifest["direct_packages"] != names or manifest["direct_package_count"] != len(names):
+if manifest["direct_packages"] != required_names or manifest["direct_package_count"] != len(required_names):
     raise SystemExit("bundle direct package set does not match contract")
 if manifest["unresolved_packages"] != []:
     raise SystemExit("bundle contains unresolved packages")
@@ -182,7 +190,7 @@ if manifest["resolved_package_count"] != len(package_entries) or manifest["total
     raise SystemExit("resolved package count or total bytes does not match manifest")
 missing = sorted(set(names) - package_names)
 if missing:
-    raise SystemExit("offline repository is missing required packages: " + ", ".join(missing))
+    raise SystemExit("offline repository is missing selected package-profile packages: " + ", ".join(missing))
 for name, required_version in versions.items():
     if required_version is not None and not any(
         package["name"] == name and package["version"] == required_version for package in package_entries

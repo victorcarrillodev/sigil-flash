@@ -83,7 +83,8 @@ if not re.fullmatch(r"[0-9a-f]{64}", contract["base_image_sha256"]):
 
 names = set()
 direct_names = []
-specifications = []
+included_names = []
+included_specifications = []
 valid_profiles = {"runtime", "factory-debug", "optional"}
 for item in contract["packages"]:
     if set(item) != {"name", "required", "version", "profile"}:
@@ -101,7 +102,9 @@ for item in contract["packages"]:
         raise SystemExit(f"invalid version constraint for {name}")
     if item["required"]:
         direct_names.append(name)
-        specifications.append(f"{name}={version}" if version else name)
+    if item["required"] or item["profile"] == "factory-debug":
+        included_names.append(name)
+        included_specifications.append(f"{name}={version}" if version else name)
 if len(direct_names) != 23:
     raise SystemExit(f"expected 23 required packages, found {len(direct_names)}")
 optional_ssh = [item for item in contract["packages"] if item["name"] == "openssh-server"]
@@ -111,7 +114,8 @@ if optional_ssh != [{"name": "openssh-server", "required": False, "version": Non
 print(contract["distribution_codename"])
 print(contract["architecture"])
 print("\t".join(direct_names))
-print("\t".join(specifications))
+print("\t".join(included_names))
+print("\t".join(included_specifications))
 print(contract["base_image_name"])
 print(contract["base_image_sha256"])
 print(contract["bundle_version"])
@@ -120,13 +124,14 @@ print(contract["distribution"])
 print(contract["distribution_version"])
 PYEOF
 )
-[ "${#CONTRACT_VALUES[@]}" -eq 10 ] || die "could not load canonical package contract"
+[ "${#CONTRACT_VALUES[@]}" -eq 11 ] || die "could not load canonical package contract"
 CODENAME="${CONTRACT_VALUES[0]}"
 ARCHITECTURE="${CONTRACT_VALUES[1]}"
 IFS=$'\t' read -r -a REQUIRED_NAMES <<< "${CONTRACT_VALUES[2]}"
-IFS=$'\t' read -r -a PACKAGE_SPECS <<< "${CONTRACT_VALUES[3]}"
-BASE_IMAGE_NAME="${CONTRACT_VALUES[4]}"
-BUNDLE_VERSION="${CONTRACT_VALUES[6]}"
+IFS=$'\t' read -r -a INCLUDED_NAMES <<< "${CONTRACT_VALUES[3]}"
+IFS=$'\t' read -r -a PACKAGE_SPECS <<< "${CONTRACT_VALUES[4]}"
+BASE_IMAGE_NAME="${CONTRACT_VALUES[5]}"
+BUNDLE_VERSION="${CONTRACT_VALUES[7]}"
 
 if [ -z "$BASE_IMAGE" ]; then
     BASE_IMAGE="${ROOT}/../artifacts/base-images/${BASE_IMAGE_NAME}"
@@ -215,8 +220,8 @@ APT_OPTIONS=(
     -o "Debug::NoLocking=1"
 )
 
-printf 'Resolving %d direct packages for %s-%s (bundle %s)...\n' \
-    "${#REQUIRED_NAMES[@]}" "$CODENAME" "$ARCHITECTURE" "$BUNDLE_VERSION"
+printf 'Resolving %d bundle roots (%d required, factory-debug included) for %s-%s (bundle %s)...\n' \
+    "${#INCLUDED_NAMES[@]}" "${#REQUIRED_NAMES[@]}" "$CODENAME" "$ARCHITECTURE" "$BUNDLE_VERSION"
 "$APT_GET" "${APT_OPTIONS[@]}" update
 DEBIAN_FRONTEND=noninteractive "$APT_GET" "${APT_OPTIONS[@]}" \
     --assume-yes --download-only --no-install-recommends install "${PACKAGE_SPECS[@]}"
@@ -322,6 +327,8 @@ contract_bytes = contract_path.read_bytes()
 contract = json.loads(contract_bytes)
 direct = [item for item in contract["packages"] if item["required"]]
 direct_names = [item["name"] for item in direct]
+included = [item for item in contract["packages"] if item["required"] or item["profile"] == "factory-debug"]
+included_names = [item["name"] for item in included]
 allowed_architectures = set(contract["allowed_package_architectures"])
 
 packages = []
@@ -360,10 +367,10 @@ for path in sorted((repository / "packages").glob("*.deb")):
     })
     names.add(name)
 
-missing = sorted(set(direct_names) - names)
+missing = sorted(set(included_names) - names)
 if missing:
-    raise SystemExit("resolved repository is missing direct packages: " + ", ".join(missing))
-for package in direct:
+    raise SystemExit("resolved repository is missing required bundle-profile packages: " + ", ".join(missing))
+for package in included:
     if package["version"] is not None and not any(
         item["name"] == package["name"] and item["version"] == package["version"]
         for item in packages

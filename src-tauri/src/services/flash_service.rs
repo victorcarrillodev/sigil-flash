@@ -1435,27 +1435,55 @@ fn write_ssh_dropin(root: &Path, enabled: bool) -> AppResult<()> {
     Ok(())
 }
 
+fn ssh_service_unit_exists(root: &Path) -> bool {
+    [
+        "usr/lib/systemd/system/ssh.service",
+        "lib/systemd/system/ssh.service",
+        "etc/systemd/system/ssh.service",
+    ]
+    .iter()
+    .any(|relative| root.join(relative).exists())
+}
+
+fn selected_package_profiles(config: &DeviceConfig) -> Option<(&'static str, &'static str)> {
+    config
+        .ssh_enabled
+        .then_some(("SIGIL_PACKAGE_PROFILES", "factory-debug"))
+}
+
+fn configure_ssh_service(root: &Path, action: &str) -> AppResult<()> {
+    let output = std::process::Command::new("systemctl")
+        .arg("--root")
+        .arg(root)
+        .arg(action)
+        .arg("ssh.service")
+        .output()
+        .map_err(|error| {
+            AppError::Flash(format!("No se pudo ejecutar systemctl para SSH: {error}"))
+        })?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let detail = summarize_command_failure(&output.stdout, &output.stderr);
+    Err(AppError::Flash(format!(
+        "No se pudo {action} el inicio automático de SSH: {detail}"
+    )))
+}
+
 fn provision_ssh_access(root: &Path, config: &DeviceConfig) -> AppResult<()> {
     write_ssh_dropin(root, config.ssh_enabled)?;
 
-    let systemctl_status = std::process::Command::new("systemctl")
-        .arg("--root")
-        .arg(root)
-        .arg(if config.ssh_enabled {
-            "enable"
-        } else {
-            "disable"
-        })
-        .arg("ssh.service")
-        .status()
-        .map_err(|error| AppError::Flash(format!("No se pudo configurar ssh.service: {error}")))?;
-    if !systemctl_status.success() {
-        return Err(AppError::Flash(
-            "No se pudo configurar el inicio automático de SSH".into(),
-        ));
-    }
     if !config.ssh_enabled {
+        if ssh_service_unit_exists(root) {
+            configure_ssh_service(root, "disable")?;
+        }
         return Ok(());
+    }
+    if !ssh_service_unit_exists(root) {
+        return Err(AppError::Flash(
+            "El bundle offline no instaló openssh-server; reconstruye el bundle con el perfil factory-debug"
+                .into(),
+        ));
     }
 
     if !std::fs::read_to_string(root.join("etc/passwd"))
@@ -1482,7 +1510,17 @@ fn provision_ssh_access(root: &Path, config: &DeviceConfig) -> AppResult<()> {
         )));
     }
 
-    validate_ssh_configuration(root)
+    let sudo_output =
+        run_target_command(root, "/usr/sbin/usermod", &["-aG", "sudo", "sigil"], None)?;
+    if !sudo_output.status.success() {
+        let detail = summarize_command_failure(&sudo_output.stdout, &sudo_output.stderr);
+        return Err(AppError::Flash(format!(
+            "No se pudo habilitar sudo para el usuario de diagnóstico sigil: {detail}"
+        )));
+    }
+
+    validate_ssh_configuration(root)?;
+    configure_ssh_service(root, "enable")
 }
 
 fn validate_ssh_configuration(root: &Path) -> AppResult<()> {
@@ -1656,6 +1694,8 @@ fn install_sigil_hardware(
                 ])
                 .env("SIGIL_IMAGE_PREPARATION", "1")
                 .env("DEBIAN_FRONTEND", "noninteractive")
+                .env_remove("SIGIL_PACKAGE_PROFILES")
+                .envs(selected_package_profiles(config))
                 .output()
                 .map_err(|error| AppError::Flash(format!("No se pudo iniciar chroot: {error}")))?;
             if !output.status.success() {
@@ -2339,6 +2379,34 @@ mod tests {
             sshd_validation_args(),
             ["-t", "-h", "/run/sshd/sigil-validation-host-key"]
         );
+    }
+
+    #[test]
+    fn ssh_enabled_selects_factory_debug_package_profile() {
+        assert_eq!(
+            selected_package_profiles(&manufacturing_config()),
+            Some(("SIGIL_PACKAGE_PROFILES", "factory-debug"))
+        );
+    }
+
+    #[test]
+    fn ssh_disabled_does_not_select_factory_debug_package_profile() {
+        let mut config = manufacturing_config();
+        config.ssh_enabled = false;
+        config.password = None;
+
+        assert_eq!(selected_package_profiles(&config), None);
+    }
+
+    #[test]
+    fn ssh_provisioning_rejects_image_without_server_unit() {
+        let root = isolated_lock_dir("ssh-server-unit-missing");
+
+        let error = provision_ssh_access(&root, &manufacturing_config())
+            .expect_err("missing openssh-server must fail before systemctl");
+
+        assert!(error.to_string().contains("openssh-server"));
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

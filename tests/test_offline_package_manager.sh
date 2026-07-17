@@ -52,6 +52,12 @@ valid = (
 raise SystemExit(0 if valid else 1)
 PYEOF
 
+check "factory-debug packages are included in the bundle resolver" \
+    sh -c "grep -q 'item\[\"required\"\] or item\[\"profile\"\] == \"factory-debug\"' '$BUILDER'"
+
+check "offline installer selects package profiles explicitly" \
+    sh -c "grep -q 'SIGIL_PACKAGE_PROFILES' '$ROOT/sigil-hardware/scripts/install-offline-packages.sh'"
+
 check "real bundle has the complete signed repository layout" \
     sh -c "test -d '$BUNDLE/packages' && test -d '$BUNDLE/sources-snapshot' && test -s '$BUNDLE/Packages' && test -s '$BUNDLE/Packages.gz' && test -s '$BUNDLE/Release' && test -s '$BUNDLE/Release.gpg' && test -s '$BUNDLE/InRelease' && test -s '$BUNDLE/checksums.sha256' && test -s '$BUNDLE/package-manifest.json'"
 
@@ -114,6 +120,15 @@ manifest = json.loads((root / "package-manifest.json").read_text(encoding="utf-8
 declared = {item["filename"] for item in manifest["packages"]}
 actual = {path.relative_to(root).as_posix() for path in (root / "packages").iterdir() if path.is_file()}
 raise SystemExit(0 if declared == actual else 1)
+PYEOF
+
+check "factory-debug SSH packages are available for automatic image preparation" \
+    python3 - "$BUNDLE/package-manifest.json" <<'PYEOF'
+import json, pathlib, sys
+manifest = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+names = {item["name"] for item in manifest["packages"]}
+expected = {"openssh-server", "openssh-client", "openssh-sftp-server"}
+raise SystemExit(0 if expected <= names else 1)
 PYEOF
 
 check "Flask, Argon2, and Bluetooth Python modules are supplied by Debian packages only" \

@@ -119,6 +119,18 @@ if [ -n "$BUNDLE" ]; then
     check "offline installer configures signed-by file:// only" \
         sh -c "grep -q 'signed-by=.*file:' '$APT_LOG' && ! grep -Eq 'https?://|trusted[[:space:]]*=[[:space:]]*yes|allow-unauthenticated' '$APT_LOG'"
 
+    : > "$APT_LOG"
+    check "factory-debug profile installs openssh-server from the local bundle" \
+        env PATH="${MOCK_BIN}:/usr/bin:/bin" \
+            SIGIL_OFFLINE_INSTALL_TEST_MODE=1 \
+            SIGIL_PACKAGE_PROFILES=factory-debug \
+            SIGIL_OS_RELEASE_FILE="$OS_RELEASE" \
+            SIGIL_APT_TEST_LOG="$APT_LOG" \
+            bash "$INSTALLER" "$BUNDLE"
+
+    check "factory-debug profile reaches APT without network or credentials" \
+        sh -c "grep -Eq 'install .*openssh-server' '$APT_LOG' && ! grep -Eq 'https?://|trusted[[:space:]]*=[[:space:]]*yes|allow-unauthenticated' '$APT_LOG'"
+
     MISSING_REPOSITORY="${TEST_ROOT}/missing"
     mkdir -p "$MISSING_REPOSITORY/packages"
     cp "$BUNDLE/package-manifest.json" "$MISSING_REPOSITORY/package-manifest.json"

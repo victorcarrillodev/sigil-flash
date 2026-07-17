@@ -279,16 +279,16 @@ pub fn validate_repository(
     if manifest.total_bytes != total_size {
         return Err("repository size does not match package manifest".into());
     }
-    let required_names: BTreeSet<_> = contract
+    let included_names: BTreeSet<_> = contract
         .packages
         .iter()
-        .filter(|package| package.required)
+        .filter(|package| package.required || package.profile == "factory-debug")
         .map(|package| package.name.clone())
         .collect();
-    let missing: Vec<_> = required_names.difference(&package_names).cloned().collect();
+    let missing: Vec<_> = included_names.difference(&package_names).cloned().collect();
     if !missing.is_empty() {
         return Err(format!(
-            "offline repository is missing required packages: {}",
+            "offline repository is missing required bundle-profile packages: {}",
             missing.join(", ")
         ));
     }
@@ -982,6 +982,19 @@ mod tests {
                 && !package.required
                 && package.profile == "factory-debug"
         }));
+    }
+
+    #[test]
+    fn factory_debug_profile_is_required_in_manufacturing_bundle() {
+        let contract = canonical_contract();
+        let included: BTreeSet<_> = contract
+            .packages
+            .iter()
+            .filter(|package| package.required || package.profile == "factory-debug")
+            .map(|package| package.name.as_str())
+            .collect();
+
+        assert!(included.contains("openssh-server"));
     }
 
     #[test]

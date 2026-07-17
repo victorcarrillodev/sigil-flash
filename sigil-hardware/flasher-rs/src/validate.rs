@@ -834,7 +834,11 @@ mod tests {
         let mut index = String::new();
         let mut size_bytes = 0_u64;
 
-        for requirement in contract.packages.iter().filter(|item| item.required) {
+        for requirement in contract
+            .packages
+            .iter()
+            .filter(|item| item.required || item.profile == "factory-debug")
+        {
             let package_root = root.join(format!("deb-{}", requirement.name));
             fs::create_dir_all(package_root.join("DEBIAN")).expect("Debian control directory");
             fs::write(
@@ -887,6 +891,7 @@ mod tests {
             .filter(|requirement| requirement.required)
             .map(|requirement| requirement.name.clone())
             .collect();
+        let direct_package_count = required.len();
 
         let debian_source = "Types: deb\nURIs: http://deb.debian.org/debian/\nSuites: trixie trixie-updates\nComponents: main contrib non-free non-free-firmware\nSigned-By: /usr/share/keyrings/debian-archive-keyring.pgp\n";
         let raspi_source = "Types: deb\nURIs: http://archive.raspberrypi.com/debian/\nSuites: trixie\nComponents: main\nSigned-By: /usr/share/keyrings/raspberrypi-archive-keyring.pgp\n";
@@ -1065,7 +1070,7 @@ mod tests {
             "architecture": contract.architecture,
             "generation_timestamp": "2026-07-15T00:00:00Z",
             "direct_packages": required,
-            "direct_package_count": package_entries.len(),
+            "direct_package_count": direct_package_count,
             "resolved_package_count": package_entries.len(),
             "total_bytes": size_bytes,
             "unresolved_packages": [],
