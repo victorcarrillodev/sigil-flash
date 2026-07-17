@@ -8,7 +8,13 @@ import threading
 PREFERRED_BT_FILE = '/home/sigil/preferred_bt.txt'
 
 # ── Estado WiFi compartido (escrito por hilo de conexión, leído por /wifi/status) ──
-wifi_status = {'running': False, 'success': None, 'message': ''}
+wifi_status = {
+    'running': False,
+    'success': None,
+    'phase': 'idle',
+    'started_at': None,
+    'message': '',
+}
 
 # ── Locks de concurrencia ──────────────────────────────────────────────────────
 scan_lock = threading.Lock()   # Un solo scan BT a la vez

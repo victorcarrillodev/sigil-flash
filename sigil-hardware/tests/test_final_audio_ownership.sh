@@ -93,10 +93,12 @@ bluetooth.remove_device = lambda _mac: (True, "ok")
 sys.modules["bluetooth"] = bluetooth
 
 wifi = types.ModuleType("wifi")
+wifi.WifiCredentialError = type("WifiCredentialError", (ValueError,), {})
 wifi.WifiScanBusy = type("WifiScanBusy", (RuntimeError,), {})
 wifi.scan_wifi_networks = lambda: []
 wifi.connect_wifi = lambda _ssid, _password: (True, "ok")
 wifi.get_current_wifi = lambda: ""
+wifi.validate_wifi_credentials = lambda ssid, password: (ssid, password)
 sys.modules["wifi"] = wifi
 
 spec = importlib.util.spec_from_file_location("sigil_panel_app", root / "panel/app.py")

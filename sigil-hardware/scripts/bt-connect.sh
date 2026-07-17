@@ -16,6 +16,10 @@ RESULT_CODE="internal_error"
 RESULT_MESSAGE="Error Bluetooth"
 RESULT_MAC=""
 COMMAND_MODE=0
+BT_LAST_RC=0
+AUTO_RETRY_INITIAL="${SIGIL_BT_RETRY_INITIAL:-15}"
+AUTO_RETRY_MAX="${SIGIL_BT_RETRY_MAX:-300}"
+AUTO_HEALTH_INTERVAL="${SIGIL_BT_HEALTH_INTERVAL:-15}"
 
 if [ "${1:-}" = "request" ]; then
     COMMAND_MODE=1
@@ -138,6 +142,7 @@ run_bt() {
     shift
     BT_LAST_OUTPUT=$(timeout "$seconds" "$BLUETOOTHCTL" "$@" 2>&1)
     rc=$?
+    BT_LAST_RC=$rc
     if [ "$rc" -ne 0 ]; then
         log "bluetoothctl $1 falló (rc=$rc)"
         return "$rc"
@@ -181,8 +186,13 @@ connected_devices() {
 # Returns 0 for confirmed audio, 1 for informative non-audio metadata, and 2
 # when BlueZ has not supplied enough metadata to decide.
 audio_device_status() {
-    local mac="$1" info class_hex class_value major_class informative=0
+    local mac="$1" info
     info=$(device_info "$mac") || return 2
+    audio_info_status "$info"
+}
+
+audio_info_status() {
+    local info="$1" class_hex class_value major_class informative=0
 
     if grep -qiE 'UUID:.*(Audio Sink|Advanced Audio|0000110[bBdD]-)' \
         <<< "$info"; then
@@ -240,17 +250,15 @@ activate_a2dp() {
     return 1
 }
 
-disconnect_others() {
-    local keep_mac="$1" device
-    while IFS= read -r device; do
-        [ -n "$device" ] || continue
-        [ "$device" = "$keep_mac" ] && continue
-        log "Desconectando dispositivo extra: $device"
-        run_bt 8 disconnect "$device" || return 1
-        wait_disconnected "$device" || return 1
-        run_bt 5 untrust "$device" || return 1
-        run_bt 5 block "$device" || return 1
-    done < <(connected_devices)
+disconnect_previous_preferred() {
+    local keep_mac="$1" previous=""
+    previous=$(read_preferred 2>/dev/null || true)
+    [ -n "$previous" ] || return 0
+    [ "$previous" != "$keep_mac" ] || return 0
+    is_connected "$previous" || return 0
+    log "Desconectando la bocina preferida anterior: $previous"
+    run_bt 8 disconnect "$previous" || return 1
+    wait_disconnected "$previous" || return 1
     return 0
 }
 
@@ -263,14 +271,19 @@ rollback_new_target() {
 }
 
 prepare_target() {
-    local mac="$1" audio_status
-    if ! is_paired "$mac"; then
+    local mac="$1" audio_status info
+    info=$(device_info "$mac") || {
+        RESULT_CODE="not_paired"
+        RESULT_MESSAGE="La bocina no está emparejada"
+        return 1
+    }
+    if ! grep -qiE '^[[:space:]]*Paired:[[:space:]]*yes$' <<< "$info"; then
         RESULT_CODE="not_paired"
         RESULT_MESSAGE="La bocina no está emparejada"
         return 1
     fi
 
-    audio_device_status "$mac"
+    audio_info_status "$info"
     audio_status=$?
     if [ "$audio_status" -eq 1 ]; then
         RESULT_CODE="not_audio"
@@ -310,10 +323,10 @@ complete_target_connection() {
         RESULT_MESSAGE="La bocina conectó, pero la ruta A2DP no quedó disponible"
         return 1
     fi
-    if ! disconnect_others "$mac"; then
+    if ! disconnect_previous_preferred "$mac"; then
         rollback_new_target "$mac"
         RESULT_CODE="exclusive_failed"
-        RESULT_MESSAGE="No se pudo completar el cambio exclusivo de bocina"
+        RESULT_MESSAGE="No se pudo desconectar la bocina preferida anterior"
         return 1
     fi
     if ! write_preferred "$mac"; then
@@ -336,7 +349,11 @@ request_pair_locked() {
     }
     if ! run_bt 20 pair "$mac" && ! is_paired "$mac"; then
         RESULT_CODE="pair_failed"
-        RESULT_MESSAGE="No se pudo emparejar. Verifica el modo de emparejamiento."
+        if [ "$BT_LAST_RC" -eq 124 ]; then
+            RESULT_MESSAGE="La bocina no respondió antes del límite; confirma que siga en modo de emparejamiento"
+        else
+            RESULT_MESSAGE="BlueZ rechazó el emparejamiento; verifica visibilidad, distancia o PIN"
+        fi
         return 1
     fi
     if ! is_paired "$mac"; then
@@ -348,9 +365,8 @@ request_pair_locked() {
     audio_device_status "$mac"
     audio_status=$?
     if [ "$audio_status" -eq 1 ]; then
-        run_bt 8 remove "$mac" || true
         RESULT_CODE="not_audio"
-        RESULT_MESSAGE="El dispositivo no anuncia capacidad de audio"
+        RESULT_MESSAGE="El dispositivo no anuncia capacidad de audio; usa Eliminar si deseas borrarlo"
         return 1
     fi
     prepare_target "$mac" || return 1
@@ -400,6 +416,7 @@ request_remove_locked() {
             return 1
         fi
     fi
+    run_bt 5 untrust "$mac" || log "La bocina ya estaba sin confianza antes de eliminarla"
     if ! run_bt 8 remove "$mac"; then
         RESULT_CODE="remove_failed"
         RESULT_MESSAGE="BlueZ no pudo eliminar la bocina"
@@ -510,48 +527,32 @@ wait_a2dp_ready() {
 }
 
 auto_cycle_locked() {
-    local connected preferred="" current="" audio_status
+    local connected preferred=""
     connected=$(connected_devices)
     preferred=$(read_preferred 2>/dev/null || true)
 
-    if [ -z "$connected" ]; then
-        [ -n "$preferred" ] || return 0
-        log "Sin conexión; reconectando a $preferred"
-        prepare_target "$preferred" || return 1
-        if connect_target "$preferred" && activate_a2dp "$preferred"; then
+    [ -n "$preferred" ] || return 0
+    if printf '%s\n' "$connected" | grep -qxF "$preferred"; then
+        if [ "$preferred" != "$PREV_MAC" ]; then
+            activate_a2dp "$preferred" || return 1
             PREV_MAC="$preferred"
-            return 0
         fi
-        log "Reconexión automática fallida para $preferred"
-        PREV_MAC=""
-        return 1
+        return 0
     fi
 
-    if [ -n "$preferred" ] && printf '%s\n' "$connected" | grep -qxF "$preferred"; then
-        current="$preferred"
-    else
-        current=$(printf '%s\n' "$connected" | head -n 1)
+    log "Bocina preferida ausente; intentando reconexión: $preferred"
+    prepare_target "$preferred" || return 1
+    if connect_target "$preferred" && activate_a2dp "$preferred"; then
+        PREV_MAC="$preferred"
+        return 0
     fi
-
-    audio_device_status "$current"
-    audio_status=$?
-    if [ "$audio_status" -eq 1 ]; then
-        log "Rechazando dispositivo conectado sin capacidad de audio: $current"
-        run_bt 8 disconnect "$current" || return 1
-        return 1
-    fi
-    run_bt 5 trust "$current" || return 1
-    is_trusted "$current" || return 1
-    disconnect_others "$current" || return 1
-    if [ "$current" != "$PREV_MAC" ]; then
-        activate_a2dp "$current" || return 1
-        write_preferred "$current" || return 1
-        PREV_MAC="$current"
-    fi
-    return 0
+    log "Reconexión automática fallida para $preferred"
+    PREV_MAC=""
+    return 1
 }
 
 run_daemon() {
+    local retry_delay="$AUTO_RETRY_INITIAL"
     log "bt-connect iniciado"
     with_bluetooth_lock prepare_adapter_locked || return 1
     wait_a2dp_ready
@@ -560,9 +561,14 @@ run_daemon() {
         return 0
     fi
     while true; do
-        sleep 5
-        if ! with_bluetooth_lock auto_cycle_locked; then
-            sleep $(((RANDOM % 10) + 12))
+        sleep "$AUTO_HEALTH_INTERVAL"
+        if with_bluetooth_lock auto_cycle_locked; then
+            retry_delay="$AUTO_RETRY_INITIAL"
+        else
+            log "Recuperación Bluetooth en ${retry_delay}s"
+            sleep "$retry_delay"
+            retry_delay=$((retry_delay * 2))
+            [ "$retry_delay" -le "$AUTO_RETRY_MAX" ] || retry_delay="$AUTO_RETRY_MAX"
         fi
     done
 }

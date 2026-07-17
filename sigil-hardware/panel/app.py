@@ -27,12 +27,19 @@ import config
 from device_identity import load_identity
 from bluetooth import (
     get_known_devices, get_preferred_device,
-    get_connected_devices, is_device_connected,
-    is_valid_mac, _is_mac, _get_real_name,
+    is_device_connected,
+    is_valid_mac,
     stream_bluetooth_scan, pair_device, connect_device, disconnect_device,
     remove_device,
 )
-from wifi import WifiScanBusy, scan_wifi_networks, connect_wifi, get_current_wifi
+from wifi import (
+    WifiCredentialError,
+    WifiScanBusy,
+    connect_wifi,
+    get_current_wifi,
+    scan_wifi_networks,
+    validate_wifi_credentials,
+)
 from panel_auth import panel_hash_is_provisioned, verify_panel_pin_hash
 
 
@@ -115,8 +122,33 @@ _MUTATING_ENDPOINTS = {
     "api_disconnect_active",
     "api_remove",
     "wifi_connect_route",
+    "wifi_connect_commit_route",
     "music_next",
 }
+
+_WIFI_ACCEPT_TTL_SECONDS = 30
+_WIFI_PENDING_LOCK = threading.Lock()
+_WIFI_PENDING: dict[str, dict[str, object]] = {}
+
+
+def _expire_pending_wifi(now: float | None = None) -> None:
+    """Expire a prepared handoff that the browser never acknowledged."""
+    current = time.monotonic() if now is None else now
+    with _WIFI_PENDING_LOCK:
+        expired = [
+            operation_id
+            for operation_id, operation in _WIFI_PENDING.items()
+            if current - float(operation["accepted_at"]) >= _WIFI_ACCEPT_TTL_SECONDS
+        ]
+        for operation_id in expired:
+            _WIFI_PENDING.pop(operation_id, None)
+        if expired and not _WIFI_PENDING and config.wifi_status.get("phase") == "awaiting_commit":
+            config.wifi_status.update({
+                "running": False,
+                "success": False,
+                "phase": "expired",
+                "message": "La conexión no fue confirmada por el navegador; vuelve a intentarlo",
+            })
 
 
 def _request_host_is_allowed() -> bool:
@@ -413,15 +445,9 @@ def system_status():
 @app.route("/")
 def index():
     preferred_bt = get_preferred_device()
-    connected_macs = get_connected_devices()
-    bt_devices = []
-    for d in get_known_devices():
+    bt_devices = get_known_devices()
+    for d in bt_devices:
         d["preferred"] = d["mac"] == preferred_bt
-        d["connected"] = d["mac"] in connected_macs
-        if _is_mac(d["name"]):
-            real = _get_real_name(d["mac"])
-            d["name"] = real if real else f'Altavoz {d["mac"][-5:].replace(":", "")}'
-        bt_devices.append(d)
 
     return render_template(
         "index.html",
@@ -445,9 +471,8 @@ def api_csrf_token():
 def scan_stream():
     """SSE: emite dispositivos BT en tiempo real conforme se descubren."""
     preferred_bt = get_preferred_device()
-    known_macs = {d["mac"] for d in get_known_devices()}
     return Response(
-        stream_bluetooth_scan(preferred_bt, known_macs),
+        stream_bluetooth_scan(preferred_bt),
         mimetype="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
@@ -457,15 +482,9 @@ def scan_stream():
 def scan_known():
     """Devuelve dispositivos ya emparejados para la carga inicial (JSON)."""
     preferred_bt = get_preferred_device()
-    connected_macs = get_connected_devices()
     devices = get_known_devices()
     for d in devices:
-        if _is_mac(d["name"]):
-            real = _get_real_name(d["mac"])
-            if real:
-                d["name"] = real
         d["preferred"] = d["mac"] == preferred_bt
-        d["connected"] = d["mac"] in connected_macs
         d["known"] = True
     return jsonify({"devices": devices})
 
@@ -474,49 +493,47 @@ def scan_known():
 def bt_status():
     """Devuelve el estado REAL de conexión de todos los dispositivos conocidos."""
     preferred_bt = get_preferred_device()
-    connected_macs = get_connected_devices()
     devices = get_known_devices()
     result = []
     for d in devices:
-        if _is_mac(d["name"]):
-            real = _get_real_name(d["mac"])
-            if real:
-                d["name"] = real
         result.append({
             "mac": d["mac"],
             "name": d["name"],
             "preferred": d["mac"] == preferred_bt,
-            "connected": d["mac"] in connected_macs,
+            "connected": bool(d.get("connected")),
             "known": True,
         })
     return jsonify({
         "devices": result,
-        "connected_macs": list(connected_macs),
+        "connected_macs": [d["mac"] for d in result if d["connected"]],
     })
 
 
 @app.route("/pair", methods=["POST"])
 def pair():
-    mac = request.form.get("mac", "")
+    if request.is_json:
+        mac = request.json.get("mac", "")
+    else:
+        mac = request.form.get("mac", "")
     if not is_valid_mac(mac):
         return jsonify({"success": False, "message": "MAC inválida"}), 400
     success, msg = pair_device(mac)
     return jsonify({"success": success, "message": msg})
 
 
-@app.route("/connect/<mac>")
+@app.route("/connect/<mac>", methods=["POST"])
 def api_connect(mac):
     success, msg = connect_device(mac)
     return jsonify({"success": success, "message": msg})
 
 
-@app.route("/disconnect_active")
+@app.route("/disconnect_active", methods=["POST"])
 def api_disconnect_active():
     success, msg = disconnect_device()
     return jsonify({"success": success, "message": msg})
 
 
-@app.route("/remove/<mac>")
+@app.route("/remove/<mac>", methods=["POST"])
 def api_remove(mac):
     if not is_valid_mac(mac):
         return jsonify({"success": False, "message": "MAC inválida"}), 400
@@ -542,39 +559,111 @@ def wifi_scan():
 
 @app.route("/wifi/connect", methods=["POST"])
 def wifi_connect_route():
-    data = request.get_json()
-    if not data or "ssid" not in data:
-        return jsonify({"success": False, "message": "SSID requerido"}), 400
-    ssid = data.get("ssid", "").strip()
-    password = data.get("password", "").strip()
-    if not ssid:
-        return jsonify({"success": False, "message": "SSID vacío"}), 400
+    _expire_pending_wifi()
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"success": False, "message": "Solicitud WiFi inválida"}), 400
+    try:
+        ssid, password = validate_wifi_credentials(
+            data.get("ssid"), data.get("password", "")
+        )
+    except WifiCredentialError as error:
+        return jsonify({"success": False, "message": str(error)}), 422
 
-    if config.wifi_status["running"]:
-        return jsonify({"success": False, "message": "Ya hay una conexión en progreso, espera…"}), 429
+    with _WIFI_PENDING_LOCK:
+        if config.wifi_status.get("running") or _WIFI_PENDING:
+            return jsonify({
+                "success": False,
+                "message": "Ya hay una conexión en progreso, espera…",
+            }), 429
+        operation_id = secrets.token_urlsafe(18)
+        _WIFI_PENDING[operation_id] = {
+            "ssid": ssid,
+            "password": password,
+            "accepted_at": time.monotonic(),
+        }
+        config.wifi_status.update({
+            "running": True,
+            "success": None,
+            "phase": "awaiting_commit",
+            "started_at": int(time.time()),
+            "message": "Conexión preparada; esperando confirmación del navegador",
+        })
+        expiry_timer = threading.Timer(_WIFI_ACCEPT_TTL_SECONDS, _expire_pending_wifi)
+        expiry_timer.daemon = True
+        expiry_timer.start()
 
-    config.wifi_status.update({
-        "running": True,
-        "success": None,
-        "message": f"Conectando a {ssid}…",
-    })
+    message = (
+        "Conexión iniciada. La red SIGIL puede desaparecer mientras el dispositivo "
+        "se conecta a tu WiFi."
+    )
+    return jsonify({
+        "success": True,
+        "accepted": True,
+        "operation_id": operation_id,
+        "commit_url": url_for("wifi_connect_commit_route", operation_id=operation_id),
+        "message": message,
+    }), 202
+
+
+@app.route("/wifi/connect/<operation_id>/commit", methods=["POST"])
+def wifi_connect_commit_route(operation_id: str):
+    """Start radio ownership only after the browser confirms the 202 response."""
+    _expire_pending_wifi()
+    with _WIFI_PENDING_LOCK:
+        operation = _WIFI_PENDING.pop(operation_id, None)
+        if operation is None:
+            return jsonify({
+                "success": False,
+                "message": "La solicitud WiFi expiró o ya fue confirmada",
+            }), 409
+        config.wifi_status.update({
+            "phase": "transitioning",
+            "message": "Cambiando de la red SIGIL al WiFi seleccionado…",
+        })
+
+    ssid = str(operation["ssid"])
+    password = str(operation["password"])
 
     def _do_wifi():
         try:
-            success, msg = connect_wifi(ssid, password)
-            config.wifi_status.update({"success": success, "message": msg})
-        except Exception as e:
-            app.logger.error(f"[WiFi] _do_wifi exception: {e}")
-            config.wifi_status.update({"success": False, "message": "Error interno crítico"})
+            success, message = connect_wifi(ssid, password)
+            config.wifi_status.update({
+                "success": success,
+                "phase": "complete" if success else "failed",
+                "message": message,
+            })
+        except BaseException as error:
+            app.logger.error("[WiFi] transition failed: %s", type(error).__name__)
+            config.wifi_status.update({
+                "success": False,
+                "phase": "failed",
+                "message": "Error interno durante la transición WiFi",
+            })
         finally:
             config.wifi_status["running"] = False
 
-    threading.Thread(target=_do_wifi, daemon=True).start()
-    return jsonify({"success": True, "message": f"Conectando a {ssid}… (espera 20-40 segundos)"})
+    worker = threading.Thread(target=_do_wifi, daemon=True, name="sigil-wifi-connect")
+    try:
+        worker.start()
+    except RuntimeError:
+        app.logger.error("[WiFi] transition worker could not start")
+        config.wifi_status.update({
+            "running": False,
+            "success": False,
+            "phase": "failed",
+            "message": "No se pudo iniciar la transición WiFi",
+        })
+        return jsonify({
+            "success": False,
+            "message": "No se pudo iniciar la transición WiFi",
+        }), 503
+    return jsonify({"success": True, "accepted": True}), 202
 
 
 @app.route("/wifi/status")
 def wifi_status():
+    _expire_pending_wifi()
     return jsonify(config.wifi_status)
 
 
@@ -643,4 +732,5 @@ def music_next():
 
 # ── Entrypoint ─────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=80, debug=False)
+    port = int(os.environ.get("SIGIL_PANEL_PORT", "80"))
+    app.run(host="0.0.0.0", port=port, debug=False)

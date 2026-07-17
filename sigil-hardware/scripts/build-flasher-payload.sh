@@ -39,6 +39,10 @@ if [ "${SIGIL_PAYLOAD_ALLOW_DIRTY:-false}" != "true" ] \
 fi
 
 SOURCE_COMMIT=$(git -C "$ROOT" rev-parse HEAD)
+SOURCE_DIRTY=false
+if [ -n "$(git -C "$ROOT" status --porcelain -- "${FILES[@]}")" ]; then
+    SOURCE_DIRTY=true
+fi
 PARENT=$(dirname "$OUTPUT")
 NAME=$(basename "$OUTPUT")
 mkdir -p "$PARENT"
@@ -56,7 +60,7 @@ for relative in "${FILES[@]}"; do
     install -D -m "$mode" "${ROOT}/${relative}" "${TEMP}/${relative}"
 done
 
-python3 - "$TEMP" "$SOURCE_COMMIT" <<'PYEOF'
+python3 - "$TEMP" "$SOURCE_COMMIT" "$SOURCE_DIRTY" <<'PYEOF'
 import hashlib
 import json
 import os
@@ -67,6 +71,7 @@ import sys
 
 root = pathlib.Path(sys.argv[1])
 source_commit = sys.argv[2]
+source_dirty = sys.argv[3] == "true"
 forbidden_parts = {
     ".git", ".pytest_cache", "__pycache__", "tests", "docs", "target", "artifacts"
 }
@@ -98,6 +103,7 @@ manifest = {
     "_schema_version": "1.0",
     "payload_type": "sigil-hardware-install",
     "source_commit": source_commit,
+    "source_dirty": source_dirty,
     "target": {
         "os": "raspberry-pi-os-lite",
         "release": "trixie",

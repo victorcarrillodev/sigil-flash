@@ -15,6 +15,8 @@ from contextlib import contextmanager
 
 logger = logging.getLogger(__name__)
 
+WIFI_INTERFACE = os.environ.get('SIGIL_WIFI_INTERFACE', 'wlan0')
+
 WIFI_INHIBIT_FILE = os.environ.get(
     'SIGIL_WIFI_INHIBIT_FILE', '/run/sigil/wifi-fallback-inhibit.json'
 )
@@ -46,6 +48,33 @@ WIFI_CONNECT_CHECK_INTERVAL = float(
 
 class WifiScanBusy(RuntimeError):
     """An active scan or WiFi ownership transition already has the radio."""
+
+
+class WifiCredentialError(ValueError):
+    """A WiFi request is structurally invalid without exposing its secret."""
+
+
+def validate_wifi_credentials(ssid: object, password: object) -> tuple[str, str]:
+    """Validate WiFi input while preserving the exact SSID and passphrase."""
+    if not isinstance(ssid, str) or not ssid or not ssid.strip():
+        raise WifiCredentialError('SSID requerido')
+    if any(character in ssid for character in ('\x00', '\r', '\n')):
+        raise WifiCredentialError('El SSID contiene caracteres no permitidos')
+    if len(ssid.encode('utf-8')) > 32:
+        raise WifiCredentialError('El SSID supera 32 bytes')
+    if not isinstance(password, str):
+        raise WifiCredentialError('La contraseña WiFi debe ser texto')
+    if any(character in password for character in ('\x00', '\r', '\n')):
+        raise WifiCredentialError('La contraseña contiene caracteres no permitidos')
+    if not password:
+        return ssid, password
+    encoded_length = len(password.encode('utf-8'))
+    is_raw_psk = bool(re.fullmatch(r'[0-9A-Fa-f]{64}', password))
+    if not (8 <= encoded_length <= 63 or is_raw_psk):
+        raise WifiCredentialError(
+            'La contraseña WPA/WPA2 debe tener entre 8 y 63 bytes, o ser una clave hexadecimal de 64 caracteres'
+        )
+    return ssid, password
 
 
 @contextmanager
@@ -91,13 +120,13 @@ def _run_active_wifi_scan() -> str:
     """Run the only production active-scan command under canonical locks."""
     with _wifi_scan_guard():
         result = subprocess.run(
-            ['sudo', 'iwlist', 'wlan0', 'scan'],
+            ['sudo', WIFI_FALLBACK_HELPER, '--panel-scan'],
             capture_output=True,
             text=True,
             timeout=WIFI_SCAN_TIMEOUT_SECONDS,
         )
     if result.returncode != 0:
-        raise RuntimeError(f'iwlist scan exited with status {result.returncode}')
+        raise RuntimeError(f'WiFi scan exited with status {result.returncode}')
     return result.stdout
 
 
@@ -159,7 +188,7 @@ def _remove_fallback_inhibit(operation_id: str) -> None:
 
 def _client_link_stable() -> bool:
     state = subprocess.run(
-        ['nmcli', '-t', '-f', 'GENERAL.STATE', 'device', 'show', 'wlan0'],
+        ['nmcli', '-t', '-f', 'GENERAL.STATE', 'device', 'show', WIFI_INTERFACE],
         capture_output=True, text=True, timeout=5
     )
     if state.returncode != 0 or not (
@@ -167,7 +196,7 @@ def _client_link_stable() -> bool:
     ):
         return False
     address = subprocess.run(
-        ['ip', '-o', 'address', 'show', 'dev', 'wlan0', 'scope', 'global'],
+        ['ip', '-o', 'address', 'show', 'dev', WIFI_INTERFACE, 'scope', 'global'],
         capture_output=True, text=True, timeout=5
     )
     return address.returncode == 0 and bool(address.stdout.strip())
@@ -217,6 +246,10 @@ def _restore_ap_ownership() -> bool:
 
 def _record_client_handoff() -> bool:
     return _run_owner_action('--external-client-handoff')
+
+
+def _disable_power_save() -> bool:
+    return _run_owner_action('--disable-power-save')
 
 
 def _persist_client_secret(profile: str, password_file: str) -> bool:
@@ -355,7 +388,9 @@ def connect_wifi(ssid: str, password: str) -> tuple[bool, str]:
     operation_id = ''
     ownership_attempted = False
     client_handoff_complete = False
+    profile_created = False
     try:
+        ssid, password = validate_wifi_credentials(ssid, password)
         os.makedirs(os.path.dirname(WIFI_TRANSITION_LOCK), mode=0o770, exist_ok=True)
         transition_handle = open(WIFI_TRANSITION_LOCK, 'a+', encoding='utf-8')
         try:
@@ -370,7 +405,6 @@ def connect_wifi(ssid: str, password: str) -> tuple[bool, str]:
         ownership_attempted = True
         if not _prepare_client_ownership():
             return False, 'No se pudo devolver wlan0 a NetworkManager'
-        time.sleep(3)
 
         profile_exists = _wifi_profile_exists(ssid)
 
@@ -378,11 +412,12 @@ def connect_wifi(ssid: str, password: str) -> tuple[bool, str]:
             if not profile_exists:
                 add = subprocess.run(
                     ['sudo', 'nmcli', 'con', 'add',
-                     'con-name', ssid, 'type', 'wifi', 'ifname', 'wlan0', 'ssid', ssid],
+                     'con-name', ssid, 'type', 'wifi', 'ifname', WIFI_INTERFACE, 'ssid', ssid],
                     capture_output=True, text=True, timeout=10
                 )
                 if add.returncode != 0:
                     return False, 'Error al crear el perfil WiFi'
+                profile_created = True
             modified = subprocess.run(
                 ['sudo', 'nmcli', 'con', 'mod', ssid,
                  'wifi-sec.key-mgmt', 'wpa-psk',
@@ -398,7 +433,7 @@ def connect_wifi(ssid: str, password: str) -> tuple[bool, str]:
                     ['sudo', 'nmcli', 'con', 'up', ssid],
                     capture_output=True, text=True, timeout=45
                 )
-            subprocess.run(['sudo', 'iw', 'dev', 'wlan0', 'set', 'power_save', 'off'], capture_output=True)
+            _disable_power_save()
             if up.returncode != 0:
                 return False, 'NetworkManager no pudo activar la conexión'
             if not _wait_for_client_stability():
@@ -410,7 +445,7 @@ def connect_wifi(ssid: str, password: str) -> tuple[bool, str]:
 
         elif profile_exists:
             up = subprocess.run(['sudo', 'nmcli', 'con', 'up', ssid], capture_output=True, text=True, timeout=45)
-            subprocess.run(['sudo', 'iw', 'dev', 'wlan0', 'set', 'power_save', 'off'], capture_output=True)
+            _disable_power_save()
             if up.returncode != 0:
                 return False, 'NetworkManager no pudo reactivar la conexión guardada'
             if not _wait_for_client_stability():
@@ -425,7 +460,7 @@ def connect_wifi(ssid: str, password: str) -> tuple[bool, str]:
                 ['sudo', 'nmcli', 'dev', 'wifi', 'connect', ssid],
                 capture_output=True, text=True, timeout=45
             )
-            subprocess.run(['sudo', 'iw', 'dev', 'wlan0', 'set', 'power_save', 'off'], capture_output=True)
+            _disable_power_save()
             if result.returncode != 0:
                 return False, 'NetworkManager no pudo establecer la conexión'
             if not _wait_for_client_stability():
@@ -441,6 +476,15 @@ def connect_wifi(ssid: str, password: str) -> tuple[bool, str]:
         logger.error('WiFi transition failed: %s', type(e).__name__)
         return False, 'Error interno durante la transición WiFi'
     finally:
+        if profile_created and not client_handoff_complete:
+            try:
+                subprocess.run(
+                    ['sudo', 'nmcli', 'connection', 'delete', ssid],
+                    capture_output=True,
+                    timeout=10,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                logger.error('Could not remove the incomplete WiFi profile')
         if operation_id and ownership_attempted and not client_handoff_complete:
             if not _restore_ap_ownership():
                 logger.error('Canonical WiFi AP rollback failed')

@@ -2,30 +2,121 @@
 <html lang="es">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#0d0f14">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#051424">
   <title>Acceso técnico — SIGIL</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
 </head>
 <body>
-  <main class="card" style="max-width:420px;margin:10vh auto;padding:24px">
-    <div class="card-header">
-      <span class="card-header-icon">🔐</span>
-      <h1 class="card-title">Acceso técnico SIGIL</h1>
-    </div>
-    {% if setup_locked %}
-      <p class="result-msg error" role="alert">El panel está bloqueado hasta que un técnico aprovisione un PIN local.</p>
-    {% else %}
-      <form method="post" autocomplete="off">
+  <!-- Video Background -->
+  <video class="bg-video" autoplay muted loop playsinline preload="metadata"
+         poster="{{ url_for('static', filename='img/logo.png') }}">
+    <source src="{{ url_for('static', filename='video/login-bg.mp4') }}" type="video/mp4">
+  </video>
+
+  <!-- Background overlay -->
+  <div class="bg-overlay"></div>
+
+  <div class="login-wrapper">
+    <div class="login-card">
+      <!-- Header -->
+      <div class="login-header">
+        <div class="login-logo">
+          <img src="{{ url_for('static', filename='img/logo.png') }}" alt="SIGIL" class="login-logo-img">
+        </div>
+        <h1 class="login-title">Sigil</h1>
+        <p class="login-subtitle">Panel de Control</p>
+      </div>
+
+      {% if setup_locked %}
+      <!-- Locked state -->
+      <div class="login-error" role="alert">
+        <span style="font-size: 24px; display: block; margin-bottom: 8px;">🔒</span>
+        Panel bloqueado.<br>
+        <small>Requiere aprovisionamiento local por un técnico.</small>
+      </div>
+      <div class="login-footer">
+        <p>Contacta al administrador del sistema.</p>
+      </div>
+      {% else %}
+      <!-- Login form -->
+      <form class="login-form" method="post" autocomplete="off">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <label class="form-label" for="panel-pin">PIN del panel</label>
-        <input class="form-input" id="panel-pin" name="panel_pin" type="password"
-               inputmode="numeric" pattern="[0-9]{6,12}" minlength="6" maxlength="12"
-               autocomplete="current-password" required autofocus>
-        <button class="btn-primary" type="submit" style="margin-top:16px">Entrar</button>
+
+        <div class="form-group">
+          <label class="form-label" for="panel-pin">
+            Ingresa tu PIN
+          </label>
+          <div class="pin-container" id="pin-container">
+            <input type="password"
+                   id="panel-pin"
+                   name="panel_pin"
+                   class="pin-input"
+                   inputmode="numeric"
+                   pattern="[0-9]{6,12}"
+                   minlength="6"
+                   maxlength="12"
+                   autocomplete="current-password"
+                   autofocus
+                   placeholder="●●●●●●"
+                   spellcheck="false">
+            <div class="pin-dots" id="pin-dots"></div>
+          </div>
+        </div>
+
+        {% if error %}
+        <div class="login-error" id="login-error" role="alert">{{ error }}</div>
+        {% endif %}
+
+        <button class="btn btn-primary" type="submit" id="submit-btn">
+          Autenticar
+        </button>
       </form>
-    {% endif %}
-    {% if error %}<p class="result-msg error" role="alert">{{ error }}</p>{% endif %}
-  </main>
+      {% endif %}
+
+      <!-- Footer -->
+      <div class="login-footer">
+        <p>© 2024 SIGIL SYSTEMS</p>
+      </div>
+    </div>
+  </div>
+
+  <script>
+  (function() {
+    const pinInput = document.getElementById('panel-pin');
+    const pinDots = document.getElementById('pin-dots');
+    const form = document.querySelector('.login-form');
+    const submitBtn = document.getElementById('submit-btn');
+    const errorEl = document.getElementById('login-error');
+
+    if (pinInput && pinDots) {
+      function updateDots(length) {
+        const max = 12;
+        let html = '';
+        for (let i = 0; i < max; i++) {
+          const filled = i < length;
+          const dim = i >= Math.max(6, length);
+          html += `<span class="pin-dot ${filled ? 'filled' : ''} ${dim ? 'dim' : ''}"></span>`;
+        }
+        pinDots.innerHTML = html;
+      }
+
+      pinInput.addEventListener('input', function() {
+        this.value = this.value.replace(/\D/g, '').slice(0, 12);
+        if (errorEl) errorEl.style.display = 'none';
+        updateDots(this.value.length);
+      });
+
+      updateDots(0);
+    }
+
+    form?.addEventListener('submit', function() {
+      if (submitBtn) {
+        submitBtn.disabled = true;
+        submitBtn.innerHTML = '<span class="spinner"></span> Verificando…';
+      }
+    });
+  })();
+  </script>
 </body>
 </html>

@@ -181,7 +181,9 @@ install -d -o root -g root -m 0755 \
     "${PANEL_INSTALL_DIR}/templates" \
     "${PANEL_INSTALL_DIR}/static" \
     "${PANEL_INSTALL_DIR}/static/css" \
-    "${PANEL_INSTALL_DIR}/static/js"
+    "${PANEL_INSTALL_DIR}/static/js" \
+    "${PANEL_INSTALL_DIR}/static/img" \
+    "${PANEL_INSTALL_DIR}/static/video"
 
 for panel_file in "${REPO_DIR}"/panel/*.py; do
     install -o root -g root -m 0644 \
@@ -193,7 +195,7 @@ for template_file in "${REPO_DIR}"/panel/templates/*; do
         "$template_file" "${PANEL_INSTALL_DIR}/templates/$(basename "$template_file")"
 done
 
-for asset_dir in css js; do
+for asset_dir in css js img video; do
     for asset_file in "${REPO_DIR}/panel/static/${asset_dir}"/*; do
         install -o root -g root -m 0644 \
             "$asset_file" "${PANEL_INSTALL_DIR}/static/${asset_dir}/$(basename "$asset_file")"

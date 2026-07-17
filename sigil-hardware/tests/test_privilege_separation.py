@@ -54,8 +54,8 @@ class PanelPrivilegeSeparationTests(unittest.TestCase):
     def test_wifi_power_save_setup_is_an_isolated_root_one_shot(self):
         self.assertRegex(
             self.unit,
-            r"(?m)^ExecStartPre=-\+/usr/sbin/iw "
-            r"dev wlan0 set power_save off$",
+            r"(?m)^ExecStartPre=-\+/usr/local/bin/wifi-fallback\.sh "
+            r"--disable-power-save$",
         )
 
     def test_installer_uses_root_owned_read_only_panel_tree(self):
@@ -157,8 +157,8 @@ class PanelPrivilegeSeparationTests(unittest.TestCase):
             "/usr/local/bin/wifi-fallback.sh --restore-ap",
             "/usr/local/bin/wifi-fallback.sh --external-client-handoff",
             "/usr/local/bin/wifi-fallback.sh --persist-client-secret *",
-            "/usr/sbin/iwlist wlan0 scan",
-            "/usr/sbin/iw dev wlan0 set power_save off",
+            "/usr/local/bin/wifi-fallback.sh --panel-scan",
+            "/usr/local/bin/wifi-fallback.sh --disable-power-save",
         ):
             self.assertIn(f"sigil ALL=(root) NOPASSWD: {command}", policies)
 

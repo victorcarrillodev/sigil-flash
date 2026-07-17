@@ -40,8 +40,9 @@ case "$*" in
         ;;
     connection\ load\ *) exit 0 ;;
     "connection down id KnownNet") exit 0 ;;
-    "connection up id KnownNet")
+    "device connect wlan0")
         if [ -f "$MOCK_STATE/recovery_success" ]; then
+            touch "$MOCK_STATE/active_profile"
             touch "$MOCK_STATE/associated" "$MOCK_STATE/address" "$MOCK_STATE/route" \
                 "$MOCK_STATE/gateway_ok" "$MOCK_STATE/dns_ok" "$MOCK_STATE/https_ok"
             exit 0
@@ -312,7 +313,7 @@ write_ap_state() {
 test_recovery_cooldown_respected() {
     write_ap_state "$(( $(date +%s) + 1000 ))"
     run_cycle
-    ! grep -q '^connection up id KnownNet$' "${MOCK_STATE}/nmcli_calls"
+    ! grep -q '^device connect wlan0$' "${MOCK_STATE}/nmcli_calls"
 }
 
 test_successful_ap_recovery() {
@@ -321,7 +322,8 @@ test_successful_ap_recovery() {
     run_cycle
     state_is CLIENT_ONLINE \
         && [ "$(grep -c '^stop hostapd$' "${MOCK_STATE}/systemctl_calls")" -eq 1 ] \
-        && ! grep -q '^start hostapd$' "${MOCK_STATE}/systemctl_calls"
+        && ! grep -q '^start hostapd$' "${MOCK_STATE}/systemctl_calls" \
+        && grep -q '^LAST_SUCCESSFUL_PROFILE=KnownNet$' "$STATE_FILE"
 }
 
 test_failed_recovery_restores_ap_once() {

@@ -113,10 +113,12 @@ def load_panel_app(hash_path: Path):
     sys.modules["bluetooth"] = bluetooth
 
     wifi = types.ModuleType("wifi")
+    wifi.WifiCredentialError = type("WifiCredentialError", (ValueError,), {})
     wifi.WifiScanBusy = type("WifiScanBusy", (RuntimeError,), {})
     wifi.scan_wifi_networks = lambda: []
     wifi.connect_wifi = lambda _ssid, _password: (True, "ok")
     wifi.get_current_wifi = lambda: ""
+    wifi.validate_wifi_credentials = lambda ssid, password: (ssid, password)
     sys.modules["wifi"] = wifi
 
     name = f"sigil_panel_auth_test_{os.getpid()}_{id(hash_path)}"
@@ -206,11 +208,11 @@ class FlaskAuthenticationTests(unittest.TestCase):
         with self.client.session_transaction() as current:
             self.assertEqual(token_response.get_json()["csrf_token"], current["csrf_token"])
         self.assertEqual(
-            self.client.get("/connect/02:00:00:00:00:01").status_code, 403
+            self.client.post("/connect/02:00:00:00:00:01").status_code, 403
         )
         with self.client.session_transaction() as current:
             csrf = current["csrf_token"]
-        allowed = self.client.get(
+        allowed = self.client.post(
             "/connect/02:00:00:00:00:01", headers={"X-Sigil-CSRF": csrf}
         )
         self.assertEqual(allowed.status_code, 200)

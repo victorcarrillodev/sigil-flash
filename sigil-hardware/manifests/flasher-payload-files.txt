@@ -11,8 +11,14 @@ panel/device_identity.py
 panel/geolocation.py
 panel/panel_auth.py
 panel/wifi.py
+panel/static/css/components.css
+panel/static/css/layout.css
+panel/static/css/reset.css
 panel/static/css/style.css
+panel/static/css/tokens.css
+panel/static/img/logo.png
 panel/static/js/app.js
+panel/static/video/login-bg.mp4
 panel/templates/index.html
 panel/templates/login.html
 scripts/audio-manager.sh

@@ -3,8 +3,14 @@
 set -uo pipefail
 IFS=$'\n\t'
 
-VERSION="3.1.0"
+VERSION="3.3.0"
 LOG_TAG="[wifi-fallback]"
+WIFI_DEFAULTS_FILE="${SIGIL_WIFI_DEFAULTS_FILE:-/etc/sigil/wifi-fallback.conf}"
+if [ -r "$WIFI_DEFAULTS_FILE" ]; then
+    # Root-owned manufacturing defaults; contains no credentials.
+    # shellcheck source=conf/wifi-fallback.conf
+    source "$WIFI_DEFAULTS_FILE"
+fi
 AP_INTERFACE="${SIGIL_WIFI_INTERFACE:-wlan0}"
 AP_IP="${SIGIL_WIFI_AP_IP:-192.168.4.1}"
 STATE_FILE="${SIGIL_WIFI_STATE_FILE:-/var/lib/sigil/wifi-fallback-state}"
@@ -38,12 +44,34 @@ RESTORE_EXTERNAL_AP=0
 PERSIST_CLIENT_SECRET=0
 PERSIST_PROFILE=""
 PERSIST_PASSWORD_FILE=""
+PANEL_SCAN=0
+DISABLE_POWER_SAVE=0
 PROBE_STATE="CLIENT_CONNECTING"
 PROBE_REASON="not_checked"
 PROBE_GATEWAY=""
 PROBE_FAMILY=""
 
 declare -A WIFI_STATE=()
+
+interface_available() {
+    [ -d "${SIGIL_WIFI_SYS_CLASS_NET:-/sys/class/net}/${AP_INTERFACE}" ]
+}
+
+panel_scan() {
+    interface_available || {
+        printf 'configured WiFi interface is unavailable: %s\n' "$AP_INTERFACE" >&2
+        return 1
+    }
+    timeout 15 iwlist "$AP_INTERFACE" scan
+}
+
+disable_power_save() {
+    interface_available || {
+        printf 'configured WiFi interface is unavailable: %s\n' "$AP_INTERFACE" >&2
+        return 1
+    }
+    iw dev "$AP_INTERFACE" set power_save off
+}
 
 log() {
     printf '%s %s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$LOG_TAG" "$*"
@@ -63,6 +91,7 @@ state_defaults() {
     WIFI_STATE[NEXT_PROBE_AT]="0"
     WIFI_STATE[DEAD_PROFILE]=""
     WIFI_STATE[DEAD_PROFILE_DEACTIVATED]="0"
+    WIFI_STATE[LAST_SUCCESSFUL_PROFILE]=""
     WIFI_STATE[UPDATED_AT]="0"
 }
 
@@ -72,7 +101,7 @@ load_state() {
     local key value
     while IFS='=' read -r key value; do
         case "$key" in
-            STATE|CLIENT_STATE|REASON|FAIL_COUNT|SUCCESS_COUNT|FAIL_STARTED_AT|AP_ACTIVE|NEXT_RETRY_AT|RECOVERY_BACKOFF|LOCAL_PROBE_BACKOFF|NEXT_PROBE_AT|DEAD_PROFILE|DEAD_PROFILE_DEACTIVATED|UPDATED_AT)
+            STATE|CLIENT_STATE|REASON|FAIL_COUNT|SUCCESS_COUNT|FAIL_STARTED_AT|AP_ACTIVE|NEXT_RETRY_AT|RECOVERY_BACKOFF|LOCAL_PROBE_BACKOFF|NEXT_PROBE_AT|DEAD_PROFILE|DEAD_PROFILE_DEACTIVATED|LAST_SUCCESSFUL_PROFILE|UPDATED_AT)
                 WIFI_STATE[$key]="$value"
                 ;;
         esac
@@ -103,6 +132,7 @@ save_state() {
         printf 'NEXT_PROBE_AT=%s\n' "${WIFI_STATE[NEXT_PROBE_AT]}"
         printf 'DEAD_PROFILE=%s\n' "${WIFI_STATE[DEAD_PROFILE]}"
         printf 'DEAD_PROFILE_DEACTIVATED=%s\n' "${WIFI_STATE[DEAD_PROFILE_DEACTIVATED]}"
+        printf 'LAST_SUCCESSFUL_PROFILE=%s\n' "${WIFI_STATE[LAST_SUCCESSFUL_PROFILE]//$'\n'/ }"
         printf 'UPDATED_AT=%s\n' "${WIFI_STATE[UPDATED_AT]}"
     } > "$temporary" || { rm -f "$temporary"; return 1; }
     mv -f "$temporary" "$STATE_FILE"
@@ -166,7 +196,7 @@ restore_external_ap_ownership() {
 }
 
 record_external_client_handoff() {
-    local now
+    local now active_profile
     panel_transition_context_active || return 1
 
     now=$(date +%s)
@@ -184,6 +214,8 @@ record_external_client_handoff() {
     WIFI_STATE[NEXT_PROBE_AT]="0"
     WIFI_STATE[DEAD_PROFILE]=""
     WIFI_STATE[DEAD_PROFILE_DEACTIVATED]="0"
+    active_profile=$(active_wifi_profile)
+    [ -z "$active_profile" ] || WIFI_STATE[LAST_SUCCESSFUL_PROFILE]="$active_profile"
     persist_state "CLIENT_CONNECTING" "panel_client_handoff" "$now"
 }
 
@@ -458,9 +490,9 @@ active_wifi_profile() {
         | awk -F: -v iface="$AP_INTERFACE" '$2 == iface {print $1; exit}'
 }
 
-saved_wifi_profile() {
+has_saved_wifi_profile() {
     nmcli -t -f NAME,TYPE connection show 2>/dev/null \
-        | awk -F: '$2 == "802-11-wireless" || $2 == "wifi" || $2 == "wireless" {print $1; exit}'
+        | awk -F: '$2 == "802-11-wireless" || $2 == "wifi" || $2 == "wireless" {found=1; exit} END {exit !found}'
 }
 
 start_ap_services() {
@@ -570,7 +602,7 @@ restore_ap_after_failed_recovery() {
 }
 
 attempt_ap_recovery() {
-    local now="$1" lock_fd profile stable=0 elapsed=0
+    local now="$1" lock_fd stable=0 elapsed=0 active_profile
     acquire_transition_lock lock_fd || return 1
     if inhibit_active; then
         release_transition_lock "$lock_fd"
@@ -587,8 +619,11 @@ attempt_ap_recovery() {
         release_transition_lock "$lock_fd"
         return 1
     fi
-    profile=$(saved_wifi_profile)
-    if [ -z "$profile" ] || ! nmcli connection up id "$profile" >/dev/null 2>&1; then
+    # Give NetworkManager all saved profiles. It selects by the existing
+    # autoconnect priority and, for equal priorities, most recent successful
+    # use. Explicitly choosing the first profile here would defeat that policy.
+    if ! has_saved_wifi_profile \
+        || ! timeout 45 nmcli device connect "$AP_INTERFACE" >/dev/null 2>&1; then
         restore_ap_after_failed_recovery "$now" "recovery_profile_failed"
         release_transition_lock "$lock_fd"
         return 1
@@ -601,6 +636,8 @@ attempt_ap_recovery() {
             *) stable=0 ;;
         esac
         if (( stable >= SUCCESS_THRESHOLD )); then
+            active_profile=$(active_wifi_profile)
+            [ -z "$active_profile" ] || WIFI_STATE[LAST_SUCCESSFUL_PROFILE]="$active_profile"
             WIFI_STATE[AP_ACTIVE]="0"
             WIFI_STATE[FAIL_COUNT]="0"
             WIFI_STATE[SUCCESS_COUNT]="$stable"
@@ -667,7 +704,7 @@ handle_client_failure() {
 }
 
 run_cycle() {
-    local now previous_state
+    local now previous_state active_profile
     now=$(date +%s)
     load_state
     previous_state="${WIFI_STATE[STATE]}"
@@ -696,6 +733,8 @@ run_cycle() {
     probe_client_state
     case "$PROBE_STATE" in
         CLIENT_ONLINE)
+            active_profile=$(active_wifi_profile)
+            [ -z "$active_profile" ] || WIFI_STATE[LAST_SUCCESSFUL_PROFILE]="$active_profile"
             WIFI_STATE[FAIL_COUNT]="0"
             WIFI_STATE[FAIL_STARTED_AT]="0"
             WIFI_STATE[SUCCESS_COUNT]="$((WIFI_STATE[SUCCESS_COUNT] + 1))"
@@ -720,7 +759,7 @@ run_cycle() {
 }
 
 usage() {
-    printf 'Usage: %s [--oneshot|--dry-run|--prepare-client|--restore-ap|--external-client-handoff|--persist-client-secret PROFILE PASSWORD_FILE]\n' "$(basename "$0")"
+    printf 'Usage: %s [--oneshot|--dry-run|--panel-scan|--disable-power-save|--prepare-client|--restore-ap|--external-client-handoff|--persist-client-secret PROFILE PASSWORD_FILE]\n' "$(basename "$0")"
 }
 
 parse_args() {
@@ -731,6 +770,8 @@ parse_args() {
             --prepare-client) PREPARE_EXTERNAL_CLIENT=1 ;;
             --restore-ap) RESTORE_EXTERNAL_AP=1 ;;
             --external-client-handoff) EXTERNAL_CLIENT_HANDOFF=1 ;;
+            --panel-scan) PANEL_SCAN=1 ;;
+            --disable-power-save) DISABLE_POWER_SAVE=1 ;;
             --persist-client-secret)
                 [ "$#" -ge 3 ] || { usage; return 2; }
                 PERSIST_CLIENT_SECRET=1
@@ -747,6 +788,14 @@ parse_args() {
 
 main() {
     parse_args "$@" || return $?
+    if [ "$PANEL_SCAN" -eq 1 ]; then
+        panel_scan
+        return
+    fi
+    if [ "$DISABLE_POWER_SAVE" -eq 1 ]; then
+        disable_power_save
+        return
+    fi
     if [ "$PREPARE_EXTERNAL_CLIENT" -eq 1 ]; then
         prepare_external_client_ownership
         return

@@ -41,6 +41,27 @@ fi
 check "payload manifest is generated" test -f "${PAYLOAD}/payload-manifest.json"
 check "installer is included" test -x "${PAYLOAD}/install.sh"
 check "runtime panel is included" test -f "${PAYLOAD}/panel/geolocation.py"
+check "panel visual modules are included" \
+    sh -c "test -f '$PAYLOAD/panel/static/css/tokens.css' && test -f '$PAYLOAD/panel/static/css/components.css' && test -f '$PAYLOAD/panel/static/css/layout.css'"
+check "panel logo and login video are included" \
+    sh -c "test -s '$PAYLOAD/panel/static/img/logo.png' && test -s '$PAYLOAD/panel/static/video/login-bg.mp4'"
+check "every locally referenced panel asset exists" \
+    python3 - "$PAYLOAD/panel" <<'PYEOF'
+import pathlib
+import re
+import sys
+
+panel = pathlib.Path(sys.argv[1])
+references = set()
+for path in [*panel.glob('templates/*.html'), *panel.glob('static/css/*.css')]:
+    text = path.read_text(encoding='utf-8')
+    references.update(re.findall(r"filename=['\"]([^'\"]+)['\"]", text))
+    if path.suffix == '.css':
+        for value in re.findall(r"@import\s+url\(['\"]?([^)'\"]+)", text):
+            references.add(f"css/{value}")
+missing = [value for value in sorted(references) if not (panel / 'static' / value).is_file()]
+raise SystemExit(1 if missing else 0)
+PYEOF
 check "runtime scripts are included" test -f "${PAYLOAD}/scripts/firstboot.sh"
 check "runtime cache metadata helper is included" \
     test -f "${PAYLOAD}/scripts/sigil-cache-meta-perms.sh"
@@ -72,7 +93,8 @@ valid_target = manifest["target"] == {
     "architecture": "arm64",
     "hardware": "raspberry-pi-zero-2-w",
 }
-raise SystemExit(0 if declared == actual and valid_target else 1)
+valid_source_state = isinstance(manifest.get("source_dirty"), bool)
+raise SystemExit(0 if declared == actual and valid_target and valid_source_state else 1)
 PYEOF
 
 if [ -n "${SIGIL_FLASH_SERVICE:-}" ]; then

@@ -31,16 +31,15 @@ class BluetoothOwnerContractTests(unittest.TestCase):
 
     @patch("bluetooth.subprocess.Popen")
     @patch("bluetooth.get_known_devices", return_value=[])
-    @patch("bluetooth.get_connected_devices", return_value=set())
     def test_busy_transition_prevents_overlapping_active_scan(
-        self, _connected, _known, popen
+        self, _known, popen
     ):
         with tempfile.TemporaryDirectory() as temp_dir:
             lock_path = os.path.join(temp_dir, "bluetooth-transition.lock")
             with patch.object(bluetooth, "BT_TRANSITION_LOCK", lock_path):
                 owner_lock = bluetooth._try_acquire_transition_lock()
                 try:
-                    events = list(bluetooth.stream_bluetooth_scan(None, set()))
+                    events = list(bluetooth.stream_bluetooth_scan(None))
                 finally:
                     bluetooth._release_transition_lock(owner_lock)
 
@@ -54,14 +53,12 @@ class BluetoothOwnerContractTests(unittest.TestCase):
         javascript = Path(
             os.path.join(os.path.dirname(__file__), "..", "panel", "static", "js", "app.js")
         ).read_text(encoding="utf-8")
-        action_block = javascript[javascript.index("// ── Bluetooth: action delegation"):]
-        self.assertGreaterEqual(action_block.count("stopBluetoothScanForAction();"), 4)
-        self.assertIn("_btScanStream.close();", javascript)
-        self.assertGreaterEqual(
-            action_block.count("La petición Bluetooth no pudo completarse"), 4
-        )
+        action_block = javascript[javascript.index("// ── Bluetooth: Actions"):]
+        self.assertGreaterEqual(action_block.count("stopBluetoothScan();"), 4)
+        self.assertIn("state.btScanStream.close();", javascript)
+        self.assertGreaterEqual(action_block.count("refreshBluetoothState()"), 4)
         self.assertGreaterEqual(action_block.count("csrfFetch("), 5)
-        self.assertIn("fetch('/api/csrf-token'", javascript)
+        self.assertIn("fetchWithTimeout('/api/csrf-token'", javascript)
         self.assertIn("cache: 'no-store'", javascript)
         app_source = Path(
             os.path.join(os.path.dirname(__file__), "..", "panel", "app.py")
@@ -72,7 +69,7 @@ class BluetoothOwnerContractTests(unittest.TestCase):
         template = Path(
             os.path.join(os.path.dirname(__file__), "..", "panel", "templates", "index.html")
         ).read_text(encoding="utf-8")
-        self.assertIn("v='20260716-csrf1'", template)
+        self.assertIn("v='20260717-product2'", template)
 
     @patch("bluetooth.subprocess.run")
     def test_connect_uses_bounded_structured_owner_request(self, run):
@@ -127,7 +124,7 @@ class BluetoothOwnerContractTests(unittest.TestCase):
         success, message = bluetooth.pair_device(FAKE_MAC)
 
         self.assertFalse(success)
-        self.assertIn("Timeout", message)
+        self.assertIn("tiempo de espera", message)
 
     def test_preferred_reader_normalizes_and_rejects_symlinks(self):
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -340,7 +340,7 @@ test_prestart_delay_not_panel_failure() {
     grep -q '^ExecStartPre=/bin/sleep 12$' "${ROOT}/services/bt-connect.service" \
         && ! has_pattern 'systemctl.*(start|stop|restart).*bt-connect' \
             "${ROOT}/panel/app.py" "${ROOT}/panel/bluetooth.py" \
-        && grep -q '^BT_OWNER_TIMEOUT_SECONDS = 75$' "${ROOT}/panel/bluetooth.py"
+        && grep -q '^BT_OWNER_TIMEOUT_SECONDS = 100$' "${ROOT}/panel/bluetooth.py"
 }
 
 test_no_duplicate_systemctl_jobs() {
@@ -370,6 +370,42 @@ test_non_audio_device_rejected_before_trust() {
         && ! grep -q "BEGIN connect $NON_AUDIO_MAC" "$MOCK_BT_EVENTS"
 }
 
+test_auto_recovery_leaves_unrelated_devices_unchanged() {
+    setup
+    set_preferred "$OLD_MAC"
+    add_paired "$OLD_MAC"; add_trusted "$OLD_MAC"; add_connected "$OLD_MAC"
+    add_paired "$THIRD_MAC"; add_trusted "$THIRD_MAC"; add_connected "$THIRD_MAC"
+    SIGIL_BT_RUN_ONCE=1 "$OWNER" >/dev/null 2>&1
+    grep -qxF "$OLD_MAC" "${TEST_DIR}/state/connected" \
+        && grep -qxF "$THIRD_MAC" "${TEST_DIR}/state/connected" \
+        && grep -qxF "$THIRD_MAC" "${TEST_DIR}/state/trusted" \
+        && ! grep -qE "BEGIN (block|untrust|remove|disconnect) $THIRD_MAC" "$MOCK_BT_EVENTS"
+}
+
+test_explicit_switch_only_disconnects_previous_preferred() {
+    setup
+    set_preferred "$OLD_MAC"
+    add_paired "$OLD_MAC"; add_trusted "$OLD_MAC"; add_connected "$OLD_MAC"
+    add_paired "$NEW_MAC"; add_trusted "$NEW_MAC"
+    owner_request connect "$NEW_MAC"
+    [ "$OWNER_RC" -eq 0 ] \
+        && ! grep -qxF "$OLD_MAC" "${TEST_DIR}/state/connected" \
+        && grep -qxF "$OLD_MAC" "${TEST_DIR}/state/trusted" \
+        && ! grep -qE "BEGIN (block|untrust|remove) $OLD_MAC" "$MOCK_BT_EVENTS" \
+        && [ "$(cat "$SIGIL_BT_PREFERRED_FILE")" = "$NEW_MAC" ]
+}
+
+test_destructive_cleanup_is_explicit_remove_only() {
+    setup
+    set_preferred "$OLD_MAC"
+    add_paired "$OLD_MAC"; add_trusted "$OLD_MAC"; add_connected "$OLD_MAC"
+    owner_request remove "$OLD_MAC"
+    [ "$OWNER_RC" -eq 0 ] \
+        && grep -q "BEGIN untrust $OLD_MAC" "$MOCK_BT_EVENTS" \
+        && grep -q "BEGIN remove $OLD_MAC" "$MOCK_BT_EVENTS" \
+        && [ -z "$(cat "$SIGIL_BT_PREFERRED_FILE")" ]
+}
+
 test_no_real_macs_or_panel_policy() {
     setup
     ! grep -Eo '([0-9A-F]{2}:){5}[0-9A-F]{2}' "$0" \
@@ -391,6 +427,9 @@ run_test "12-second pre-start cannot create panel failure" test_prestart_delay_n
 run_test "no duplicate systemctl jobs occur" test_no_duplicate_systemctl_jobs
 run_test "A2DP routing receives selected target" test_a2dp_routes_selected_target
 run_test "non-audio metadata is rejected before trust" test_non_audio_device_rejected_before_trust
+run_test "automatic recovery leaves unrelated devices unchanged" test_auto_recovery_leaves_unrelated_devices_unchanged
+run_test "explicit switch disconnects but preserves previous trust" test_explicit_switch_only_disconnects_previous_preferred
+run_test "destructive cleanup occurs only for explicit remove" test_destructive_cleanup_is_explicit_remove_only
 run_test "fixtures use only synthetic MACs and panel has no policy" test_no_real_macs_or_panel_policy
 
 printf '\nBluetooth coordination: %d passed, %d failed\n' "$PASS" "$FAIL"

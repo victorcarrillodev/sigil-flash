@@ -49,7 +49,7 @@ class WifiBluetoothCoexistenceTests(unittest.TestCase):
 
     @staticmethod
     def successful_command(arguments, **_kwargs):
-        if arguments[:4] == ["sudo", "iwlist", "wlan0", "scan"]:
+        if arguments == ["sudo", wifi.WIFI_FALLBACK_HELPER, "--panel-scan"]:
             return Result(SCAN_OUTPUT)
         if "connection" in arguments and "show" in arguments:
             return Result("FactoryNet:802-11-wireless\n")
@@ -139,7 +139,9 @@ class WifiBluetoothCoexistenceTests(unittest.TestCase):
 
     def test_only_one_active_scan_command_exists(self):
         source = (ROOT / "panel/wifi.py").read_text(encoding="utf-8")
-        self.assertEqual(source.count("['sudo', 'iwlist', 'wlan0', 'scan']"), 1)
+        self.assertEqual(
+            source.count("['sudo', WIFI_FALLBACK_HELPER, '--panel-scan']"), 1
+        )
         self.assertIn("scan_output = _run_active_wifi_scan()", source)
         self.assertEqual(source.count("WIFI_SCAN_LOCK ="), 1)
 

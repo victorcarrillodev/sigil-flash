@@ -7,12 +7,13 @@ Wants=bluetooth.target
 User=sigil
 Group=sigil
 EnvironmentFile=/etc/sigil/panel.env
+EnvironmentFile=-/etc/sigil/wifi-fallback.conf
 WorkingDirectory=/opt/sigil/panel
 ExecStartPre=/bin/sleep 8
-# This one-shot operation requires CAP_NET_ADMIN and remains isolated from Flask.
-# The leading '+' runs only this command with full privileges; '-' preserves the
-# previous best-effort behavior if wlan0 is unavailable.
-ExecStartPre=-+/usr/sbin/iw dev wlan0 set power_save off
+# The canonical helper resolves SIGIL_WIFI_INTERFACE and fails clearly when the
+# configured device is absent. The leading '-' keeps panel startup available
+# for diagnostics even when the WiFi adapter itself has failed.
+ExecStartPre=-+/usr/local/bin/wifi-fallback.sh --disable-power-save
 ExecStart=/usr/bin/python3 /opt/sigil/panel/app.py
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 # Descendant sudo commands retain only identity-transition and network
