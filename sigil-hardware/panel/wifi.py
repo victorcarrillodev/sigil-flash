@@ -219,6 +219,25 @@ def _record_client_handoff() -> bool:
     return _run_owner_action('--external-client-handoff')
 
 
+def _persist_client_secret(profile: str, password_file: str) -> bool:
+    """Persist a system-owned PSK without exposing it through process argv."""
+    try:
+        result = subprocess.run(
+            [
+                'sudo', WIFI_FALLBACK_HELPER, '--persist-client-secret',
+                profile, password_file,
+            ],
+            capture_output=True, timeout=20
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        logger.error('WiFi secret persistence could not run: %s', type(error).__name__)
+        return False
+    if result.returncode != 0:
+        logger.error('WiFi secret persistence failed')
+        return False
+    return True
+
+
 @contextmanager
 def _nmcli_password_file(password: str):
     directory = os.path.dirname(WIFI_INHIBIT_FILE)
@@ -373,9 +392,10 @@ def connect_wifi(ssid: str, password: str) -> tuple[bool, str]:
             if modified.returncode != 0:
                 return False, 'Error al configurar el perfil WiFi'
             with _nmcli_password_file(password) as password_file:
+                if not _persist_client_secret(ssid, password_file):
+                    return False, 'No se pudo guardar la clave WiFi de forma segura'
                 up = subprocess.run(
-                    ['sudo', 'nmcli', 'con', 'up', ssid,
-                     'passwd-file', password_file],
+                    ['sudo', 'nmcli', 'con', 'up', ssid],
                     capture_output=True, text=True, timeout=45
                 )
             subprocess.run(['sudo', 'iw', 'dev', 'wlan0', 'set', 'power_save', 'off'], capture_output=True)

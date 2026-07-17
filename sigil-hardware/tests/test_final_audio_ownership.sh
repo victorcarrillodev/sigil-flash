@@ -44,6 +44,8 @@ class FakeApp:
         return None
     def before_request(self, function):
         return function
+    def after_request(self, function):
+        return function
     def run(self, *_args, **_kwargs):
         raise AssertionError("runtime start is not expected in tests")
 

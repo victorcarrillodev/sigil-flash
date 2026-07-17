@@ -11,6 +11,7 @@ STATE_FILE="${SIGIL_WIFI_STATE_FILE:-/var/lib/sigil/wifi-fallback-state}"
 INHIBIT_FILE="${SIGIL_WIFI_INHIBIT_FILE:-/run/sigil/wifi-fallback-inhibit.json}"
 TRANSITION_LOCK="${SIGIL_WIFI_TRANSITION_LOCK:-/run/sigil/wifi-transition.lock}"
 SERVICE_LOCK="${SIGIL_WIFI_SERVICE_LOCK:-/run/sigil/wifi-fallback.lock}"
+NM_CONNECTION_DIR="${SIGIL_NM_CONNECTION_DIR:-/etc/NetworkManager/system-connections}"
 
 CHECK_INTERVAL="${SIGIL_WIFI_CHECK_INTERVAL:-30}"
 FAIL_THRESHOLD="${SIGIL_WIFI_FAIL_THRESHOLD:-4}"
@@ -34,6 +35,9 @@ ONE_SHOT=0
 EXTERNAL_CLIENT_HANDOFF=0
 PREPARE_EXTERNAL_CLIENT=0
 RESTORE_EXTERNAL_AP=0
+PERSIST_CLIENT_SECRET=0
+PERSIST_PROFILE=""
+PERSIST_PASSWORD_FILE=""
 PROBE_STATE="CLIENT_CONNECTING"
 PROBE_REASON="not_checked"
 PROBE_GATEWAY=""
@@ -181,6 +185,146 @@ record_external_client_handoff() {
     WIFI_STATE[DEAD_PROFILE]=""
     WIFI_STATE[DEAD_PROFILE_DEACTIVATED]="0"
     persist_state "CLIENT_CONNECTING" "panel_client_handoff" "$now"
+}
+
+persist_external_client_secret() {
+    local profile="$1" password_file="$2" uuid connection_file run_dir sigil_uid
+    panel_transition_context_active || return 1
+    [ -n "$profile" ] && [ -n "$password_file" ] || return 2
+    run_dir=$(dirname "$INHIBIT_FILE")
+    sigil_uid=$(id -u sigil 2>/dev/null || id -u)
+    uuid=$(nmcli -g connection.uuid connection show "$profile" 2>/dev/null | head -n 1) \
+        || return 1
+    [[ "$uuid" =~ ^[0-9A-Fa-f-]{36}$ ]] || return 1
+
+    connection_file=$(python3 - "$password_file" "$run_dir" "$sigil_uid" \
+        "$NM_CONNECTION_DIR" "$uuid" <<'PYEOF'
+import os
+import re
+import stat
+import sys
+import tempfile
+
+password_path, run_dir, expected_uid, connection_dir, expected_uuid = sys.argv[1:]
+expected_uid = int(expected_uid)
+
+def fail():
+    raise SystemExit(1)
+
+try:
+    password_real = os.path.realpath(password_path)
+    if os.path.dirname(password_real) != os.path.realpath(run_dir):
+        fail()
+    if not os.path.basename(password_real).startswith('.nmcli-password.'):
+        fail()
+    metadata = os.lstat(password_path)
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != expected_uid
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+        or metadata.st_nlink != 1
+        or not 1 <= metadata.st_size <= 1024
+    ):
+        fail()
+    flags = os.O_RDONLY | getattr(os, 'O_CLOEXEC', 0) | getattr(os, 'O_NOFOLLOW', 0)
+    fd = os.open(password_path, flags)
+    try:
+        raw = os.read(fd, 1025)
+    finally:
+        os.close(fd)
+    prefix = b'802-11-wireless-security.psk:'
+    if len(raw) > 1024 or not raw.startswith(prefix) or not raw.endswith(b'\n'):
+        fail()
+    password = raw[len(prefix):-1].decode('utf-8')
+    encoded_length = len(password.encode('utf-8'))
+    if '\x00' in password or '\r' in password or '\n' in password:
+        fail()
+    if not (8 <= encoded_length <= 63 or re.fullmatch(r'[0-9A-Fa-f]{64}', password)):
+        fail()
+
+    matches = []
+    for name in os.listdir(connection_dir):
+        if not name.endswith('.nmconnection'):
+            continue
+        path = os.path.join(connection_dir, name)
+        item = os.lstat(path)
+        if (
+            not stat.S_ISREG(item.st_mode)
+            or item.st_size > 65536
+            or item.st_uid != os.geteuid()
+            or item.st_gid != os.getegid()
+        ):
+            continue
+        file_fd = os.open(path, flags)
+        try:
+            text = os.read(file_fd, 65537).decode('utf-8')
+        finally:
+            os.close(file_fd)
+        section = None
+        found_uuid = None
+        for line in text.splitlines():
+            stripped = line.strip()
+            if stripped.startswith('[') and stripped.endswith(']'):
+                section = stripped[1:-1]
+            elif section == 'connection' and '=' in line:
+                key, value = line.split('=', 1)
+                if key.strip() == 'uuid':
+                    found_uuid = value.strip()
+        if found_uuid == expected_uuid:
+            matches.append((path, item, text))
+    if len(matches) != 1:
+        fail()
+
+    path, item, text = matches[0]
+    lines = text.splitlines()
+    start = next((i for i, line in enumerate(lines) if line.strip() == '[wifi-security]'), None)
+    if start is None:
+        fail()
+    end = next(
+        (i for i in range(start + 1, len(lines))
+         if lines[i].strip().startswith('[') and lines[i].strip().endswith(']')),
+        len(lines),
+    )
+    retained = []
+    for line in lines[start + 1:end]:
+        key = line.split('=', 1)[0].strip() if '=' in line else ''
+        if key not in {'psk', 'psk-flags'}:
+            retained.append(line)
+    escaped = password.replace('\\', '\\\\').replace('\t', '\\t')
+    replacement = retained + [f'psk={escaped}', 'psk-flags=0']
+    output = '\n'.join(lines[:start + 1] + replacement + lines[end:]) + '\n'
+
+    temporary_fd, temporary = tempfile.mkstemp(prefix='.sigil-wifi.', dir=connection_dir)
+    try:
+        os.fchmod(temporary_fd, 0o600)
+        with os.fdopen(temporary_fd, 'w', encoding='utf-8', newline='\n') as handle:
+            temporary_fd = -1
+            handle.write(output)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        temporary = ''
+        directory_fd = os.open(connection_dir, os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0))
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        if temporary_fd >= 0:
+            os.close(temporary_fd)
+        if temporary:
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
+    print(path)
+except (OSError, UnicodeError, ValueError):
+    fail()
+PYEOF
+    ) || return 1
+    [ -n "$connection_file" ] || return 1
+    nmcli connection load "$connection_file" >/dev/null 2>&1 || return 1
+    log "panel client secret persisted for selected profile"
 }
 
 remove_stale_inhibit() {
@@ -576,7 +720,7 @@ run_cycle() {
 }
 
 usage() {
-    printf 'Usage: %s [--oneshot|--dry-run|--prepare-client|--restore-ap|--external-client-handoff]\n' "$(basename "$0")"
+    printf 'Usage: %s [--oneshot|--dry-run|--prepare-client|--restore-ap|--external-client-handoff|--persist-client-secret PROFILE PASSWORD_FILE]\n' "$(basename "$0")"
 }
 
 parse_args() {
@@ -587,6 +731,13 @@ parse_args() {
             --prepare-client) PREPARE_EXTERNAL_CLIENT=1 ;;
             --restore-ap) RESTORE_EXTERNAL_AP=1 ;;
             --external-client-handoff) EXTERNAL_CLIENT_HANDOFF=1 ;;
+            --persist-client-secret)
+                [ "$#" -ge 3 ] || { usage; return 2; }
+                PERSIST_CLIENT_SECRET=1
+                PERSIST_PROFILE="$2"
+                PERSIST_PASSWORD_FILE="$3"
+                shift 2
+                ;;
             -h|--help) usage; return 1 ;;
             *) printf 'unknown option: %s\n' "$1" >&2; return 2 ;;
         esac
@@ -606,6 +757,10 @@ main() {
     fi
     if [ "$EXTERNAL_CLIENT_HANDOFF" -eq 1 ]; then
         record_external_client_handoff
+        return
+    fi
+    if [ "$PERSIST_CLIENT_SECRET" -eq 1 ]; then
+        persist_external_client_secret "$PERSIST_PROFILE" "$PERSIST_PASSWORD_FILE"
         return
     fi
     mkdir -p "$(dirname "$SERVICE_LOCK")" || return 1

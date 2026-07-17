@@ -316,14 +316,14 @@ check_internet() {
     # Method: HEAD against SERVER_URL with short timeout
     # Using GET instead of HEAD because some servers reject HEAD
     local health_url="${SERVER_URL}/api/health"
-    local health_rc
+    local health_rc=0
     if [ -n "$CURL_CONFIG" ]; then
         curl -s -o /dev/null --connect-timeout "${CONNECT_TIMEOUT_SECONDS}" --max-time "${HEALTHCHECK_TIMEOUT_SECONDS}" \
             --config "$CURL_CONFIG" \
-            "$health_url" 2>/dev/null; health_rc=$?
+            "$health_url" 2>/dev/null || health_rc=$?
     else
         curl -s -o /dev/null --connect-timeout "${CONNECT_TIMEOUT_SECONDS}" --max-time "${HEALTHCHECK_TIMEOUT_SECONDS}" \
-            "$health_url" 2>/dev/null; health_rc=$?
+            "$health_url" 2>/dev/null || health_rc=$?
     fi
     if [ "$health_rc" -eq 0 ]; then
         if ! $INTERNET_AVAILABLE; then

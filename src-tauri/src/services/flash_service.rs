@@ -17,12 +17,15 @@ pub struct FlashService {
     // Serializes flash requests inside this application process.
     operation_lock: Arc<Mutex<()>>,
     offline_packages: PathBuf,
+    hardware_payload: PathBuf,
     package_contract: PathBuf,
 }
 
 const ELEVATED_LAUNCHER_GRACE: Duration = Duration::from_secs(2);
 const DETACHED_WRITER_TIMEOUT: Duration = Duration::from_secs(45 * 60);
 const MAX_PRIVATE_CONFIG_BYTES: u64 = 16 * 1024;
+const SSH_VALIDATION_HOST_KEY: &str = "/run/sshd/sigil-validation-host-key";
+const PARTITION_END_TOLERANCE_BYTES: u64 = 16 * 1024 * 1024;
 
 struct PrivateConfigFile {
     path: PathBuf,
@@ -72,6 +75,39 @@ impl Drop for PrivateConfigFile {
     }
 }
 
+struct TemporarySshHostKey {
+    private_path: PathBuf,
+    public_path: PathBuf,
+}
+
+impl TemporarySshHostKey {
+    fn prepare(root: &Path) -> AppResult<Self> {
+        let relative_key = SSH_VALIDATION_HOST_KEY.trim_start_matches('/');
+        let private_path = root.join(relative_key);
+        let public_path = root.join(format!("{relative_key}.pub"));
+        for path in [&private_path, &public_path] {
+            if path.exists() {
+                std::fs::remove_file(path)?;
+            }
+        }
+        Ok(Self {
+            private_path,
+            public_path,
+        })
+    }
+}
+
+impl Drop for TemporarySshHostKey {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.private_path);
+        let _ = std::fs::remove_file(&self.public_path);
+    }
+}
+
+fn sshd_validation_args() -> [&'static str; 3] {
+    ["-t", "-h", SSH_VALIDATION_HOST_KEY]
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum FlashCompletion {
     Running,
@@ -118,6 +154,13 @@ impl FlashService {
             .parent()
             .map(Path::to_path_buf)
             .unwrap_or_else(|| PathBuf::from("."));
+        let hardware_payload = flash_root
+            .join("artifacts")
+            .join("payloads")
+            .join("sigil-hardware-payload");
+        let package_contract = hardware_payload
+            .join("manifests")
+            .join("offline-package-contract.json");
         Self {
             active_process: Arc::new(Mutex::new(None)),
             operation_lock: Arc::new(Mutex::new(())),
@@ -125,10 +168,8 @@ impl FlashService {
                 .join("artifacts")
                 .join("offline-packages")
                 .join("trixie-arm64"),
-            package_contract: flash_root
-                .join("sigil-hardware")
-                .join("manifests")
-                .join("offline-package-contract.json"),
+            hardware_payload,
+            package_contract,
         }
     }
 
@@ -156,7 +197,12 @@ impl FlashService {
             ));
         }
         validate_device_config(config)?;
-        validate_bundle_for_image(&image_p, &self.offline_packages, &self.package_contract)?;
+        validate_bundle_for_image(
+            &image_p,
+            &self.hardware_payload,
+            &self.offline_packages,
+            &self.package_contract,
+        )?;
         let private_config = PrivateConfigFile::create(config)?;
 
         // 1. Establish progress monitoring file in temp directory
@@ -188,6 +234,8 @@ impl FlashService {
             progress_file.to_string_lossy().to_string(),
             "--offline-packages".to_string(),
             self.offline_packages.to_string_lossy().to_string(),
+            "--payload".to_string(),
+            self.hardware_payload.to_string_lossy().to_string(),
             "--config-file".to_string(),
             private_config.path().to_string_lossy().to_string(),
         ];
@@ -654,6 +702,7 @@ pub async fn run_raw_flash_cli(
     dest: &str,
     progress_file: &str,
     offline_packages: &str,
+    payload: &str,
     config_file: &str,
 ) -> AppResult<()> {
     let config = read_private_device_config(Path::new(config_file))?;
@@ -691,15 +740,16 @@ pub async fn run_raw_flash_cli(
             message: "Validando imagen y dependencias offline...".to_string(),
         },
     );
-    let flash_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .map(Path::to_path_buf)
-        .ok_or_else(|| AppError::Validation("No se pudo resolver SIGIL Flash".into()))?;
-    let package_contract = flash_root
-        .join("sigil-hardware")
+    let payload_path = PathBuf::from(payload);
+    let package_contract = payload_path
         .join("manifests")
         .join("offline-package-contract.json");
-    validate_bundle_for_image(&src_path, Path::new(offline_packages), &package_contract)?;
+    validate_bundle_for_image(
+        &src_path,
+        &payload_path,
+        Path::new(offline_packages),
+        &package_contract,
+    )?;
     let _device_lock = DeviceWriteLock::acquire(dest)?;
 
     let total_bytes = if src.to_lowercase().ends_with(".xz") {
@@ -795,6 +845,19 @@ pub async fn run_raw_flash_cli(
         )));
     }
 
+    write_progress_file(
+        &prog_path,
+        &FlashProgress {
+            bytes_written: total_bytes,
+            total_bytes,
+            speed_mbps: 0.0,
+            eta_seconds: 0.0,
+            status: "running".to_string(),
+            message: "Ampliando rootfs para utilizar toda la microSD...".to_string(),
+        },
+    );
+    expand_root_filesystem(dest)?;
+
     // Report post-install status
     let copy_progress = FlashProgress {
         bytes_written: total_bytes,
@@ -809,7 +872,9 @@ pub async fn run_raw_flash_cli(
     }
 
     // Perform offline installation of sigil-hardware on the microSD
-    if let Err(e) = install_sigil_hardware(dest, Path::new(offline_packages), &config) {
+    if let Err(e) =
+        install_sigil_hardware(dest, Path::new(offline_packages), &payload_path, &config)
+    {
         let err_progress = FlashProgress {
             bytes_written: total_bytes,
             total_bytes,
@@ -1289,36 +1354,64 @@ fn provision_ssh_access(root: &Path, config: &DeviceConfig) -> AppResult<()> {
         )));
     }
 
+    validate_ssh_configuration(root)
+}
+
+fn validate_ssh_configuration(root: &Path) -> AppResult<()> {
     let run_sshd = root.join("run/sshd");
     let created_run_sshd = !run_sshd.exists();
     std::fs::create_dir_all(&run_sshd)?;
-    let validation = run_target_command(root, "/usr/sbin/sshd", &["-t"], None);
+
+    let validation = (|| -> AppResult<()> {
+        // A pristine Raspberry Pi OS image intentionally has no persistent host keys yet.
+        // Use an ephemeral key so `sshd -t` validates syntax without manufacturing identity.
+        let _temporary_key = TemporarySshHostKey::prepare(root)?;
+        let key_generation = run_target_command(
+            root,
+            "/usr/bin/ssh-keygen",
+            &[
+                "-q",
+                "-t",
+                "ed25519",
+                "-N",
+                "",
+                "-f",
+                SSH_VALIDATION_HOST_KEY,
+            ],
+            None,
+        )?;
+        if !key_generation.status.success() {
+            let detail = summarize_command_failure(&key_generation.stdout, &key_generation.stderr);
+            return Err(AppError::Flash(format!(
+                "No se pudo crear la clave SSH temporal de validación: {detail}"
+            )));
+        }
+
+        let validation = run_target_command(root, "/usr/sbin/sshd", &sshd_validation_args(), None)?;
+        if !validation.status.success() {
+            let detail = summarize_command_failure(&validation.stdout, &validation.stderr);
+            return Err(AppError::Flash(format!(
+                "La configuración SSH generada no es válida: {detail}"
+            )));
+        }
+        Ok(())
+    })();
+
     if created_run_sshd {
         let _ = std::fs::remove_dir(&run_sshd);
     }
-    let validation = validation?;
-    if !validation.status.success() {
-        let detail = summarize_command_failure(&validation.stdout, &validation.stderr);
-        return Err(AppError::Flash(format!(
-            "La configuración SSH generada no es válida: {detail}"
-        )));
-    }
-    Ok(())
+    validation
 }
 
 fn install_sigil_hardware(
     device: &str,
     offline_packages: &Path,
+    hardware_payload: &Path,
     config: &DeviceConfig,
 ) -> AppResult<()> {
     let root_partition = partition_path(device, 2);
     let boot_partition = partition_path(device, 1);
-    let flash_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .map(Path::to_path_buf)
-        .ok_or_else(|| AppError::Validation("No se pudo resolver SIGIL Flash".into()))?;
-    let hardware_source = flash_root.join("sigil-hardware");
-    let package_contract = hardware_source
+    let package_contract = hardware_payload
         .join("manifests")
         .join("offline-package-contract.json");
 
@@ -1360,7 +1453,7 @@ fn install_sigil_hardware(
 
         println!("Copiando payload sigil-hardware sin artefactos de desarrollo...");
         let hardware_target = mount_dir.join("opt/sigil-hardware");
-        copy_hardware_payload(&hardware_source, &hardware_target)?;
+        copy_hardware_payload(hardware_payload, &hardware_target)?;
 
         println!("Inyectando repositorio APT offline en /opt/sigil/offline-repo...");
         let repository_target = mount_dir.join("opt/sigil/offline-repo");
@@ -1498,9 +1591,24 @@ fn summarize_command_failure(stdout: &[u8], stderr: &[u8]) -> String {
 
 fn validate_bundle_for_image(
     image: &Path,
+    hardware_payload: &Path,
     offline_packages: &Path,
     package_contract: &Path,
 ) -> AppResult<()> {
+    let mut payload_items = Vec::new();
+    flasher_rs::validate::validate_payload(hardware_payload, &mut payload_items);
+    let payload_errors = payload_items
+        .iter()
+        .filter(|item| matches!(item.severity, flasher_rs::model::Severity::Error))
+        .map(|item| item.message.as_str())
+        .collect::<Vec<_>>();
+    if !payload_errors.is_empty() {
+        return Err(AppError::Validation(format!(
+            "El payload SIGIL no es válido: {}",
+            payload_errors.join("; ")
+        )));
+    }
+
     let summary = flasher_rs::offline::validate_repository(offline_packages, package_contract)
         .map_err(|error| {
             AppError::Validation(format!(
@@ -1553,6 +1661,205 @@ fn partition_path(device: &str, number: u8) -> String {
     }
 }
 
+fn expand_root_filesystem(device: &str) -> AppResult<()> {
+    let boot_partition = partition_path(device, 1);
+    let root_partition = partition_path(device, 2);
+
+    for partition in [&boot_partition, &root_partition] {
+        let _ = std::process::Command::new("umount").arg(partition).status();
+    }
+    run_storage_command(
+        "partprobe",
+        &[device],
+        "No se pudo leer la tabla de particiones recién escrita",
+    )?;
+    settle_udev()?;
+
+    let growpart = std::process::Command::new("growpart")
+        .args([device, "2"])
+        .env("LC_ALL", "C")
+        .output()
+        .map_err(|error| {
+            AppError::Flash(format!(
+                "No se pudo ejecutar growpart para ampliar rootfs: {error}"
+            ))
+        })?;
+    if !growpart.status.success() && !growpart_reports_no_change(&growpart.stdout, &growpart.stderr)
+    {
+        return Err(command_output_error(
+            "No se pudo ampliar la partición rootfs",
+            &growpart,
+        ));
+    }
+
+    run_storage_command(
+        "partprobe",
+        &[device],
+        "No se pudo recargar la tabla de particiones ampliada",
+    )?;
+    settle_udev()?;
+
+    let filesystem_check = std::process::Command::new("e2fsck")
+        .args(["-f", "-p", root_partition.as_str()])
+        .env("LC_ALL", "C")
+        .output()
+        .map_err(|error| {
+            AppError::Flash(format!(
+                "No se pudo validar rootfs antes de ampliarlo: {error}"
+            ))
+        })?;
+    if !e2fsck_exit_code_is_acceptable(filesystem_check.status.code()) {
+        return Err(command_output_error(
+            "rootfs no superó la comprobación previa a la expansión",
+            &filesystem_check,
+        ));
+    }
+
+    run_storage_command(
+        "resize2fs",
+        &[root_partition.as_str()],
+        "No se pudo ampliar el sistema de archivos rootfs",
+    )?;
+    run_storage_command(
+        "sync",
+        &[],
+        "No se pudo sincronizar rootfs después de ampliarlo",
+    )?;
+
+    verify_root_filesystem_expansion(device, &root_partition)?;
+    println!("rootfs ampliado y verificado para utilizar toda la microSD.");
+    Ok(())
+}
+
+fn run_storage_command(program: &str, args: &[&str], context: &str) -> AppResult<Output> {
+    let output = std::process::Command::new(program)
+        .args(args)
+        .env("LC_ALL", "C")
+        .output()
+        .map_err(|error| AppError::Flash(format!("{context}: {error}")))?;
+    if output.status.success() {
+        Ok(output)
+    } else {
+        Err(command_output_error(context, &output))
+    }
+}
+
+fn command_output_error(context: &str, output: &Output) -> AppError {
+    AppError::Flash(format!(
+        "{context}: {}",
+        summarize_command_failure(&output.stdout, &output.stderr)
+    ))
+}
+
+fn settle_udev() -> AppResult<()> {
+    run_storage_command(
+        "udevadm",
+        &["settle", "--timeout=30"],
+        "udev no estabilizó las particiones dentro del tiempo límite",
+    )?;
+    Ok(())
+}
+
+fn growpart_reports_no_change(stdout: &[u8], stderr: &[u8]) -> bool {
+    [stdout, stderr].iter().any(|value| {
+        String::from_utf8_lossy(value)
+            .to_ascii_lowercase()
+            .contains("nochange")
+    })
+}
+
+fn e2fsck_exit_code_is_acceptable(exit_code: Option<i32>) -> bool {
+    matches!(exit_code, Some(0 | 1))
+}
+
+fn verify_root_filesystem_expansion(device: &str, root_partition: &str) -> AppResult<()> {
+    let device_size = read_single_u64_command(
+        "blockdev",
+        &["--getsize64", device],
+        "No se pudo obtener el tamaño físico de la microSD",
+    )?;
+    let sector_size = read_single_u64_command(
+        "blockdev",
+        &["--getss", device],
+        "No se pudo obtener el tamaño de sector de la microSD",
+    )?;
+    let geometry = run_storage_command(
+        "lsblk",
+        &[
+            "--bytes",
+            "--noheadings",
+            "--output",
+            "START,SIZE",
+            root_partition,
+        ],
+        "No se pudo leer la geometría final de rootfs",
+    )?;
+    let (partition_start, partition_size) = parse_partition_geometry(&geometry.stdout)
+        .ok_or_else(|| AppError::Flash("La geometría final de rootfs no es válida".into()))?;
+    let tail_bytes =
+        partition_tail_bytes(device_size, sector_size, partition_start, partition_size)
+            .ok_or_else(|| {
+                AppError::Flash("La partición rootfs excede el tamaño del dispositivo".into())
+            })?;
+    if tail_bytes > PARTITION_END_TOLERANCE_BYTES {
+        return Err(AppError::Flash(format!(
+            "rootfs no ocupa el espacio disponible: quedan {tail_bytes} bytes sin asignar al final"
+        )));
+    }
+
+    let ext4 = run_storage_command(
+        "dumpe2fs",
+        &["-h", root_partition],
+        "No se pudo leer la geometría ext4 de rootfs",
+    )?;
+    let filesystem_size = parse_ext4_size(&ext4.stdout)
+        .ok_or_else(|| AppError::Flash("La geometría ext4 final de rootfs no es válida".into()))?;
+    if filesystem_size > partition_size
+        || partition_size - filesystem_size > PARTITION_END_TOLERANCE_BYTES
+    {
+        return Err(AppError::Flash(format!(
+            "El sistema de archivos rootfs no ocupa su partición: partición={partition_size}, ext4={filesystem_size}"
+        )));
+    }
+    Ok(())
+}
+
+fn read_single_u64_command(program: &str, args: &[&str], context: &str) -> AppResult<u64> {
+    let output = run_storage_command(program, args, context)?;
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse::<u64>()
+        .map_err(|error| AppError::Flash(format!("{context}: salida numérica inválida: {error}")))
+}
+
+fn parse_partition_geometry(output: &[u8]) -> Option<(u64, u64)> {
+    let text = String::from_utf8_lossy(output);
+    let mut values = text.split_whitespace().map(str::parse::<u64>);
+    Some((values.next()?.ok()?, values.next()?.ok()?))
+}
+
+fn partition_tail_bytes(
+    device_size: u64,
+    sector_size: u64,
+    partition_start: u64,
+    partition_size: u64,
+) -> Option<u64> {
+    let start_bytes = partition_start.checked_mul(sector_size)?;
+    let partition_end = start_bytes.checked_add(partition_size)?;
+    device_size.checked_sub(partition_end)
+}
+
+fn parse_ext4_size(output: &[u8]) -> Option<u64> {
+    let text = String::from_utf8_lossy(output);
+    let value = |field: &str| {
+        text.lines().find_map(|line| {
+            let (name, raw) = line.split_once(':')?;
+            (name.trim() == field).then(|| raw.trim().parse::<u64>().ok())?
+        })
+    };
+    value("Block count")?.checked_mul(value("Block size")?)
+}
+
 fn mount_partition_with_retry(device: &str, partition: &str, target: &Path) -> AppResult<()> {
     for attempt in 1..=10 {
         let status = std::process::Command::new("mount")
@@ -1589,13 +1896,30 @@ fn mount_checked(source: &str, target: &Path) -> AppResult<()> {
 }
 
 fn copy_hardware_payload(source: &Path, target: &Path) -> AppResult<()> {
-    if target.exists() {
-        std::fs::remove_dir_all(target)?;
+    let mut source_items = Vec::new();
+    flasher_rs::validate::validate_payload(source, &mut source_items);
+    if let Some(item) = source_items
+        .iter()
+        .find(|item| matches!(item.severity, flasher_rs::model::Severity::Error))
+    {
+        return Err(AppError::Validation(format!(
+            "El payload SIGIL cambió antes de copiarse: {}",
+            item.message
+        )));
     }
-    std::fs::create_dir_all(target)?;
-    copy_path(&source.join("install.sh"), &target.join("install.sh"))?;
-    for directory in ["panel", "scripts", "services", "conf", "manifests"] {
-        copy_path(&source.join(directory), &target.join(directory))?;
+
+    copy_directory_contents(source, target)?;
+
+    let mut target_items = Vec::new();
+    flasher_rs::validate::validate_payload(target, &mut target_items);
+    if let Some(item) = target_items
+        .iter()
+        .find(|item| matches!(item.severity, flasher_rs::model::Severity::Error))
+    {
+        return Err(AppError::Validation(format!(
+            "La copia del payload SIGIL no coincide con su manifiesto: {}",
+            item.message
+        )));
     }
     Ok(())
 }
@@ -1615,28 +1939,6 @@ fn copy_directory_contents(source: &Path, target: &Path) -> AppResult<()> {
     } else {
         Err(AppError::Flash(format!(
             "No se pudo copiar el repositorio offline desde {}",
-            source.display()
-        )))
-    }
-}
-
-fn copy_path(source: &Path, target: &Path) -> AppResult<()> {
-    if !source.exists() {
-        return Err(AppError::Flash(format!(
-            "Falta un componente del payload: {}",
-            source.display()
-        )));
-    }
-    let status = std::process::Command::new("cp")
-        .args(["-a"])
-        .arg(source)
-        .arg(target)
-        .status()?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(AppError::Flash(format!(
-            "No se pudo copiar {}",
             source.display()
         )))
     }
@@ -1817,6 +2119,99 @@ mod tests {
     }
 
     #[test]
+    fn ssh_validation_uses_ephemeral_host_key_when_image_has_no_hostkeys() {
+        assert_eq!(
+            sshd_validation_args(),
+            ["-t", "-h", "/run/sshd/sigil-validation-host-key"]
+        );
+    }
+
+    #[test]
+    fn partition_path_should_support_sd_devices() {
+        assert_eq!(partition_path("/dev/sdc", 2), "/dev/sdc2");
+    }
+
+    #[test]
+    fn partition_path_should_support_mmc_devices() {
+        assert_eq!(partition_path("/dev/mmcblk0", 2), "/dev/mmcblk0p2");
+    }
+
+    #[test]
+    fn growpart_should_accept_an_idempotent_nochange_result() {
+        assert!(growpart_reports_no_change(
+            b"NOCHANGE: partition 2 is already at its maximum size\n",
+            b""
+        ));
+    }
+
+    #[test]
+    fn growpart_should_not_hide_an_unrelated_failure() {
+        assert!(!growpart_reports_no_change(
+            b"",
+            b"failed to read partition table\n"
+        ));
+    }
+
+    #[test]
+    fn e2fsck_should_accept_a_clean_filesystem() {
+        assert!(e2fsck_exit_code_is_acceptable(Some(0)));
+    }
+
+    #[test]
+    fn e2fsck_should_accept_a_safely_corrected_filesystem() {
+        assert!(e2fsck_exit_code_is_acceptable(Some(1)));
+    }
+
+    #[test]
+    fn e2fsck_should_reject_uncorrected_errors() {
+        assert!(!e2fsck_exit_code_is_acceptable(Some(4)));
+    }
+
+    #[test]
+    fn partition_geometry_should_parse_start_and_byte_size() {
+        assert_eq!(
+            parse_partition_geometry(b" 1064960 30720000000\n"),
+            Some((1_064_960, 30_720_000_000))
+        );
+    }
+
+    #[test]
+    fn partition_tail_should_report_remaining_alignment_space() {
+        assert_eq!(partition_tail_bytes(32_000, 512, 10, 26_000), Some(880));
+    }
+
+    #[test]
+    fn partition_tail_should_reject_a_partition_past_the_device_end() {
+        assert_eq!(partition_tail_bytes(32_000, 512, 10, 30_000), None);
+    }
+
+    #[test]
+    fn ext4_geometry_should_report_filesystem_bytes() {
+        assert_eq!(
+            parse_ext4_size(b"Block count: 1000\nBlock size: 4096\n"),
+            Some(4_096_000)
+        );
+    }
+
+    #[test]
+    fn temporary_ssh_host_key_is_removed_after_validation() {
+        let root = isolated_lock_dir("temporary-ssh-host-key-cleanup");
+        std::fs::create_dir_all(root.join("run/sshd")).expect("create ssh runtime directory");
+        let temporary_key =
+            TemporarySshHostKey::prepare(&root).expect("prepare temporary SSH host key");
+        std::fs::write(&temporary_key.private_path, b"private-test-key")
+            .expect("write private key fixture");
+        std::fs::write(&temporary_key.public_path, b"public-test-key")
+            .expect("write public key fixture");
+
+        drop(temporary_key);
+
+        assert!(!root.join("run/sshd/sigil-validation-host-key").exists());
+        assert!(!root.join("run/sshd/sigil-validation-host-key.pub").exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn device_write_lock_should_reject_second_writer_for_same_device() {
         let lock_dir = isolated_lock_dir("reject-second-writer");
         let _first = DeviceWriteLock::acquire_in(&lock_dir, "/dev/test-card")
@@ -1879,6 +2274,60 @@ mod tests {
             b"fixture index"
         );
         assert!(target.join("packages/demo.deb").is_file());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn hardware_payload_copy_should_preserve_the_validated_manifest() {
+        let root = isolated_lock_dir("hardware-payload-copy");
+        let source = root.join("payload");
+        let target = root.join("target");
+        let builder = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../sigil-hardware/scripts/build-flasher-payload.sh");
+        let output = std::process::Command::new("bash")
+            .arg(builder)
+            .arg(&source)
+            .env("SIGIL_PAYLOAD_ALLOW_DIRTY", "true")
+            .output()
+            .expect("run payload builder");
+        assert!(
+            output.status.success(),
+            "payload builder failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        copy_hardware_payload(&source, &target).expect("copy validated payload");
+
+        assert_eq!(
+            std::fs::read(source.join("payload-manifest.json"))
+                .expect("read source payload manifest"),
+            std::fs::read(target.join("payload-manifest.json"))
+                .expect("read copied payload manifest")
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn hardware_payload_copy_should_reject_a_file_changed_after_generation() {
+        let root = isolated_lock_dir("hardware-payload-reject-change");
+        let source = root.join("payload");
+        let target = root.join("target");
+        let builder = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../sigil-hardware/scripts/build-flasher-payload.sh");
+        let output = std::process::Command::new("bash")
+            .arg(builder)
+            .arg(&source)
+            .env("SIGIL_PAYLOAD_ALLOW_DIRTY", "true")
+            .output()
+            .expect("run payload builder");
+        assert!(output.status.success(), "payload builder must succeed");
+        std::fs::write(source.join("panel/app.py"), b"changed after validation\n")
+            .expect("corrupt payload fixture");
+
+        let error = copy_hardware_payload(&source, &target)
+            .expect_err("changed payload must not be copied");
+
+        assert!(error.to_string().contains("cambió antes de copiarse"));
         let _ = std::fs::remove_dir_all(root);
     }
 

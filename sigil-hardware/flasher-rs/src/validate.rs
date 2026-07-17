@@ -308,7 +308,8 @@ fn validate_base_image(path: &Path, expected: Option<&str>, items: &mut Vec<Vali
     }
 }
 
-fn validate_payload(payload: &Path, items: &mut Vec<ValidationItem>) {
+/// Validate a generated SIGIL hardware payload and append every finding.
+pub fn validate_payload(payload: &Path, items: &mut Vec<ValidationItem>) {
     if !payload.is_dir() {
         error(
             items,

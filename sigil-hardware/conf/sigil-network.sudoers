@@ -4,6 +4,7 @@ sigil ALL=(root) NOPASSWD: /usr/bin/nmcli
 sigil ALL=(root) NOPASSWD: /usr/local/bin/wifi-fallback.sh --prepare-client
 sigil ALL=(root) NOPASSWD: /usr/local/bin/wifi-fallback.sh --restore-ap
 sigil ALL=(root) NOPASSWD: /usr/local/bin/wifi-fallback.sh --external-client-handoff
+sigil ALL=(root) NOPASSWD: /usr/local/bin/wifi-fallback.sh --persist-client-secret *
 sigil ALL=(root) NOPASSWD: /usr/sbin/iwlist wlan0 scan
 sigil ALL=(root) NOPASSWD: /sbin/iwlist wlan0 scan
 sigil ALL=(root) NOPASSWD: /usr/sbin/iw dev wlan0 set power_save off

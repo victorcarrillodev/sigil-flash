@@ -1,5 +1,5 @@
+use crate::errors::{AppError, AppResult};
 use crate::models::Device;
-use crate::errors::{AppResult, AppError};
 use std::process::Command;
 
 pub struct DiskService;
@@ -29,7 +29,9 @@ impl DiskService {
 
         #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
         {
-            Err(AppError::Disk("Plataforma no soportada para detección de discos".to_string()))
+            Err(AppError::Disk(
+                "Plataforma no soportada para detección de discos".to_string(),
+            ))
         }
     }
 
@@ -86,7 +88,8 @@ impl DiskService {
                 let is_disk = d.dev_type.as_deref() == Some("disk");
                 let is_removable = d.rm.unwrap_or(false);
                 let tran = d.tran.as_deref().unwrap_or("");
-                let is_usb_or_sd = tran == "usb" || tran == "mmc" || tran == "sd" || tran == "sdcard";
+                let is_usb_or_sd =
+                    tran == "usb" || tran == "mmc" || tran == "sd" || tran == "sdcard";
                 let is_read_only = d.ro.unwrap_or(false);
 
                 // Safe filter: must be a disk, must be writeable, and must be either marked removable
@@ -100,7 +103,11 @@ impl DiskService {
                     path: format!("/dev/{}", d.name),
                     name: d.name.clone(),
                     size: format_bytes(bytes),
-                    model: d.model.unwrap_or_else(|| "Dispositivo Genérico".to_string()).trim().to_string(),
+                    model: d
+                        .model
+                        .unwrap_or_else(|| "Dispositivo Genérico".to_string())
+                        .trim()
+                        .to_string(),
                     device_type: "disk".to_string(),
                     removable: d.rm.unwrap_or(false),
                     transport,
@@ -126,7 +133,10 @@ impl DiskService {
 
         if !list_output.status.success() {
             let err_msg = String::from_utf8_lossy(&list_output.stderr).to_string();
-            return Err(AppError::Disk(format!("Error de diskutil list: {}", err_msg)));
+            return Err(AppError::Disk(format!(
+                "Error de diskutil list: {}",
+                err_msg
+            )));
         }
 
         let list_str = String::from_utf8_lossy(&list_output.stdout);
@@ -149,7 +159,12 @@ impl DiskService {
             let info_output = Command::new("diskutil")
                 .args(["info", &disk_path])
                 .output()
-                .map_err(|e| AppError::Disk(format!("No se pudo consultar diskutil info para {}: {}", disk_path, e)))?;
+                .map_err(|e| {
+                    AppError::Disk(format!(
+                        "No se pudo consultar diskutil info para {}: {}",
+                        disk_path, e
+                    ))
+                })?;
 
             if !info_output.status.success() {
                 continue;
@@ -244,11 +259,13 @@ impl DiskService {
 
         // ConvertTo-Json returns either a single object or an array. We handle both.
         let win_disks: Vec<WinDisk> = if json_str.starts_with('[') {
-            serde_json::from_str(&json_str)
-                .map_err(|e| AppError::Disk(format!("Error parseando array JSON de PowerShell: {}", e)))?
+            serde_json::from_str(&json_str).map_err(|e| {
+                AppError::Disk(format!("Error parseando array JSON de PowerShell: {}", e))
+            })?
         } else {
-            let single: WinDisk = serde_json::from_str(&json_str)
-                .map_err(|e| AppError::Disk(format!("Error parseando objeto JSON de PowerShell: {}", e)))?;
+            let single: WinDisk = serde_json::from_str(&json_str).map_err(|e| {
+                AppError::Disk(format!("Error parseando objeto JSON de PowerShell: {}", e))
+            })?;
             vec![single]
         };
 
@@ -258,12 +275,16 @@ impl DiskService {
                 let name = format!("PhysicalDrive{}", d.Number);
                 let path = format!("\\\\.\\{}", name);
                 let size_str = format_bytes(d.Size);
-                let model = d.Model
+                let model = d
+                    .Model
                     .or(d.FriendlyName)
                     .unwrap_or_else(|| "Dispositivo USB/SD".to_string())
                     .trim()
                     .to_string();
-                let transport = d.BusType.unwrap_or_else(|| "usb".to_string()).to_lowercase();
+                let transport = d
+                    .BusType
+                    .unwrap_or_else(|| "usb".to_string())
+                    .to_lowercase();
                 Device {
                     name,
                     path,

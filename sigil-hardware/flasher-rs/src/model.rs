@@ -93,13 +93,17 @@ pub const SERVICES_ENABLE: &[&str] = &[
     "NetworkManager",
     "bluetooth-panel",
     "bt-connect",
-    "radio-stream",
     "sigil-leds",
     "wifi-fallback",
+    "ssh-monitor",
+    "radio-fetcher",
+    "audio-manager",
+    "audio-player",
+    "sigil-firstboot",
 ];
 
 /// Services to disable in the customized image.
-pub const SERVICES_DISABLE: &[&str] = &["hostapd", "dnsmasq"];
+pub const SERVICES_DISABLE: &[&str] = &["hostapd", "dnsmasq", "radio-stream"];
 
 /// Services to unmask before disable (in case base image masks them).
 pub const SERVICES_UNMASK: &[&str] = &["hostapd", "dnsmasq"];
@@ -114,7 +118,13 @@ pub const CONFIG_COPIES: &[&str] = &[
     "conf/dnsmasq.conf -> /etc/dnsmasq.conf",
     "conf/hostapd.conf -> /etc/hostapd/hostapd.conf",
     "conf/sigil-network.sudoers -> /etc/sudoers.d/sigil-network",
+    "conf/sigil.sudoers -> /etc/sudoers.d/sigil",
+    "conf/sigil-tmpfiles.conf -> /etc/tmpfiles.d/sigil.conf",
+    "conf/90-sigil-geolocate -> /etc/NetworkManager/dispatcher.d/90-sigil-geolocate",
     "conf/99-sigil-mac-fixed.conf -> /etc/NetworkManager/conf.d/99-sigil-mac-fixed.conf",
+    "conf/audio.conf -> /etc/sigil/audio.conf",
+    "conf/security.conf -> /etc/sigil/security.conf",
+    "conf/wifi-fallback.conf -> /etc/sigil/wifi-fallback.conf",
 ];
 
 /// Boot config.txt changes for DAC PCM5102.
@@ -154,7 +164,7 @@ pub const STATE_DIRECTORIES: &[&str] = &[
 
 /// State files with owner:group and mode.
 pub const STATE_FILES: &[(&str, &str, &str)] = &[
-    ("/home/sigil/preferred_bt.txt", "sigil:sigil", "644"),
+    ("/home/sigil/preferred_bt.txt", "sigil:sigil", "600"),
     ("/home/sigil/now_playing.txt", "sigil:sigil", "644"),
 ];
 

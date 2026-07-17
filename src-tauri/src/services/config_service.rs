@@ -1,4 +1,4 @@
-use crate::errors::{AppResult, AppError};
+use crate::errors::{AppError, AppResult};
 use crate::models::DeviceConfig;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -14,8 +14,11 @@ impl ConfigService {
     /// Mounts the target partition on the block device, writes the custom config file and SSH triggers,
     /// and safely unmounts the volume.
     pub async fn write_config(&self, device_path: &str, config: &DeviceConfig) -> AppResult<()> {
-        tracing::info!("Iniciando inyección de configuración en la unidad: {}", device_path);
-        
+        tracing::info!(
+            "Iniciando inyección de configuración en la unidad: {}",
+            device_path
+        );
+
         #[cfg(target_os = "linux")]
         {
             self.write_config_linux(device_path, config).await
@@ -33,7 +36,9 @@ impl ConfigService {
 
         #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
         {
-            Err(AppError::Config("Plataforma no soportada para inyección de configuraciones".to_string()))
+            Err(AppError::Config(
+                "Plataforma no soportada para inyección de configuraciones".to_string(),
+            ))
         }
     }
 
@@ -57,7 +62,9 @@ impl ConfigService {
 
         let _ = std::fs::remove_file(&config_path);
         let status = status_result.map_err(|error| {
-            AppError::Config(format!("No se pudo iniciar la configuración elevada: {error}"))
+            AppError::Config(format!(
+                "No se pudo iniciar la configuración elevada: {error}"
+            ))
         })?;
 
         if !status.success() {
@@ -78,15 +85,28 @@ impl ConfigService {
         let temp_mount = std::env::temp_dir().join("sigil-boot-mount");
         std::fs::create_dir_all(&temp_mount)?;
 
-        tracing::info!("Montando partición macOS {} en {}", partition, temp_mount.display());
+        tracing::info!(
+            "Montando partición macOS {} en {}",
+            partition,
+            temp_mount.display()
+        );
 
         let mount_status = Command::new("diskutil")
-            .args(["mount", "readwrite", "-mountPoint", &temp_mount.to_string_lossy(), &partition])
+            .args([
+                "mount",
+                "readwrite",
+                "-mountPoint",
+                &temp_mount.to_string_lossy(),
+                &partition,
+            ])
             .status()
             .map_err(|e| AppError::Config(format!("Fallo al ejecutar diskutil mount: {}", e)))?;
 
         if !mount_status.success() {
-            return Err(AppError::Config(format!("Error al montar partición de arranque {}", partition)));
+            return Err(AppError::Config(format!(
+                "Error al montar partición de arranque {}",
+                partition
+            )));
         }
 
         let config_file_path = temp_mount.join("device-config.json");
@@ -127,7 +147,9 @@ impl ConfigService {
         let _ = std::fs::remove_dir(&temp_mount);
 
         if !umount_status.success() {
-            return Err(AppError::Config("Fallo al desmontar partición de arranque".to_string()));
+            return Err(AppError::Config(
+                "Fallo al desmontar partición de arranque".to_string(),
+            ));
         }
 
         Ok(())
@@ -137,16 +159,28 @@ impl ConfigService {
     // WINDOWS VOLUMES RESOLUTION & WRITE
     // ============================================================
     #[cfg(target_os = "windows")]
-    async fn write_config_windows(&self, device_path: &str, config: &DeviceConfig) -> AppResult<()> {
+    async fn write_config_windows(
+        &self,
+        device_path: &str,
+        config: &DeviceConfig,
+    ) -> AppResult<()> {
         let drive_number = device_path
             .trim_start_matches("\\\\.\\PhysicalDrive")
             .parse::<u32>()
-            .map_err(|_| AppError::Config(format!("Ruta de disco de Windows inválida: {}", device_path)))?;
+            .map_err(|_| {
+                AppError::Config(format!(
+                    "Ruta de disco de Windows inválida: {}",
+                    device_path
+                ))
+            })?;
 
-        tracing::info!("Resolviendo particiones de la unidad física número {}", drive_number);
+        tracing::info!(
+            "Resolviendo particiones de la unidad física número {}",
+            drive_number
+        );
 
         let json_escaped = serde_json::to_string(config)?.replace("\"", "`\"");
-        
+
         let serial = config.serial_number.as_deref().unwrap_or("SS-UNKNOWN");
         let provision_json = serde_json::json!({
             "_schema_version": "1.0",
@@ -161,7 +195,8 @@ impl ConfigService {
         let provision_escaped = serde_json::to_string(&provision_json)?.replace("\"", "`\"");
 
         let mut ps_script = format!(
-            "$part = Get-Partition -DiskNumber {} -PartitionNumber 1; ", drive_number
+            "$part = Get-Partition -DiskNumber {} -PartitionNumber 1; ",
+            drive_number
         );
         ps_script.push_str(
             "$volume = $part | Get-Volume;
@@ -194,7 +229,8 @@ impl ConfigService {
                  }} else {{
                      \"{}\" | Out-File -FilePath $configPath -Encoding utf8;
                  }}
-                 ", escaped_txt, escaped_txt
+                 ",
+                escaped_txt, escaped_txt
             ));
         }
 
@@ -205,7 +241,10 @@ impl ConfigService {
 
         if !output.status.success() {
             let err_msg = String::from_utf8_lossy(&output.stderr).to_string();
-            return Err(AppError::Config(format!("PowerShell devolvió error al inyectar: {}", err_msg)));
+            return Err(AppError::Config(format!(
+                "PowerShell devolvió error al inyectar: {}",
+                err_msg
+            )));
         }
 
         tracing::info!("Inyección completada exitosamente en Windows.");
@@ -218,7 +257,9 @@ pub fn run_config_writer_cli(device_path: &str, config_file: &str) -> AppResult<
     #[cfg(target_os = "linux")]
     {
         let json = std::fs::read_to_string(config_file).map_err(|error| {
-            AppError::Config(format!("No se pudo leer la configuración temporal: {error}"))
+            AppError::Config(format!(
+                "No se pudo leer la configuración temporal: {error}"
+            ))
         })?;
         let config: DeviceConfig = serde_json::from_str(&json)?;
         write_config_linux_privileged(device_path, &config)
@@ -271,15 +312,9 @@ fn linux_boot_partition(device_path: &str) -> String {
 }
 
 #[cfg(target_os = "linux")]
-fn write_config_linux_privileged(
-    device_path: &str,
-    config: &DeviceConfig,
-) -> AppResult<()> {
+fn write_config_linux_privileged(device_path: &str, config: &DeviceConfig) -> AppResult<()> {
     let partition = linux_boot_partition(device_path);
-    let temp_mount = std::env::temp_dir().join(format!(
-        "sigil-boot-mount-{}",
-        std::process::id()
-    ));
+    let temp_mount = std::env::temp_dir().join(format!("sigil-boot-mount-{}", std::process::id()));
     std::fs::create_dir_all(&temp_mount)?;
 
     tracing::info!(
@@ -350,7 +385,9 @@ fn write_linux_boot_files(boot_path: &Path, config: &DeviceConfig) -> AppResult<
 // HELPERS FOR MODEL OPTIMIZATIONS
 // ============================================================
 fn get_optimizations_string(rpi_model: Option<&str>) -> String {
-    let Some(model) = rpi_model else { return String::new(); };
+    let Some(model) = rpi_model else {
+        return String::new();
+    };
     let mut opts = String::new();
     opts.push_str("\n\n# --- Sigil Flash Auto-Optimizations ---\n");
     match model {
@@ -372,7 +409,12 @@ fn get_optimizations_string(rpi_model: Option<&str>) -> String {
             opts.push_str("gpu_mem=32\n");
             opts.push_str("max_usb_current=1\n");
         }
-        "Raspberry Pi 3 (32-bit)" | "Raspberry Pi Zero 2 W (32-bit)" | "Raspberry Pi Zero W (32-bit)" | "Raspberry Pi Zero (32-bit)" | "Raspberry Pi 2" | "Raspberry Pi 1" => {
+        "Raspberry Pi 3 (32-bit)"
+        | "Raspberry Pi Zero 2 W (32-bit)"
+        | "Raspberry Pi Zero W (32-bit)"
+        | "Raspberry Pi Zero (32-bit)"
+        | "Raspberry Pi 2"
+        | "Raspberry Pi 1" => {
             opts.push_str("arm_64bit=0\n");
             opts.push_str("gpu_mem=16\n");
             opts.push_str("max_usb_current=1\n");
@@ -383,7 +425,10 @@ fn get_optimizations_string(rpi_model: Option<&str>) -> String {
     opts
 }
 
-fn apply_model_optimizations(boot_path: &std::path::Path, rpi_model: Option<&str>) -> std::io::Result<()> {
+fn apply_model_optimizations(
+    boot_path: &std::path::Path,
+    rpi_model: Option<&str>,
+) -> std::io::Result<()> {
     let opts = get_optimizations_string(rpi_model);
     if opts.is_empty() {
         return Ok(());
@@ -422,10 +467,8 @@ mod tests {
     }
 
     fn isolated_boot_dir(test_name: &str) -> PathBuf {
-        let path = std::env::temp_dir().join(format!(
-            "sigil-config-{test_name}-{}",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("sigil-config-{test_name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path).expect("create isolated boot directory");
         path

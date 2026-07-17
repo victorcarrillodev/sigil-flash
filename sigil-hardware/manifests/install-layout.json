@@ -1,34 +1,61 @@
 {
   "comment": "Source → destination mapping for Sigil OS payload",
-  "version": "2.0",
+  "version": "2.1",
   "source_base": "sigil-hardware",
   "entries": [
     {
       "source": "panel/*.py",
-      "destination": "/home/sigil/",
+      "destination": "/opt/sigil/panel/",
       "type": "file",
-      "owner": "sigil:sigil",
+      "owner": "root:root",
       "mode": "644",
-      "description": "Flask application files"
+      "description": "Root-owned Flask application files"
     },
     {
       "source": "panel/templates/",
-      "destination": "/home/sigil/templates/",
+      "destination": "/opt/sigil/panel/templates/",
       "type": "directory",
-      "owner": "sigil:sigil",
+      "owner": "root:root",
       "mode": "755",
       "description": "Jinja2 HTML templates"
     },
     {
       "source": "panel/static/",
-      "destination": "/home/sigil/static/",
+      "destination": "/opt/sigil/panel/static/",
       "type": "directory",
-      "owner": "sigil:sigil",
+      "owner": "root:root",
       "mode": "755",
       "description": "Static assets (CSS, JS)"
     },
     {
-      "source": "scripts/*.sh",
+      "source": "panel/device_identity.py",
+      "destination": "/home/sigil/device_identity.py",
+      "type": "file",
+      "owner": "root:root",
+      "mode": "644",
+      "description": "Compatibility helper for non-root runtime scripts"
+    },
+    {
+      "sources": [
+        "scripts/bt-connect.sh",
+        "scripts/radio-stream.sh",
+        "scripts/set-a2dp.sh",
+        "scripts/sigil-leds.sh",
+        "scripts/wifi-fallback.sh",
+        "scripts/wifi-manager.sh",
+        "scripts/audio-manager.sh",
+        "scripts/radio-fetcher.sh",
+        "scripts/audio-player.sh",
+        "scripts/sigil-validate-state.sh",
+        "scripts/sigil-healthcheck.sh",
+        "scripts/sigil-audio-route.sh",
+        "scripts/sigil-audio-capability.sh",
+        "scripts/sigil-cache-meta-perms.sh",
+        "scripts/sigil-cache-wipe.sh",
+        "scripts/sigil-logout-fetch-operation.sh",
+        "scripts/ssh-monitor.sh",
+        "scripts/firstboot.sh"
+      ],
       "destination": "/usr/local/bin/",
       "type": "file",
       "owner": "root:root",
@@ -85,6 +112,31 @@
       "description": "Sudo rules for panel"
     },
     {
+      "source": "conf/sigil.sudoers",
+      "destination": "/etc/sudoers.d/sigil",
+      "type": "file",
+      "owner": "root:root",
+      "mode": "440",
+      "description": "Sudo rules for SIGIL maintenance helpers"
+    },
+    {
+      "source": "conf/sigil-tmpfiles.conf",
+      "destination": "/etc/tmpfiles.d/sigil.conf",
+      "type": "file",
+      "owner": "root:root",
+      "mode": "644",
+      "description": "Runtime directory ownership contract"
+    },
+    {
+      "source": "conf/90-sigil-geolocate",
+      "destination": "/etc/NetworkManager/dispatcher.d/90-sigil-geolocate",
+      "type": "file",
+      "owner": "root:root",
+      "mode": "755",
+      "executable": true,
+      "description": "NetworkManager geolocation dispatcher"
+    },
+    {
       "source": "conf/99-sigil-mac-fixed.conf",
       "destination": "/etc/NetworkManager/conf.d/99-sigil-mac-fixed.conf",
       "type": "file",
@@ -96,8 +148,8 @@
       "source": "conf/audio.conf",
       "destination": "/etc/sigil/audio.conf",
       "type": "file",
-      "owner": "root:root",
-      "mode": "600",
+      "owner": "root:sigil",
+      "mode": "640",
       "description": "Audio system configuration"
     },
     {

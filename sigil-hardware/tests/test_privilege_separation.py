@@ -1,3 +1,4 @@
+import json
 import re
 import unittest
 from pathlib import Path
@@ -21,6 +22,9 @@ class PanelPrivilegeSeparationTests(unittest.TestCase):
         )
         cls.dispatcher = (ROOT / "conf/90-sigil-geolocate").read_text(
             encoding="utf-8"
+        )
+        cls.install_layout = json.loads(
+            (ROOT / "manifests/install-layout.json").read_text(encoding="utf-8")
         )
 
     def test_flask_runs_as_sigil_from_the_protected_tree(self):
@@ -89,6 +93,34 @@ class PanelPrivilegeSeparationTests(unittest.TestCase):
         self.assertEqual(panel_step.count("install -d -o root -g root -m 0755"), 1)
         self.assertEqual(panel_step.count("install -o root -g root -m 0644"), 4)
 
+    def test_install_layout_matches_protected_panel_and_runtime_scripts(self):
+        entries = self.install_layout["entries"]
+        panel = next(item for item in entries if item.get("source") == "panel/*.py")
+        self.assertEqual(panel["destination"], "/opt/sigil/panel/")
+        self.assertEqual(panel["owner"], "root:root")
+        self.assertEqual(panel["mode"], "644")
+
+        scripts = next(
+            item for item in entries if item.get("destination") == "/usr/local/bin/"
+        )
+        array_body = re.search(
+            r"(?ms)^SCRIPTS=\(\n(?P<body>.*?)^\)", self.installer
+        ).group("body")
+        installed = {
+            f"scripts/{line.strip()}"
+            for line in array_body.splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        }
+        self.assertEqual(set(scripts["sources"]), installed)
+
+        audio = next(
+            item
+            for item in entries
+            if item.get("destination") == "/etc/sigil/audio.conf"
+        )
+        self.assertEqual(audio["owner"], "root:sigil")
+        self.assertEqual(audio["mode"], "640")
+
     def test_root_dispatcher_uses_only_the_protected_python_tree(self):
         self.assertIn(
             'GEO_PYTHON="${SIGIL_GEO_PYTHON:-/usr/bin/python3}"', self.dispatcher
@@ -124,6 +156,7 @@ class PanelPrivilegeSeparationTests(unittest.TestCase):
             "/usr/local/bin/wifi-fallback.sh --prepare-client",
             "/usr/local/bin/wifi-fallback.sh --restore-ap",
             "/usr/local/bin/wifi-fallback.sh --external-client-handoff",
+            "/usr/local/bin/wifi-fallback.sh --persist-client-secret *",
             "/usr/sbin/iwlist wlan0 scan",
             "/usr/sbin/iw dev wlan0 set power_save off",
         ):

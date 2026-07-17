@@ -35,6 +35,10 @@ case "$*" in
     "-t -f NAME,TYPE connection show")
         [ -f "$MOCK_STATE/no_saved_profiles" ] || echo 'KnownNet:802-11-wireless'
         ;;
+    "-g connection.uuid connection show KnownNet")
+        echo '00000000-0000-4000-8000-000000000001'
+        ;;
+    connection\ load\ *) exit 0 ;;
     "connection down id KnownNet") exit 0 ;;
     "connection up id KnownNet")
         if [ -f "$MOCK_STATE/recovery_success" ]; then
@@ -131,6 +135,7 @@ export SIGIL_WIFI_STATE_FILE="${TEST_ROOT}/var/state"
 export SIGIL_WIFI_INHIBIT_FILE="${TEST_ROOT}/run/inhibit.json"
 export SIGIL_WIFI_TRANSITION_LOCK="${TEST_ROOT}/run/transition.lock"
 export SIGIL_WIFI_SERVICE_LOCK="${TEST_ROOT}/run/service.lock"
+export SIGIL_NM_CONNECTION_DIR="${TEST_ROOT}/nm-connections"
 export SIGIL_WIFI_FALLBACK_HELPER="${MOCK_BIN}/wifi-fallback-helper"
 export SIGIL_WIFI_CONNECT_INHIBIT_SECONDS=30
 export SIGIL_WIFI_CONNECT_STABILIZATION_SECONDS=2
@@ -146,6 +151,23 @@ export SIGIL_WIFI_LOCAL_PROBE_MAX_BACKOFF=120
 export SIGIL_WIFI_PROBE_TIMEOUT=1
 export SIGIL_WIFI_RECOVERY_STABILIZATION_SECONDS=2
 export SIGIL_WIFI_RECOVERY_CHECK_INTERVAL=1
+mkdir -p "$SIGIL_NM_CONNECTION_DIR"
+cat > "${SIGIL_NM_CONNECTION_DIR}/KnownNet.nmconnection" <<'EOF'
+[connection]
+id=KnownNet
+uuid=00000000-0000-4000-8000-000000000001
+type=wifi
+
+[wifi]
+ssid=KnownNet
+
+[wifi-security]
+key-mgmt=wpa-psk
+
+[ipv4]
+method=auto
+EOF
+chmod 600 "${SIGIL_NM_CONNECTION_DIR}/KnownNet.nmconnection"
 
 source "${ROOT}/scripts/wifi-fallback.sh"
 
@@ -539,6 +561,19 @@ test_panel_credentials_never_reach_logs_or_argv() {
         "${MOCK_STATE}/panel_output"
 }
 
+test_panel_secret_is_persisted_only_in_root_profile() {
+    local profile="${SIGIL_NM_CONNECTION_DIR}/KnownNet.nmconnection"
+    write_ap_state "$(( $(date +%s) + 1000 ))"
+    set_online
+    run_panel_connect 1 || return 1
+    [ "$(stat -c %a "$profile")" = 600 ] \
+        && grep -qx 'psk=handoff-password-not-for-logs' "$profile" \
+        && grep -qx 'psk-flags=0' "$profile" \
+        && ! grep -R -F 'handoff-password-not-for-logs' \
+            "${MOCK_STATE}/sudo_calls" "${MOCK_STATE}/nmcli_calls" \
+            "${MOCK_STATE}/panel_output"
+}
+
 test_panel_transition_contract() {
     SIGIL_TEST_ROOT="$TEST_ROOT" ROOT="$ROOT" python3 - <<'PYEOF'
 import glob
@@ -577,10 +612,14 @@ def fake_run(args, **_kwargs):
     joined = ' '.join(args)
     if 'connection show' in joined:
         return Result(stdout='KnownNet:802-11-wireless\n')
-    if 'passwd-file' in args:
+    if '--persist-client-secret' in args:
         inhibit_seen = inhibit_seen or os.path.exists(wifi.WIFI_INHIBIT_FILE)
-        password_file = args[args.index('passwd-file') + 1]
+        password_file = args[-1]
         assert oct(os.stat(password_file).st_mode & 0o777) == '0o600'
+        with open(password_file, encoding='utf-8') as handle:
+            assert handle.read() == f'802-11-wireless-security.psk:{secret}\n'
+        return Result()
+    if args[:5] == ['sudo', 'nmcli', 'con', 'up', 'KnownNet']:
         return Result(1 if fail_up else 0)
     if 'GENERAL.STATE' in args:
         return Result(stdout='GENERAL.STATE:100 (connected)\n')
@@ -598,9 +637,14 @@ secret = 'test-password-not-for-logs'
 with patch.object(subprocess, 'run', side_effect=fake_run), patch.object(wifi.time, 'sleep', return_value=None):
     success, _message = wifi.connect_wifi('KnownNet', secret)
 assert success and inhibit_seen
-activation = next(command for command in commands if 'passwd-file' in command)
-assert activation[:6] == ['sudo', 'nmcli', 'con', 'up', 'KnownNet', 'passwd-file']
-assert '--passwd-file' not in activation
+persist = next(command for command in commands if '--persist-client-secret' in command)
+activation = next(
+    command for command in commands
+    if command[:4] == ['sudo', 'nmcli', 'con', 'up']
+)
+assert persist[:4] == ['sudo', wifi.WIFI_FALLBACK_HELPER, '--persist-client-secret', 'KnownNet']
+assert activation == ['sudo', 'nmcli', 'con', 'up', 'KnownNet']
+assert 'passwd-file' not in activation
 assert not os.path.exists(wifi.WIFI_INHIBIT_FILE)
 assert not any(
     'systemctl' in command and 'wifi-fallback' in command
@@ -648,6 +692,7 @@ run_test "failed panel transition restores AP exactly once" test_failed_panel_tr
 run_test "permanently unmanaged client preparation fails closed to AP" test_unmanaged_client_preparation_fails_closed_to_ap
 run_test "two panel transitions serialize on the canonical lock" test_panel_transitions_share_one_lock
 run_test "panel credentials never enter logs or argv" test_panel_credentials_never_reach_logs_or_argv
+run_test "panel PSK persists only in the root-owned NetworkManager profile" test_panel_secret_is_persisted_only_in_root_profile
 run_test "panel transition uses bounded inhibit and hides password" test_panel_transition_contract
 
 printf '\nWiFi fallback: %d passed, %d failed\n' "$PASS" "$FAIL"

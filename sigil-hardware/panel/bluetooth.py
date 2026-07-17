@@ -1,4 +1,5 @@
 """Bluetooth discovery/status plus the panel-to-owner command contract."""
+import fcntl
 import subprocess
 import re
 import os
@@ -12,6 +13,9 @@ from config import PREFERRED_BT_FILE, scan_lock
 logger = logging.getLogger(__name__)
 BT_OWNER_COMMAND = os.environ.get(
     "SIGIL_BT_OWNER_COMMAND", "/usr/local/bin/bt-connect.sh"
+)
+BT_TRANSITION_LOCK = os.environ.get(
+    "SIGIL_BT_LOCK_FILE", "/run/sigil/bluetooth-transition.lock"
 )
 BT_OWNER_TIMEOUT_SECONDS = 75
 
@@ -140,6 +144,31 @@ def get_known_devices() -> list[dict]:
 
 # ── SSE: Escaneo en tiempo real ───────────────────────────────────────────────
 
+def _try_acquire_transition_lock():
+    """Reserve the canonical BlueZ transition lock without blocking the UI."""
+    try:
+        directory = os.path.dirname(BT_TRANSITION_LOCK) or "."
+        os.makedirs(directory, mode=0o770, exist_ok=True)
+        flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(BT_TRANSITION_LOCK, flags, 0o660)
+        handle = os.fdopen(fd, "r+", encoding="ascii")
+    except OSError:
+        return None
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (BlockingIOError, OSError):
+        handle.close()
+        return None
+    return handle
+
+
+def _release_transition_lock(handle) -> None:
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    finally:
+        handle.close()
+
 def stream_bluetooth_scan(preferred_mac: str | None, known_macs: set):
     """
     Generador SSE. Primero emite dispositivos ya conocidos al instante,
@@ -164,6 +193,10 @@ def stream_bluetooth_scan(preferred_mac: str | None, known_macs: set):
         return
 
     with scan_lock:
+        transition_handle = _try_acquire_transition_lock()
+        if transition_handle is None:
+            yield 'data: {"error": "Bluetooth ocupado; reintenta en breve"}\n\n'
+            return
         proc = None
         try:
             proc = subprocess.Popen(
@@ -227,6 +260,7 @@ def stream_bluetooth_scan(preferred_mac: str | None, known_macs: set):
                     proc.kill()
                 except Exception:
                     pass
+            _release_transition_lock(transition_handle)
 
     yield 'data: {"done": true}\n\n'
 

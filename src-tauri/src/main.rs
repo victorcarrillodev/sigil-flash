@@ -122,12 +122,14 @@ fn main() {
             let dest = get_arg_value(&args, "--dest")?;
             let progress_file = get_arg_value(&args, "--progress-file")?;
             let offline_packages = get_arg_value(&args, "--offline-packages")?;
+            let payload = get_arg_value(&args, "--payload")?;
             let config_file = get_arg_value(&args, "--config-file")?;
             services::flash_service::run_raw_flash_cli(
                 &src,
                 &dest,
                 &progress_file,
                 &offline_packages,
+                &payload,
                 &config_file,
             )
             .await

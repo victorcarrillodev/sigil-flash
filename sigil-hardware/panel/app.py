@@ -84,6 +84,15 @@ app.config.update(
 )
 logging.basicConfig(level=logging.INFO)
 
+
+@app.after_request
+def disable_panel_caching(response):
+    """Captive browsers must not reuse HTML or CSRF state across sessions."""
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
+    return response
+
 # Device ID (para futuras integraciones), resolved by the canonical helper.
 _DEVICE_ID = load_identity()["device_id"]
 
@@ -422,6 +431,12 @@ def index():
         preferred_bt=preferred_bt,
         csrf_token=_csrf_token(),
     )
+
+
+@app.route("/api/csrf-token")
+def api_csrf_token():
+    """Return the token bound to the currently authenticated session."""
+    return jsonify({"success": True, "csrf_token": _csrf_token()})
 
 
 # ── Rutas Bluetooth ────────────────────────────────────────────────────────────

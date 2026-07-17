@@ -104,6 +104,11 @@ cat > "${MOCK_BIN}/mpg123" <<'EOF'
 #!/bin/bash
 printf '%s\n' "$*" >> "$MOCK_STATE/mpg123_calls"
 EOF
+cat > "${MOCK_BIN}/curl" <<'EOF'
+#!/bin/bash
+printf '%s\n' "$*" >> "$MOCK_STATE/curl_calls"
+exit "${CURL_RC:-0}"
+EOF
 chmod +x "${MOCK_BIN}"/*
 
 export MOCK_STATE PATH="${MOCK_BIN}:${PATH}"
@@ -134,6 +139,7 @@ reset_fixture() {
     : > "${MOCK_STATE}/sudo_calls"
     : > "${MOCK_STATE}/timeout_calls"
     : > "${MOCK_STATE}/sleep_calls"
+    : > "${MOCK_STATE}/curl_calls"
     rm -f "${MOCK_STATE}/mpg123_calls"
     printf '%s\n' '{}' > "$SIGIL_PLAYBACK_STATE_FILE"
     PAPLAY_RC=0
@@ -142,6 +148,8 @@ reset_fixture() {
     MOCK_SIGIL_UID=1234
     export MOCK_CALLER_UID MOCK_SIGIL_UID
     unset SIGIL_I2S_DAC_PRESENT
+    CURL_RC=0
+    export CURL_RC
 }
 
 set_bluetooth_fixture() {
@@ -393,6 +401,24 @@ EOF
         && [ ! -s "${MOCK_STATE}/paplay_calls" ]
 }
 
+test_manager_tolerates_unreachable_server() {
+    # shellcheck source=../scripts/audio-manager.sh
+    source "${ROOT}/scripts/audio-manager.sh"
+    LOG="${MOCK_STATE}/manager.log"
+    SERVER_URL="https://offline.invalid"
+    CURL_CONFIG=""
+    LAST_INTERNET_CHECK_EPOCH=0
+    INTERNET_AVAILABLE=true
+    CURL_RC=7
+    export CURL_RC
+
+    check_internet
+
+    [ "$INTERNET_AVAILABLE" = false ] \
+        && [ "$(wc -l < "${MOCK_STATE}/curl_calls")" -eq 1 ] \
+        && grep -q 'Internet lost' "$LOG"
+}
+
 test_root_uses_sigil_pulse_session() {
     MOCK_CALLER_UID=0
     export MOCK_CALLER_UID
@@ -482,6 +508,7 @@ run_test "player recovers when Bluetooth later connects" test_output_appears_and
 run_test "route changes do not duplicate an existing player" test_route_probe_does_not_duplicate_player
 run_test "manager persists no_audio_output runtime reason" test_manager_persists_no_output_reason
 run_test "manager consumes player output without activating a route" test_manager_consumes_player_output_without_routing
+run_test "audio-manager remains alive when the server is unreachable" test_manager_tolerates_unreachable_server
 run_test "root routes pactl and paplay through the sigil PulseAudio session" test_root_uses_sigil_pulse_session
 run_test "root silent probe retains the three-second timeout" test_root_silent_probe_keeps_timeout
 run_test "non-root audio routing never invokes sudo" test_non_root_does_not_use_sudo

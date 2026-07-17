@@ -41,11 +41,27 @@ function setResult(id, msg, isError) {
   el.className   = 'result-msg' + (isError ? ' error' : '');
 }
 
-function csrfHeaders(extra) {
-  var meta = document.querySelector('meta[name="sigil-csrf-token"]');
-  var headers = extra || {};
-  headers['X-Sigil-CSRF'] = meta ? meta.getAttribute('content') : '';
-  return headers;
+function csrfFetch(url, options) {
+  var requestOptions = options || {};
+  return fetch('/api/csrf-token', {
+    method: 'GET',
+    credentials: 'same-origin',
+    cache: 'no-store'
+  })
+  .then(function(response) {
+    if (!response.ok) throw new Error('csrf-session-unavailable');
+    return response.json();
+  })
+  .then(function(data) {
+    if (!data.csrf_token) throw new Error('csrf-token-unavailable');
+    var meta = document.querySelector('meta[name="sigil-csrf-token"]');
+    if (meta) meta.setAttribute('content', data.csrf_token);
+    requestOptions.headers = requestOptions.headers || {};
+    requestOptions.headers['X-Sigil-CSRF'] = data.csrf_token;
+    requestOptions.credentials = 'same-origin';
+    requestOptions.cache = 'no-store';
+    return fetch(url, requestOptions);
+  });
 }
 
 
@@ -96,7 +112,19 @@ function makeBtRow(d) {
 
 // ── Bluetooth: scan (SSE) ──────────────────────────────────────────────────
 
-var _btScanCount = 0;
+var _btScanCount  = 0;
+var _btScanStream = null;
+
+function stopBluetoothScanForAction() {
+  if (_btScanStream) {
+    _btScanStream.close();
+    _btScanStream = null;
+  }
+  var scanBtn = document.getElementById('scanBtBtn');
+  var statusEl = document.getElementById('bt-status');
+  if (scanBtn) scanBtn.disabled = false;
+  if (statusEl) statusEl.textContent = '';
+}
 
 document.getElementById('scanBtBtn').addEventListener('click', function() {
   var btn       = this;
@@ -108,7 +136,9 @@ document.getElementById('scanBtBtn').addEventListener('click', function() {
   container.innerHTML = '<div class="no-devices">Buscando dispositivos… <span class="spinner"></span></div>';
   statusEl.textContent = '(18 seg)';
 
+  if (_btScanStream) _btScanStream.close();
   var es = new EventSource('/scan/stream');
+  _btScanStream = es;
   container.innerHTML = '';
 
   es.onmessage = function(evt) {
@@ -117,6 +147,7 @@ document.getElementById('scanBtBtn').addEventListener('click', function() {
 
     if (data.done) {
       es.close();
+      if (_btScanStream === es) _btScanStream = null;
       btn.disabled     = false;
       statusEl.textContent = '';
       if (_btScanCount === 0 && container.children.length === 0) {
@@ -124,7 +155,13 @@ document.getElementById('scanBtBtn').addEventListener('click', function() {
       }
       return;
     }
-    if (data.error) { es.close(); btn.disabled = false; return; }
+    if (data.error) {
+      es.close();
+      if (_btScanStream === es) _btScanStream = null;
+      btn.disabled = false;
+      setResult('bt-result', data.error, true);
+      return;
+    }
     if (!data.name || data.name.trim() === '' || data.name === data.mac) return;
 
     var existing = document.getElementById('bt-row-' + data.mac.replace(/:/g, ''));
@@ -139,6 +176,7 @@ document.getElementById('scanBtBtn').addEventListener('click', function() {
 
   es.onerror = function() {
     es.close();
+    if (_btScanStream === es) _btScanStream = null;
     btn.disabled     = false;
     statusEl.textContent = '';
   };
@@ -152,46 +190,62 @@ document.getElementById('bt-table').addEventListener('click', function(e) {
 
   if (target.classList.contains('connect-bt-btn')) {
     var mac = target.getAttribute('data-mac');
+    stopBluetoothScanForAction();
     target.disabled = true;
     setResult('bt-result', 'Conectando…');
-    fetch('/connect/' + encodeURIComponent(mac), { headers: csrfHeaders() })
+    csrfFetch('/connect/' + encodeURIComponent(mac))
       .then(function(r) { return r.json(); })
       .then(function(d) {
         setResult('bt-result', d.message, !d.success);
         if (d.success) setTimeout(function() { location.reload(); }, 1500);
         else target.disabled = false;
+      })
+      .catch(function() {
+        setResult('bt-result', 'La petición Bluetooth no pudo completarse; reintenta.', true);
+        target.disabled = false;
       });
 
   } else if (target.classList.contains('disconnect-bt-btn')) {
+    stopBluetoothScanForAction();
     target.disabled = true;
     setResult('bt-result', 'Desconectando…');
-    fetch('/disconnect_active', { headers: csrfHeaders() })
+    csrfFetch('/disconnect_active')
       .then(function(r) { return r.json(); })
       .then(function(d) {
         setResult('bt-result', d.message, !d.success);
         if (d.success) setTimeout(function() { location.reload(); }, 1500);
         else target.disabled = false;
+      })
+      .catch(function() {
+        setResult('bt-result', 'La petición Bluetooth no pudo completarse; reintenta.', true);
+        target.disabled = false;
       });
 
   } else if (target.classList.contains('remove-bt-btn')) {
     if (!confirm('¿Seguro que deseas eliminar este altavoz?')) return;
     var mac = target.getAttribute('data-mac');
+    stopBluetoothScanForAction();
     target.disabled = true;
-    fetch('/remove/' + encodeURIComponent(mac), { headers: csrfHeaders() })
+    csrfFetch('/remove/' + encodeURIComponent(mac))
       .then(function(r) { return r.json(); })
       .then(function(d) {
         if (d.success) setTimeout(function() { location.reload(); }, 800);
         else target.disabled = false;
+      })
+      .catch(function() {
+        setResult('bt-result', 'La petición Bluetooth no pudo completarse; reintenta.', true);
+        target.disabled = false;
       });
 
   } else if (target.classList.contains('pair-bt-btn')) {
     var mac  = target.getAttribute('data-mac');
     var name = target.getAttribute('data-name');
+    stopBluetoothScanForAction();
     target.disabled = true;
     setResult('bt-result', 'Emparejando…');
-    fetch('/pair', {
+    csrfFetch('/pair', {
       method: 'POST',
-      headers: csrfHeaders({ 'Content-Type': 'application/x-www-form-urlencoded' }),
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: 'mac=' + encodeURIComponent(mac) + '&name=' + encodeURIComponent(name)
     })
     .then(function(r) { return r.json(); })
@@ -199,6 +253,10 @@ document.getElementById('bt-table').addEventListener('click', function(e) {
       setResult('bt-result', d.message, !d.success);
       if (d.success) setTimeout(function() { location.reload(); }, 1500);
       else target.disabled = false;
+    })
+    .catch(function() {
+      setResult('bt-result', 'La petición Bluetooth no pudo completarse; reintenta.', true);
+      target.disabled = false;
     });
   }
 });
@@ -344,9 +402,9 @@ document.getElementById('wifi-password').addEventListener('keydown', function(e)
 function connectWifi(ssid, password) {
   setResult('wifi-result', 'Conectando a ' + escapeHtml(ssid) + '… (puede tardar 30-40 s)');
 
-  fetch('/wifi/connect', {
+  csrfFetch('/wifi/connect', {
     method: 'POST',
-    headers: csrfHeaders({ 'Content-Type': 'application/json' }),
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ ssid: ssid, password: password })
   })
   .then(function(r) { return r.json(); })

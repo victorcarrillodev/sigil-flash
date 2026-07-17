@@ -1,14 +1,14 @@
-use crate::errors::{AppResult, AppError};
+use crate::errors::{AppError, AppResult};
 use crate::models::FlashProgress;
+use futures_util::StreamExt;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::Mutex;
-use tokio::task::AbortHandle;
-use tauri::{AppHandle, Emitter};
-use futures_util::StreamExt;
 use std::time::Instant;
+use tauri::{AppHandle, Emitter};
 use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
+use tokio::sync::Mutex;
+use tokio::task::AbortHandle;
 
 pub struct DownloadService {
     abort_handle: Arc<Mutex<Option<AbortHandle>>>,
@@ -36,9 +36,8 @@ impl DownloadService {
         let dest = destination.clone();
         let app_handle = app.clone();
 
-        let task = tokio::spawn(async move {
-            Self::download_task(&url_str, &dest, app_handle).await
-        });
+        let task =
+            tokio::spawn(async move { Self::download_task(&url_str, &dest, app_handle).await });
 
         // Register the new abort handle
         {
@@ -57,17 +56,23 @@ impl DownloadService {
                 let mut guard = self.abort_handle.lock().await;
                 *guard = None;
                 if join_err.is_cancelled() {
-                    let _ = app.emit("download-progress", FlashProgress {
-                        bytes_written: 0,
-                        total_bytes: 0,
-                        speed_mbps: 0.0,
-                        eta_seconds: 0.0,
-                        status: "cancelled".to_string(),
-                        message: "Descarga cancelada por el usuario".to_string(),
-                    });
+                    let _ = app.emit(
+                        "download-progress",
+                        FlashProgress {
+                            bytes_written: 0,
+                            total_bytes: 0,
+                            speed_mbps: 0.0,
+                            eta_seconds: 0.0,
+                            status: "cancelled".to_string(),
+                            message: "Descarga cancelada por el usuario".to_string(),
+                        },
+                    );
                     Err(AppError::Download("Descarga cancelada".to_string()))
                 } else {
-                    Err(AppError::Internal(format!("Error en el hilo de descarga: {}", join_err)))
+                    Err(AppError::Internal(format!(
+                        "Error en el hilo de descarga: {}",
+                        join_err
+                    )))
                 }
             }
         }
@@ -84,19 +89,16 @@ impl DownloadService {
     }
 
     /// The asynchronous task running in the background executing the request stream.
-    async fn download_task(
-        url: &str,
-        destination: &PathBuf,
-        app: AppHandle,
-    ) -> AppResult<()> {
-        tracing::info!("Iniciando flujo de descarga hacia: {}", destination.display());
+    async fn download_task(url: &str, destination: &PathBuf, app: AppHandle) -> AppResult<()> {
+        tracing::info!(
+            "Iniciando flujo de descarga hacia: {}",
+            destination.display()
+        );
 
         let client = reqwest::Client::new();
-        let response = client
-            .get(url)
-            .send()
-            .await
-            .map_err(|e| AppError::Download(format!("Fallo al contactar el servidor remoto: {}", e)))?;
+        let response = client.get(url).send().await.map_err(|e| {
+            AppError::Download(format!("Fallo al contactar el servidor remoto: {}", e))
+        })?;
 
         if !response.status().is_success() {
             return Err(AppError::Download(format!(
@@ -105,9 +107,12 @@ impl DownloadService {
             )));
         }
 
-        let total_size = response
-            .content_length()
-            .ok_or_else(|| AppError::Download("No se pudo obtener el tamaño del archivo desde el servidor (Falta Content-Length)".to_string()))?;
+        let total_size = response.content_length().ok_or_else(|| {
+            AppError::Download(
+                "No se pudo obtener el tamaño del archivo desde el servidor (Falta Content-Length)"
+                    .to_string(),
+            )
+        })?;
 
         // Create directories if missing
         if let Some(parent) = destination.parent() {
@@ -115,9 +120,9 @@ impl DownloadService {
         }
 
         // Open target file asynchronously
-        let mut file = File::create(destination)
-            .await
-            .map_err(|e| AppError::Download(format!("No se pudo inicializar archivo en disco: {}", e)))?;
+        let mut file = File::create(destination).await.map_err(|e| {
+            AppError::Download(format!("No se pudo inicializar archivo en disco: {}", e))
+        })?;
 
         let mut stream = response.bytes_stream();
         let mut bytes_written = 0u64;
@@ -125,22 +130,24 @@ impl DownloadService {
         let mut last_emit = Instant::now();
 
         // Emit initial connection event
-        let _ = app.emit("download-progress", FlashProgress {
-            bytes_written: 0,
-            total_bytes: total_size,
-            speed_mbps: 0.0,
-            eta_seconds: 0.0,
-            status: "running".to_string(),
-            message: "Enlace establecido. Transmitiendo...".to_string(),
-        });
+        let _ = app.emit(
+            "download-progress",
+            FlashProgress {
+                bytes_written: 0,
+                total_bytes: total_size,
+                speed_mbps: 0.0,
+                eta_seconds: 0.0,
+                status: "running".to_string(),
+                message: "Enlace establecido. Transmitiendo...".to_string(),
+            },
+        );
 
         while let Some(chunk_res) = stream.next().await {
-            let chunk = chunk_res.map_err(|e| AppError::Download(format!("Error en el stream de red: {}", e)))?;
-            
+            let chunk = chunk_res
+                .map_err(|e| AppError::Download(format!("Error en el stream de red: {}", e)))?;
+
             // Non-blocking async file write
-            file.write_all(&chunk)
-                .await
-                .map_err(AppError::Io)?;
+            file.write_all(&chunk).await.map_err(AppError::Io)?;
 
             bytes_written += chunk.len() as u64;
 
@@ -162,14 +169,17 @@ impl DownloadService {
                 };
 
                 let pct = (bytes_written as f64 / total_size as f64) * 100.0;
-                let _ = app.emit("download-progress", FlashProgress {
-                    bytes_written,
-                    total_bytes: total_size,
-                    speed_mbps: speed,
-                    eta_seconds: eta,
-                    status: "running".to_string(),
-                    message: format!("Descargando imagen... ({:.1}%)", pct),
-                });
+                let _ = app.emit(
+                    "download-progress",
+                    FlashProgress {
+                        bytes_written,
+                        total_bytes: total_size,
+                        speed_mbps: speed,
+                        eta_seconds: eta,
+                        status: "running".to_string(),
+                        message: format!("Descargando imagen... ({:.1}%)", pct),
+                    },
+                );
                 last_emit = now;
             }
         }
@@ -177,14 +187,17 @@ impl DownloadService {
         // Async sync file buffers
         file.sync_all().await?;
 
-        let _ = app.emit("download-progress", FlashProgress {
-            bytes_written: total_size,
-            total_bytes: total_size,
-            speed_mbps: 0.0,
-            eta_seconds: 0.0,
-            status: "done".to_string(),
-            message: "Descarga completada y verificada en almacenamiento local.".to_string(),
-        });
+        let _ = app.emit(
+            "download-progress",
+            FlashProgress {
+                bytes_written: total_size,
+                total_bytes: total_size,
+                speed_mbps: 0.0,
+                eta_seconds: 0.0,
+                status: "done".to_string(),
+                message: "Descarga completada y verificada en almacenamiento local.".to_string(),
+            },
+        );
 
         tracing::info!("Descarga completada con éxito: {}", destination.display());
         Ok(())

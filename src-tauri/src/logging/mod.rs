@@ -1,8 +1,8 @@
+use crate::errors::AppResult;
 use directories::ProjectDirs;
 use std::path::PathBuf;
-use tracing_subscriber::{fmt, prelude::*, Registry, EnvFilter};
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
-use crate::errors::AppResult;
+use tracing_subscriber::{fmt, prelude::*, EnvFilter, Registry};
 
 /// Initializes the tracing logging framework.
 /// Configures a multi-layered subscriber:
@@ -23,11 +23,7 @@ pub fn init_logging() -> AppResult<tracing_appender::non_blocking::WorkerGuard> 
     std::fs::create_dir_all(&log_dir)?;
 
     // Set up a daily rolling file appender
-    let file_appender = RollingFileAppender::new(
-        Rotation::DAILY,
-        &log_dir,
-        "sigil-flash.log",
-    );
+    let file_appender = RollingFileAppender::new(Rotation::DAILY, &log_dir, "sigil-flash.log");
 
     let (non_blocking_writer, guard) = tracing_appender::non_blocking(file_appender);
 
@@ -39,13 +35,10 @@ pub fn init_logging() -> AppResult<tracing_appender::non_blocking::WorkerGuard> 
         .with_thread_ids(true);
 
     // Console stdout layer
-    let stdout_layer = fmt::layer()
-        .with_ansi(true)
-        .with_target(true);
+    let stdout_layer = fmt::layer().with_ansi(true).with_target(true);
 
     // Env filter defaults to 'info' if RUST_LOG environment variable is not defined
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info"));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
     // Register all log layers
     Registry::default()

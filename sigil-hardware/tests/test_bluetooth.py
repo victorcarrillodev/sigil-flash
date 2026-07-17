@@ -17,6 +17,63 @@ FAKE_MAC = "02:00:00:00:00:01"
 
 
 class BluetoothOwnerContractTests(unittest.TestCase):
+    def test_panel_scan_uses_the_canonical_cross_process_lock(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            lock_path = os.path.join(temp_dir, "bluetooth-transition.lock")
+            with patch.object(bluetooth, "BT_TRANSITION_LOCK", lock_path):
+                first = bluetooth._try_acquire_transition_lock()
+                self.assertIsNotNone(first)
+                self.assertIsNone(bluetooth._try_acquire_transition_lock())
+                bluetooth._release_transition_lock(first)
+                second = bluetooth._try_acquire_transition_lock()
+                self.assertIsNotNone(second)
+                bluetooth._release_transition_lock(second)
+
+    @patch("bluetooth.subprocess.Popen")
+    @patch("bluetooth.get_known_devices", return_value=[])
+    @patch("bluetooth.get_connected_devices", return_value=set())
+    def test_busy_transition_prevents_overlapping_active_scan(
+        self, _connected, _known, popen
+    ):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            lock_path = os.path.join(temp_dir, "bluetooth-transition.lock")
+            with patch.object(bluetooth, "BT_TRANSITION_LOCK", lock_path):
+                owner_lock = bluetooth._try_acquire_transition_lock()
+                try:
+                    events = list(bluetooth.stream_bluetooth_scan(None, set()))
+                finally:
+                    bluetooth._release_transition_lock(owner_lock)
+
+        self.assertEqual(
+            events,
+            ['data: {"error": "Bluetooth ocupado; reintenta en breve"}\n\n'],
+        )
+        popen.assert_not_called()
+
+    def test_ui_closes_active_scan_before_bluetooth_mutations(self):
+        javascript = Path(
+            os.path.join(os.path.dirname(__file__), "..", "panel", "static", "js", "app.js")
+        ).read_text(encoding="utf-8")
+        action_block = javascript[javascript.index("// ── Bluetooth: action delegation"):]
+        self.assertGreaterEqual(action_block.count("stopBluetoothScanForAction();"), 4)
+        self.assertIn("_btScanStream.close();", javascript)
+        self.assertGreaterEqual(
+            action_block.count("La petición Bluetooth no pudo completarse"), 4
+        )
+        self.assertGreaterEqual(action_block.count("csrfFetch("), 5)
+        self.assertIn("fetch('/api/csrf-token'", javascript)
+        self.assertIn("cache: 'no-store'", javascript)
+        app_source = Path(
+            os.path.join(os.path.dirname(__file__), "..", "panel", "app.py")
+        ).read_text(encoding="utf-8")
+        self.assertIn('@app.route("/api/csrf-token")', app_source)
+        self.assertIn('@app.after_request', app_source)
+        self.assertIn('"Cache-Control"] = "no-store', app_source)
+        template = Path(
+            os.path.join(os.path.dirname(__file__), "..", "panel", "templates", "index.html")
+        ).read_text(encoding="utf-8")
+        self.assertIn("v='20260716-csrf1'", template)
+
     @patch("bluetooth.subprocess.run")
     def test_connect_uses_bounded_structured_owner_request(self, run):
         run.return_value = MagicMock(

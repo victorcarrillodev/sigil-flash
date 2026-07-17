@@ -176,7 +176,8 @@ class FlaskAuthenticationTests(unittest.TestCase):
     def test_routes_reject_unauthenticated_access_and_captive_redirects(self):
         paths = [
             "/api/system-status", "/scan/known", "/bt/status", "/wifi/scan",
-            "/wifi/status", "/music/status", "/connect/02:00:00:00:00:01",
+            "/wifi/status", "/music/status", "/api/csrf-token",
+            "/connect/02:00:00:00:00:01",
             "/disconnect_active", "/remove/02:00:00:00:00:01",
         ]
         for path in paths:
@@ -199,6 +200,11 @@ class FlaskAuthenticationTests(unittest.TestCase):
         self.assertIn("HttpOnly", cookie)
         self.assertIn("SameSite=Strict", cookie)
         self.assertEqual(self.client.get("/api/system-status").status_code, 200)
+        token_response = self.client.get("/api/csrf-token")
+        self.assertEqual(token_response.status_code, 200)
+        self.assertIn("no-store", token_response.headers["Cache-Control"])
+        with self.client.session_transaction() as current:
+            self.assertEqual(token_response.get_json()["csrf_token"], current["csrf_token"])
         self.assertEqual(
             self.client.get("/connect/02:00:00:00:00:01").status_code, 403
         )

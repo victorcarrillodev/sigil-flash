@@ -75,5 +75,15 @@ valid_target = manifest["target"] == {
 raise SystemExit(0 if declared == actual and valid_target else 1)
 PYEOF
 
+FLASH_SERVICE="${ROOT}/../src-tauri/src/services/flash_service.rs"
+check "real flasher resolves the generated payload artifact" \
+    grep -q 'join("payloads")' "$FLASH_SERVICE"
+check "real flasher copies the validated payload, not the source tree" \
+    sh -c "grep -q 'copy_hardware_payload(hardware_payload' '$FLASH_SERVICE' && ! grep -q 'hardware_source = flash_root.join(\"sigil-hardware\")' '$FLASH_SERVICE'"
+check "real flasher reads the package contract from the same payload" \
+    grep -q 'let package_contract = hardware_payload' "$FLASH_SERVICE"
+check "flasher plan matches production services and protected Bluetooth state" \
+    sh -c "grep -q '\"audio-manager\"' '$ROOT/flasher-rs/src/model.rs' && grep -q '\"sigil-firstboot\"' '$ROOT/flasher-rs/src/model.rs' && grep -q '(\"/home/sigil/preferred_bt.txt\", \"sigil:sigil\", \"600\")' '$ROOT/flasher-rs/src/model.rs'"
+
 printf '\nFlasher payload: %d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
