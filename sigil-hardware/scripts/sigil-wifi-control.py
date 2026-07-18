@@ -188,30 +188,34 @@ def _write_state(state: dict) -> None:
 def _stop_ap_services() -> bool:
     """Stop hostapd/dnsmasq and return wlan0 to NM control.
 
-    Switches wireless interface from AP mode to managed (station) mode
-    explicitly via iw, then polls NM state until wlan0 reaches
-    'disconnected' (20) or higher.
+    After stopping AP services, toggles rfkill to force the wireless
+    driver to reinitialize in station (managed) mode.  Some USB WiFi
+    drivers (mt7601u, rtl87xx) do NOT automatically switch from AP mode
+    to station mode when hostapd exits — rfkill forces a driver reset.
     """
     subprocess.run(['systemctl', 'stop', 'hostapd'], capture_output=True, timeout=10)
     subprocess.run(['systemctl', 'stop', 'dnsmasq'], capture_output=True, timeout=10)
-    # Switch wireless interface from AP to managed (station) mode
-    # before handing control to NetworkManager.
-    subprocess.run(['ip', 'link', 'set', WIFI_INTERFACE, 'down'], capture_output=True, timeout=5)
-    subprocess.run(
-        ['iw', 'dev', WIFI_INTERFACE, 'set', 'type', 'managed'],
-        capture_output=True, timeout=5,
-    )
     subprocess.run(
         ['ip', 'addr', 'flush', 'dev', WIFI_INTERFACE],
         capture_output=True, timeout=5,
     )
-    subprocess.run(['ip', 'link', 'set', WIFI_INTERFACE, 'up'], capture_output=True, timeout=5)
+    # Toggle rfkill to force the driver to reinitialize in station mode
+    subprocess.run(
+        ['rfkill', 'block', 'wifi'],
+        capture_output=True, timeout=5,
+    )
+    time.sleep(1)
+    subprocess.run(
+        ['rfkill', 'unblock', 'wifi'],
+        capture_output=True, timeout=5,
+    )
+    time.sleep(1)
     subprocess.run(
         ['nmcli', 'device', 'set', WIFI_INTERFACE, 'managed', 'yes'],
         capture_output=True, timeout=10,
     )
     # Wait for NM ownership — poll until state >= 20 (disconnected)
-    for _ in range(10):
+    for _ in range(15):  # 15s max (rfkill may need extra time)
         result = subprocess.run(
             ['nmcli', '-t', '-f', 'GENERAL.STATE', 'device', 'show', WIFI_INTERFACE],
             capture_output=True, text=True, timeout=5,
@@ -230,7 +234,7 @@ def _stop_ap_services() -> bool:
 
 
 def _start_ap_services() -> bool:
-    """Start hostapd/dnsmasq for AP mode recovery (used by rollback)."""
+    """Start hostapd/dnsmasq for AP mode recovery."""
     subprocess.run(
         ['nmcli', 'device', 'disconnect', WIFI_INTERFACE],
         capture_output=True, timeout=10,
@@ -241,14 +245,15 @@ def _start_ap_services() -> bool:
     )
     subprocess.run(['ip', 'link', 'set', WIFI_INTERFACE, 'down'], capture_output=True, timeout=5)
     subprocess.run(
-        ['iw', 'dev', WIFI_INTERFACE, 'set', 'type', 'ap'],
-        capture_output=True, timeout=5,
-    )
-    subprocess.run(
         ['ip', 'addr', 'flush', 'dev', WIFI_INTERFACE],
         capture_output=True, timeout=5,
     )
     subprocess.run(['ip', 'link', 'set', WIFI_INTERFACE, 'up'], capture_output=True, timeout=5)
+    ap_ip = os.environ.get('SIGIL_WIFI_AP_IP', '192.168.4.1')
+    subprocess.run(
+        ['ip', 'addr', 'add', f'{ap_ip}/24', 'dev', WIFI_INTERFACE],
+        capture_output=True, timeout=5,
+    )
     ap_ip = os.environ.get('SIGIL_WIFI_AP_IP', '192.168.4.1')
     subprocess.run(
         ['ip', 'addr', 'add', f'{ap_ip}/24', 'dev', WIFI_INTERFACE],
