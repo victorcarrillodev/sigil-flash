@@ -72,7 +72,7 @@ MAX_REQUEST_SIZE = int(os.environ.get('SIGIL_WIFI_CONTROL_MAX_REQUEST', '8192'))
 SIGIL_GROUP = 'sigil'
 _handler = logging.StreamHandler(sys.stdout)
 _handler.setFormatter(logging.Formatter(
-    '%(asctime)s [sigil-wifi-control] %(message)s', datefmt='%Y-%m-%d %H:%M:%S'
+    '%(asctime)s [sigil-wifi-control] %(levelname)s: %(message)s', datefmt='%Y-%m-%d %H:%M:%S'
 ))
 logger.addHandler(_handler)
 logger.setLevel(logging.INFO)
@@ -188,22 +188,29 @@ def _write_state(state: dict) -> None:
 def _stop_ap_services() -> bool:
     """Stop hostapd/dnsmasq and return wlan0 to NM control.
 
-    Polls NM state until wlan0 reaches 'disconnected' (20) or higher,
-    meaning the device is ready for connection activation.
+    Switches wireless interface from AP mode to managed (station) mode
+    explicitly via iw, then polls NM state until wlan0 reaches
+    'disconnected' (20) or higher.
     """
     subprocess.run(['systemctl', 'stop', 'hostapd'], capture_output=True, timeout=10)
     subprocess.run(['systemctl', 'stop', 'dnsmasq'], capture_output=True, timeout=10)
+    # Switch wireless interface from AP to managed (station) mode
+    # before handing control to NetworkManager.
+    subprocess.run(['ip', 'link', 'set', WIFI_INTERFACE, 'down'], capture_output=True, timeout=5)
+    subprocess.run(
+        ['iw', 'dev', WIFI_INTERFACE, 'set', 'type', 'managed'],
+        capture_output=True, timeout=5,
+    )
     subprocess.run(
         ['ip', 'addr', 'flush', 'dev', WIFI_INTERFACE],
         capture_output=True, timeout=5,
     )
+    subprocess.run(['ip', 'link', 'set', WIFI_INTERFACE, 'up'], capture_output=True, timeout=5)
     subprocess.run(
         ['nmcli', 'device', 'set', WIFI_INTERFACE, 'managed', 'yes'],
         capture_output=True, timeout=10,
     )
     # Wait for NM ownership — poll until state >= 20 (disconnected)
-    # Busca ':20' o mayor (':30', ':40', etc.) para evitar el bug donde
-    # '10 ' (con espacio) no coincide con 'GENERAL.STATE:10' (terse).
     for _ in range(10):
         result = subprocess.run(
             ['nmcli', '-t', '-f', 'GENERAL.STATE', 'device', 'show', WIFI_INTERFACE],
@@ -211,7 +218,6 @@ def _stop_ap_services() -> bool:
         )
         out = result.stdout.strip()
         if out and 'unmanaged' not in out:
-            # Extract state number after ':'
             try:
                 state_num = int(out.split(':')[-1].split()[0])
                 if state_num >= 20:
@@ -234,6 +240,10 @@ def _start_ap_services() -> bool:
         capture_output=True, timeout=10,
     )
     subprocess.run(['ip', 'link', 'set', WIFI_INTERFACE, 'down'], capture_output=True, timeout=5)
+    subprocess.run(
+        ['iw', 'dev', WIFI_INTERFACE, 'set', 'type', 'ap'],
+        capture_output=True, timeout=5,
+    )
     subprocess.run(
         ['ip', 'addr', 'flush', 'dev', WIFI_INTERFACE],
         capture_output=True, timeout=5,
@@ -647,6 +657,7 @@ def _background_connect(ssid: str, password: str, op_id: str) -> None:
 
         # Step 1: Stop AP services, hand wlan0 to NM
         if not _stop_ap_services():
+            logger.warning('connect failed: could not transfer wlan0 to NM')
             _publish('failed', 'Error al transferir wlan0 a NetworkManager', False)
             _remove_inhibit()
             return
@@ -655,6 +666,7 @@ def _background_connect(ssid: str, password: str, op_id: str) -> None:
         _publish('connecting', f'Configurando perfil {ssid}…')
         profile = _create_nm_profile(ssid, password)
         if profile is None:
+            logger.warning('connect failed: could not create NM profile for %s', ssid)
             _publish('failed', f'Error al crear perfil para {ssid}', False)
             _remove_inhibit()
             return
@@ -662,6 +674,7 @@ def _background_connect(ssid: str, password: str, op_id: str) -> None:
         # Step 3: Bring up connection
         _publish('connecting', f'Conectando a {ssid}…')
         if not _activate_profile(ssid):
+            logger.warning('connect failed: NM could not activate profile for %s', ssid)
             _publish('failed', f'NetworkManager no pudo conectar a {ssid}', False)
             _remove_inhibit()
             return
