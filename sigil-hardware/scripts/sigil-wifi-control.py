@@ -186,7 +186,11 @@ def _write_state(state: dict) -> None:
 # ---------------------------------------------------------------------------
 
 def _stop_ap_services() -> bool:
-    """Stop hostapd/dnsmasq and return wlan0 to NM control."""
+    """Stop hostapd/dnsmasq and return wlan0 to NM control.
+
+    Polls NM state until wlan0 reaches 'disconnected' (20) or higher,
+    meaning the device is ready for connection activation.
+    """
     subprocess.run(['systemctl', 'stop', 'hostapd'], capture_output=True, timeout=10)
     subprocess.run(['systemctl', 'stop', 'dnsmasq'], capture_output=True, timeout=10)
     subprocess.run(
@@ -197,15 +201,23 @@ def _stop_ap_services() -> bool:
         ['nmcli', 'device', 'set', WIFI_INTERFACE, 'managed', 'yes'],
         capture_output=True, timeout=10,
     )
-    # Wait for NM ownership (up to CLIENT_OWNERSHIP_TIMEOUT=10s)
+    # Wait for NM ownership — poll until state >= 20 (disconnected)
+    # Busca ':20' o mayor (':30', ':40', etc.) para evitar el bug donde
+    # '10 ' (con espacio) no coincide con 'GENERAL.STATE:10' (terse).
     for _ in range(10):
         result = subprocess.run(
             ['nmcli', '-t', '-f', 'GENERAL.STATE', 'device', 'show', WIFI_INTERFACE],
             capture_output=True, text=True, timeout=5,
         )
         out = result.stdout.strip()
-        if out and 'unmanaged' not in out and '10 ' not in out:
-            return True
+        if out and 'unmanaged' not in out:
+            # Extract state number after ':'
+            try:
+                state_num = int(out.split(':')[-1].split()[0])
+                if state_num >= 20:
+                    return True
+            except (ValueError, IndexError):
+                pass
         time.sleep(1)
     logger.warning('NM did not take ownership of %s within timeout', WIFI_INTERFACE)
     return False
