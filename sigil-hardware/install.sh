@@ -86,7 +86,7 @@ SIGIL_HOME="/home/sigil"
 SIGIL_UID=1001          # UID fijo para evitar conflictos
 PANEL_INSTALL_DIR="/opt/sigil/panel"
 
-SERVICES="bluetooth-panel bt-connect sigil-leds wifi-fallback ssh-monitor"
+SERVICES="sigil-wifi-control bluetooth-panel bt-connect sigil-leds wifi-fallback ssh-monitor"
 PHASE2_AUDIO_SERVICES="radio-fetcher audio-manager audio-player"
 
 # ── Paso 1: Paquetes del sistema ──────────────────────────────────────────────
@@ -223,6 +223,7 @@ SCRIPTS=(
     radio-stream.sh
     set-a2dp.sh
     sigil-leds.sh
+    sigil-wifi-control.py
     wifi-fallback.sh
     wifi-manager.sh
     audio-manager.sh

@@ -41,6 +41,7 @@
         "scripts/radio-stream.sh",
         "scripts/set-a2dp.sh",
         "scripts/sigil-leds.sh",
+        "scripts/sigil-wifi-control.py",
         "scripts/wifi-fallback.sh",
         "scripts/wifi-manager.sh",
         "scripts/audio-manager.sh",

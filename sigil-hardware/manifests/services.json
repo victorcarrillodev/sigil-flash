@@ -4,6 +4,7 @@
   "services": {
     "enable": [
       "NetworkManager",
+      "sigil-wifi-control",
       "bluetooth-panel",
       "bt-connect",
       "radio-fetcher",

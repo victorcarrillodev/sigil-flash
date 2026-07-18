@@ -1,9 +1,7 @@
-# Privileged commands invoked by the panel. AP/client ownership is delegated
-# only to the canonical wifi-fallback helper.
-sigil ALL=(root) NOPASSWD: /usr/bin/nmcli
-sigil ALL=(root) NOPASSWD: /usr/local/bin/wifi-fallback.sh --prepare-client
-sigil ALL=(root) NOPASSWD: /usr/local/bin/wifi-fallback.sh --restore-ap
-sigil ALL=(root) NOPASSWD: /usr/local/bin/wifi-fallback.sh --external-client-handoff
-sigil ALL=(root) NOPASSWD: /usr/local/bin/wifi-fallback.sh --persist-client-secret *
-sigil ALL=(root) NOPASSWD: /usr/local/bin/wifi-fallback.sh --panel-scan
-sigil ALL=(root) NOPASSWD: /usr/local/bin/wifi-fallback.sh --disable-power-save
+# Network sudo permissions for sigil user — ZERO entries remain.
+#
+# All wlan0 mutations (scan, connect, AP recovery, driver config, NM profile
+# management) are exclusively owned by sigil-wifi-control.service (root).
+# The panel communicates via Unix socket — no sudo required.
+#
+# Bluetooth sudo permissions are in sigil.sudoers.

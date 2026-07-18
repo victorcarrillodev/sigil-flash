@@ -103,7 +103,9 @@ class PanelProductContractTests(unittest.TestCase):
         self.assertNotIn("SIGIL_WIFI_IFACE", wifi)
         self.assertIn('AP_INTERFACE="${SIGIL_WIFI_INTERFACE:-wlan0}"', helper)
         self.assertIn("SIGIL_WIFI_INTERFACE=wlan0", defaults)
-        self.assertIn("wifi-fallback.sh --panel-scan", sudoers)
+        # No sudo panel-scan path — all scans route through sigil-wifi-control socket
+        self.assertNotIn("panel-scan", sudoers)
+        self.assertNotIn("wifi-fallback.sh", sudoers)
         self.assertIn("EnvironmentFile=-/etc/sigil/wifi-fallback.conf", service)
 
     def test_wifi_handoff_frontend_does_not_poll_the_disappearing_ap(self):

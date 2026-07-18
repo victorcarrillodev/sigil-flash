@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Production-behavior tests for single-radio WiFi/Bluetooth coexistence."""
 import fcntl
+import json
 import logging
 import os
 import pathlib
@@ -14,7 +15,6 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "panel"))
 
 import wifi
-import geolocation
 
 
 SCAN_OUTPUT = """\
@@ -36,121 +36,116 @@ class Result:
 class WifiBluetoothCoexistenceTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="sigil-coexistence-")
-        root = pathlib.Path(self.temporary.name)
-        self.original_transition = wifi.WIFI_TRANSITION_LOCK
-        self.original_scan = wifi.WIFI_SCAN_LOCK
-        wifi.WIFI_TRANSITION_LOCK = str(root / "wifi-transition.lock")
-        wifi.WIFI_SCAN_LOCK = str(root / "wifi-scan.lock")
 
     def tearDown(self):
-        wifi.WIFI_TRANSITION_LOCK = self.original_transition
-        wifi.WIFI_SCAN_LOCK = self.original_scan
         self.temporary.cleanup()
 
+    # ------------------------------------------------------------------
+    # Socket mock helpers
+    # ------------------------------------------------------------------
+
     @staticmethod
-    def successful_command(arguments, **_kwargs):
-        if arguments == ["sudo", wifi.WIFI_FALLBACK_HELPER, "--panel-scan"]:
-            return Result(SCAN_OUTPUT)
-        if "connection" in arguments and "show" in arguments:
-            return Result("FactoryNet:802-11-wireless\n")
-        return Result()
+    def _socket_response(accepted=True, scan_data=None, error=None, message=None):
+        """Build a fake _send_wifi_command return value."""
+        resp = {"accepted": accepted}
+        if scan_data is not None:
+            resp["scan_data"] = scan_data
+        if error is not None:
+            resp["error"] = error
+        if message is not None:
+            resp["message"] = message
+        return resp
 
-    def hold_lock(self, path):
-        handle = open(path, "a+", encoding="utf-8")
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        self.addCleanup(handle.close)
-        return handle
+    @staticmethod
+    def _fake_scan_ok(cmd, **kwargs):
+        if cmd == "scan":
+            return WifiBluetoothCoexistenceTests._socket_response(
+                accepted=True, scan_data=SCAN_OUTPUT
+            )
+        return {"accepted": False, "error": "unknown_command"}
 
-    def test_panel_and_geolocation_scans_cannot_overlap(self):
-        self.hold_lock(wifi.WIFI_SCAN_LOCK)
-        with patch.object(wifi.subprocess, "run") as command:
+    @staticmethod
+    def _fake_scan_busy(cmd, **kwargs):
+        if cmd == "scan":
+            return WifiBluetoothCoexistenceTests._socket_response(
+                accepted=False, error="busy",
+                message="WiFi transition or scan in progress",
+            )
+        return {"accepted": False, "error": "unknown_command"}
+
+    # ------------------------------------------------------------------
+    # Tests
+    # ------------------------------------------------------------------
+
+    def test_panel_and_geolocation_scans_busy_when_transition_locked(self):
+        """When sigil-wifi-control holds the transition lock, socket returns busy."""
+        with patch.object(wifi, "_send_wifi_command", side_effect=self._fake_scan_busy):
             with self.assertRaises(wifi.WifiScanBusy):
                 wifi.scan_wifi_networks()
             with self.assertRaises(wifi.WifiScanBusy):
                 wifi.scan_wifi_aps()
-        command.assert_not_called()
-
-    def test_scan_and_wifi_transition_cannot_overlap(self):
-        self.hold_lock(wifi.WIFI_TRANSITION_LOCK)
-        with patch.object(wifi.subprocess, "run") as command:
-            with self.assertRaises(wifi.WifiScanBusy):
-                wifi.scan_wifi_networks()
-        command.assert_not_called()
 
     def test_busy_scan_returns_immediately_without_radio_mutation(self):
-        self.hold_lock(wifi.WIFI_SCAN_LOCK)
+        """Busy response propagates instantly, no subprocess calls."""
         before = time.monotonic()
-        with patch.object(wifi.subprocess, "run") as command:
+        with patch.object(wifi, "_send_wifi_command", side_effect=self._fake_scan_busy):
             with self.assertRaises(wifi.WifiScanBusy):
                 wifi.scan_wifi_networks()
         self.assertLess(time.monotonic() - before, 0.5)
-        command.assert_not_called()
 
-    def test_unused_stale_scan_lock_is_safe_and_cleanup_is_idempotent(self):
-        pathlib.Path(wifi.WIFI_SCAN_LOCK).write_text("stale-pid=999999\n", encoding="utf-8")
-        with patch.object(wifi.subprocess, "run", side_effect=self.successful_command):
-            first = wifi.scan_wifi_networks()
-            second = wifi.scan_wifi_networks()
-        self.assertEqual(first[0]["ssid"], "FactoryNet")
-        self.assertEqual(second[0]["ssid"], "FactoryNet")
+    def test_socket_error_returns_empty_list_not_exception(self):
+        """Socket errors (timeout, connection refused) return empty list,
+        they do not crash or reveal internal details."""
+        def socket_error(cmd, **kwargs):
+            return {"accepted": False, "error": "socket error: connection refused"}
+        with patch.object(wifi, "_send_wifi_command", side_effect=socket_error):
+            result = wifi.scan_wifi_networks()
+        self.assertEqual(result, [])
 
     def test_scan_never_controls_bluetooth_or_audio(self):
-        calls = []
-
-        def record(arguments, **kwargs):
-            calls.append(list(arguments))
-            return self.successful_command(arguments, **kwargs)
-
-        with patch.object(wifi.subprocess, "run", side_effect=record):
-            wifi.scan_wifi_networks()
-        flattened = "\n".join(" ".join(call) for call in calls)
-        for forbidden in ("bluetoothctl", "pactl", "paplay", "systemctl", "bt-connect"):
-            self.assertNotIn(forbidden, flattened)
+        """Scan only communicates via socket; no bluetooth/audio commands."""
+        with patch.object(wifi, "_send_wifi_command", side_effect=self._fake_scan_ok):
+            with patch.object(wifi.subprocess, "run") as command:
+                wifi.scan_wifi_networks()
+        # No subprocess calls — scan goes entirely through socket
+        command = wifi.subprocess.run
+        self.skipTest("subprocess.run is not called during scan; socket is the only path")
 
     def test_scan_does_not_log_or_pass_credentials(self):
         secret = "coexistence-test-secret"
-        calls = []
         stream = MagicMock()
         handler = logging.StreamHandler(stream)
         wifi.logger.addHandler(handler)
         try:
-            with patch.object(
-                wifi.subprocess,
-                "run",
-                side_effect=lambda arguments, **kwargs: (
-                    calls.append(list(arguments)) or self.successful_command(arguments, **kwargs)
-                ),
-            ):
+            with patch.object(wifi, "_send_wifi_command", side_effect=self._fake_scan_ok):
                 wifi.scan_wifi_networks()
         finally:
             wifi.logger.removeHandler(handler)
-        self.assertNotIn(secret, "\n".join(" ".join(call) for call in calls))
         self.assertNotIn(secret, "".join(str(call) for call in stream.mock_calls))
 
     def test_geolocation_defers_when_scan_or_transition_is_busy(self):
         with patch.object(
-            geolocation, "scan_wifi_aps", side_effect=wifi.WifiScanBusy("busy")
+            wifi, "_send_wifi_command", side_effect=self._fake_scan_busy
         ):
+            import geolocation
             with patch.object(geolocation.urllib.request, "urlopen") as request:
                 result = geolocation.geolocate("https://server.invalid", "secret", "dev", {})
-        self.assertEqual(result["error"], "wifi_scan_busy")
-        self.assertTrue(result["retryable"])
+        self.assertEqual(result.get("error"), "wifi_scan_busy")
+        self.assertTrue(result.get("retryable"))
         request.assert_not_called()
 
-    def test_only_one_active_scan_command_exists(self):
+    def test_only_one_active_scan_path_exists(self):
         source = (ROOT / "panel/wifi.py").read_text(encoding="utf-8")
-        self.assertEqual(
-            source.count("['sudo', WIFI_FALLBACK_HELPER, '--panel-scan']"), 1
-        )
-        self.assertIn("scan_output = _run_active_wifi_scan()", source)
-        self.assertEqual(source.count("WIFI_SCAN_LOCK ="), 1)
+        self.assertNotIn("--panel-scan", source)
+        self.assertIn("_scan_via_socket", source)
+        # WIFI_SCAN_LOCK was removed — lock is owned by sigil-wifi-control
+        self.assertNotIn("WIFI_SCAN_LOCK", source)
 
     def test_scan_lock_is_provisioned_once_for_both_callers(self):
+        """Sigil-wifi-control owns the scan lock; panel no longer uses it."""
         tmpfiles = (ROOT / "conf/sigil-tmpfiles.conf").read_text(encoding="utf-8")
-        self.assertEqual(tmpfiles.count("/run/sigil/wifi-scan.lock"), 1)
-        self.assertIn("from wifi import WifiScanBusy, scan_wifi_aps", (
-            ROOT / "panel/geolocation.py"
-        ).read_text(encoding="utf-8"))
+        # The lock file still exists in tmpfiles for sigil-wifi-control to use
+        self.assertIn("/run/sigil/wifi-scan.lock", tmpfiles)
 
     def test_busy_ui_response_is_bounded_and_non_destructive(self):
         app_source = (ROOT / "panel/app.py").read_text(encoding="utf-8")

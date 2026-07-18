@@ -51,12 +51,11 @@ class PanelPrivilegeSeparationTests(unittest.TestCase):
             self.unit, r"(?m)^AmbientCapabilities=.*CAP_(NET_ADMIN|NET_RAW)"
         )
 
-    def test_wifi_power_save_setup_is_an_isolated_root_one_shot(self):
-        self.assertRegex(
-            self.unit,
-            r"(?m)^ExecStartPre=-\+/usr/local/bin/wifi-fallback\.sh "
-            r"--disable-power-save$",
-        )
+    def test_wifi_power_save_setup_is_handled_by_sigil_wifi_control(self):
+        """Power save is disabled by sigil-wifi-control.service at boot.
+        bluetooth-panel.service no longer runs this as ExecStartPre."""
+        self.assertNotIn("disable-power-save", self.unit)
+        self.assertNotIn("wifi-fallback.sh", self.unit)
 
     def test_installer_uses_root_owned_read_only_panel_tree(self):
         self.assertIn('PANEL_INSTALL_DIR="/opt/sigil/panel"', self.installer)
@@ -146,28 +145,46 @@ class PanelPrivilegeSeparationTests(unittest.TestCase):
             r'"\$\{DISPATCHER_DIR\}/90-sigil-geolocate"',
         )
 
-    def test_root_sudo_commands_are_enumerated(self):
-        policies = self.network_sudoers + self.bluetooth_sudoers
+    def test_no_network_sudo_commands_remain(self):
+        """All wlan0 mutations are exclusive to sigil-wifi-control.service.
+
+        The panel communicates via Unix socket — no sudo paths exist.
+        """
+        policies = self.network_sudoers
+        # File may contain comments, but must contain zero sudo entries.
+        # Check there are no non-comment lines (empty file = zero entries).
+        non_comment_lines = [
+            l for l in policies.splitlines()
+            if l.strip() and not l.strip().startswith('#')
+        ]
+        self.assertEqual(len(non_comment_lines), 0, msg=(
+            'sigil-network.sudoers should contain zero non-comment lines. '
+            f'Found {len(non_comment_lines)} lines: {non_comment_lines!r}'
+        ))
+        # No wifi-fallback.sh sudo entries of any kind
+        self.assertNotIn("wifi-fallback.sh", policies)
+        # No unrestricted nmcli
+        self.assertNotIn("nmcli", policies)
+        # No direct command mutations
+        for ownership_bypass in (
+            "/usr/bin/systemctl", "/usr/sbin/ip", "/usr/sbin/iw",
+            "/usr/bin/nmcli", "/usr/bin/modprobe",
+        ):
+            self.assertNotIn(ownership_bypass, policies)
+
+    def test_bluetooth_sudo_commands_are_enumerated(self):
+        policies = self.bluetooth_sudoers
         self.assertNotIn("(ALL)", policies)
         self.assertNotRegex(policies, r"(?m)^.*NOPASSWD: /usr/bin/pkill\s*$")
         self.assertNotRegex(policies, r"(?m)^.*NOPASSWD: /usr/bin/pactl\s*$")
         self.assertNotRegex(policies, r"(?m)^.*NOPASSWD: /usr/bin/pinctrl\s*$")
         for command in (
-            "/usr/local/bin/wifi-fallback.sh --prepare-client",
-            "/usr/local/bin/wifi-fallback.sh --restore-ap",
-            "/usr/local/bin/wifi-fallback.sh --external-client-handoff",
-            "/usr/local/bin/wifi-fallback.sh --persist-client-secret *",
-            "/usr/local/bin/wifi-fallback.sh --panel-scan",
-            "/usr/local/bin/wifi-fallback.sh --disable-power-save",
+            "/usr/sbin/rfkill unblock bluetooth",
+            "/usr/bin/rfkill unblock bluetooth",
+            "/usr/sbin/hciconfig hci0 up",
+            "/usr/bin/hciconfig hci0 up",
         ):
             self.assertIn(f"sigil ALL=(root) NOPASSWD: {command}", policies)
-
-        for ownership_bypass in (
-            "/usr/bin/systemctl stop hostapd",
-            "/usr/bin/systemctl stop dnsmasq",
-            "/usr/sbin/ip addr flush dev wlan0",
-        ):
-            self.assertNotIn(ownership_bypass, policies)
 
         for obsolete_command in (
             "/usr/bin/systemctl stop bt-connect",

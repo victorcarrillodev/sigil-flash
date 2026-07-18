@@ -22,23 +22,8 @@ WIFI_CONTROL_SOCKET = os.environ.get(
 WIFI_CONTROL_STATE = os.environ.get(
     'SIGIL_WIFI_CONTROL_STATE', '/run/sigil/wifi-control-state.json'
 )
-WIFI_SCAN_LOCK = os.environ.get(
-    'SIGIL_WIFI_SCAN_LOCK', '/run/sigil/wifi-scan.lock'
-)
 WIFI_SCAN_TIMEOUT_SECONDS = int(
     os.environ.get('SIGIL_WIFI_SCAN_TIMEOUT_SECONDS', '12')
-)
-WIFI_FALLBACK_HELPER = os.environ.get(
-    'SIGIL_WIFI_FALLBACK_HELPER', '/usr/local/bin/wifi-fallback.sh'
-)
-WIFI_CONNECT_STABILIZATION_SECONDS = int(
-    os.environ.get('SIGIL_WIFI_CONNECT_STABILIZATION_SECONDS', '90')
-)
-WIFI_CONNECT_STABLE_CHECKS = int(
-    os.environ.get('SIGIL_WIFI_CONNECT_STABLE_CHECKS', '2')
-)
-WIFI_CONNECT_CHECK_INTERVAL = float(
-    os.environ.get('SIGIL_WIFI_CONNECT_CHECK_INTERVAL', '3')
 )
 
 
@@ -78,18 +63,18 @@ def validate_wifi_credentials(ssid: object, password: object) -> tuple[str, str]
 # ---------------------------------------------------------------------------
 
 def _scan_via_socket() -> str:
-    """Ask the root service to perform a WiFi scan and return raw iwlist output."""
+    """Ask the root service to perform a WiFi scan and return raw iwlist output.
+
+    This is the ONLY scan path.  No sudo fallback — all scans route through
+    sigil-wifi-control.service which owns the TRANSITION_LOCK.
+    """
     resp = _send_wifi_command('scan')
     if resp.get('error'):
-        # Fallback: direct sudo call (the scan command is not yet in root service)
-        logger.warning('Socket scan failed, falling back to direct sudo: %s', resp.get('error'))
-        result = subprocess.run(
-            ['sudo', WIFI_FALLBACK_HELPER, '--panel-scan'],
-            capture_output=True, text=True, timeout=WIFI_SCAN_TIMEOUT_SECONDS,
-        )
-        if result.returncode != 0:
-            raise RuntimeError(f'WiFi scan exited with status {result.returncode}')
-        return result.stdout
+        err = resp.get('error', '')
+        msg = resp.get('message', '')
+        if err == 'busy' or (msg and 'busy' in msg.lower()):
+            raise WifiScanBusy(msg or 'WiFi escaneo ocupado')
+        raise RuntimeError(msg or f'WiFi scan failed: {err}')
     scan_raw = resp.get('scan_data', '')
     if not scan_raw:
         raise RuntimeError('Empty scan result')
@@ -120,36 +105,6 @@ def _read_control_state() -> dict | None:
             return json.load(f)
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         return None
-
-
-def _client_link_stable() -> bool:
-    state = subprocess.run(
-        ['nmcli', '-t', '-f', 'GENERAL.STATE', 'device', 'show', WIFI_INTERFACE],
-        capture_output=True, text=True, timeout=5
-    )
-    if state.returncode != 0 or not (
-        ':100' in state.stdout or '(connected)' in state.stdout
-    ):
-        return False
-    address = subprocess.run(
-        ['ip', '-o', 'address', 'show', 'dev', WIFI_INTERFACE, 'scope', 'global'],
-        capture_output=True, text=True, timeout=5
-    )
-    return address.returncode == 0 and bool(address.stdout.strip())
-
-
-def _wait_for_client_stability() -> bool:
-    deadline = time.monotonic() + WIFI_CONNECT_STABILIZATION_SECONDS
-    consecutive = 0
-    while time.monotonic() <= deadline:
-        if _client_link_stable():
-            consecutive += 1
-            if consecutive >= WIFI_CONNECT_STABLE_CHECKS:
-                return True
-        else:
-            consecutive = 0
-        time.sleep(WIFI_CONNECT_CHECK_INTERVAL)
-    return False
 
 
 def scan_wifi_networks() -> list[dict]:
@@ -251,14 +206,16 @@ def connect_wifi(ssid: str, password: str) -> tuple[bool, str]:
         # 1. Enviar comando connect al servicio root
         resp = _send_wifi_command('connect', ssid=ssid, password=password)
         if resp.get('error'):
-            return False, resp['error']
+            return False, resp.get('message', resp['error'])
         if not resp.get('accepted'):
             return False, resp.get('message', 'Transición no aceptada')
 
         operation_id = resp.get('operation_id', '')
         logger.info('WiFi connect accepted (operation_id=%s)', operation_id)
 
-        # 2. Esperar a que el servicio complete la transición (timeout ~120s)
+        # 2. Esperar a que el servicio complete la transición (timeout ~150s)
+        # sigil-wifi-control handles stability checks and connectivity probing;
+        # the panel trusts the state file written by the root daemon.
         deadline = time.monotonic() + 150
         while time.monotonic() < deadline:
             state = _read_control_state()
@@ -266,10 +223,8 @@ def connect_wifi(ssid: str, password: str) -> tuple[bool, str]:
                 if state.get('phase') in ('connected', 'idle'):
                     success = state.get('success')
                     if success is True:
-                        # 3. Verificación extra de estabilidad local
-                        if _wait_for_client_stability():
-                            return True, f'Conectado a {ssid}'
-                        return False, 'La conexión no alcanzó estabilidad'
+                        msg = state.get('message', f'Conectado a {ssid}')
+                        return True, msg
                     elif success is False:
                         msg = state.get('message', 'El servicio raíz falló la transición')
                         return False, msg

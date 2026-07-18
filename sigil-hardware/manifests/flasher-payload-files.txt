@@ -37,6 +37,7 @@ scripts/sigil-healthcheck.sh
 scripts/sigil-leds.sh
 scripts/sigil-logout-fetch-operation.sh
 scripts/sigil-validate-state.sh
+scripts/sigil-wifi-control.py
 scripts/ssh-monitor.sh
 scripts/wifi-fallback.sh
 scripts/wifi-manager.sh
@@ -47,6 +48,7 @@ services/bt-connect.service
 services/radio-fetcher.service
 services/radio-stream.service
 services/sigil-firstboot.service
+services/sigil-wifi-control.service
 services/sigil-leds.service
 services/ssh-monitor.service
 services/wifi-fallback.service

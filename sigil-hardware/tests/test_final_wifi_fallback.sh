@@ -79,7 +79,31 @@ esac
 EOF
 cat > "${MOCK_BIN}/iw" <<'EOF'
 #!/bin/bash
-[ -f "$MOCK_STATE/associated" ] && echo 'Connected to 00:11:22:33:44:55'
+printf '%s\n' "$*" >> "$MOCK_STATE/iw_calls"
+case "$*" in
+    dev\ wlan0\ link)
+        [ -f "$MOCK_STATE/associated" ] && echo 'Connected to 00:11:22:33:44:55'
+        ;;
+    dev\ wlan0\ set\ power_save\ off|dev\ wlan0\ set\ power_save\ on|dev\ wlan0\ set\ type\ *)
+        # Mutation detected — signal the test
+        printf 'iw mutation: %s\n' "$*" >&2
+        touch "$MOCK_STATE/iw_mutation_detected"
+        ;;
+    dev\ wlan0\ scan|dev\ wlan0\ scan\ *)
+        # Scan is read-only; pass through
+        echo 'BSS 00:11:22:33:44:55'
+        ;;
+    *)
+        # Read-only or unknown — no mutation
+        ;;
+esac
+EOF
+cat > "${MOCK_BIN}/modprobe" <<'EOF'
+#!/bin/bash
+# modprobe is always a mutation (kernel module load)
+printf 'modprobe mutation: %s\n' "$*" >&2
+touch "$MOCK_STATE/modprobe_mutation_detected"
+exit 0
 EOF
 cat > "${MOCK_BIN}/ping" <<'EOF'
 #!/bin/bash
@@ -128,6 +152,12 @@ cat > "${MOCK_BIN}/wifi-fallback-helper" <<'EOF'
 #!/bin/bash
 exec bash "$SIGIL_TEST_WIFI_FALLBACK_SCRIPT" "$@"
 EOF
+# Daemon state file mock — tests can write phase to control handoff detection
+DAEMON_STATE_FILE="${TEST_ROOT}/run/wifi-control-state.json"
+export SIGIL_WIFI_CONTROL_STATE="$DAEMON_STATE_FILE"
+cat > "$DAEMON_STATE_FILE" <<'EOF'
+{"phase":"idle","success":null,"message":"mock daemon"}
+EOF
 chmod +x "${MOCK_BIN}"/*
 
 export MOCK_STATE PATH="${MOCK_BIN}:${PATH}"
@@ -172,15 +202,42 @@ chmod 600 "${SIGIL_NM_CONNECTION_DIR}/KnownNet.nmconnection"
 
 source "${ROOT}/scripts/wifi-fallback.sh"
 
+# Override _send_socket_command with a mock that records and returns
+# controlled responses.  Tests call set_socket_response() to configure.
+SOCKET_RESPONSE='{"accepted":true,"state":"ap_active"}'
+SOCKET_RESPONSE_FILE="${TEST_ROOT}/run/socket_response.json"
+set_socket_response() {
+    printf '%s' "$1" > "$SOCKET_RESPONSE_FILE"
+}
+set_socket_response '{"accepted":true,"state":"ap_active"}'
+
+_send_socket_command() {
+    local cmd_json="$1"
+    # Record the command
+    printf '%s\n' "$cmd_json" >> "${MOCK_STATE}/socket_commands"
+    # Return the configured response
+    if [ -f "$SOCKET_RESPONSE_FILE" ]; then
+        cat "$SOCKET_RESPONSE_FILE"
+    else
+        echo '{"accepted":true,"state":"ap_active"}'
+    fi
+}
+
 reset_case() {
     rm -f "${MOCK_STATE}"/* "$STATE_FILE" "$INHIBIT_FILE"
     : > "${MOCK_STATE}/nmcli_calls"
     : > "${MOCK_STATE}/systemctl_calls"
     : > "${MOCK_STATE}/ip_calls"
+    : > "${MOCK_STATE}/iw_calls"
     : > "${MOCK_STATE}/ping_calls"
     : > "${MOCK_STATE}/curl_calls"
     : > "${MOCK_STATE}/sudo_calls"
     : > "${MOCK_STATE}/panel_output"
+    : > "${MOCK_STATE}/socket_commands"
+    rm -f "${MOCK_STATE}/iw_mutation_detected" "${MOCK_STATE}/modprobe_mutation_detected"
+    set_socket_response '{"accepted":true,"state":"ap_active"}'
+    # Reset daemon state to idle for handoff tests
+    printf '{"phase":"idle","success":null,"message":"mock daemon"}' > "$DAEMON_STATE_FILE"
 }
 
 set_online() {
@@ -217,7 +274,7 @@ run_test() {
 test_online() {
     set_online
     run_cycle
-    state_is CLIENT_ONLINE && ! grep -q 'start hostapd' "${MOCK_STATE}/systemctl_calls"
+    state_is CLIENT_ONLINE && [ ! -s "${MOCK_STATE}/socket_commands" ]
 }
 
 test_zero_traffic_healthy() {
@@ -247,7 +304,7 @@ test_local_only_no_ap() {
     run_cycle
     state_is CLIENT_LOCAL_ONLY \
         && grep -q '^REASON=local_network_only' "$STATE_FILE" \
-        && ! grep -q 'start hostapd' "${MOCK_STATE}/systemctl_calls"
+        && [ ! -s "${MOCK_STATE}/socket_commands" ]
 }
 
 test_local_only_requires_stable_recovery() {
@@ -267,37 +324,37 @@ test_local_only_requires_stable_recovery() {
 test_temporary_failures_do_not_start_ap() {
     run_cycle
     run_cycle
-    state_is CLIENT_CONNECTING && ! grep -q 'start hostapd' "${MOCK_STATE}/systemctl_calls"
+    state_is CLIENT_CONNECTING && [ ! -s "${MOCK_STATE}/socket_commands" ]
 }
 
 test_threshold_starts_ap() {
     run_cycle; run_cycle; run_cycle
     state_is AP_ACTIVE \
-        && [ "$(grep -c '^start hostapd$' "${MOCK_STATE}/systemctl_calls")" -eq 1 ] \
-        && [ "$(grep -c '^start dnsmasq$' "${MOCK_STATE}/systemctl_calls")" -eq 1 ]
+        && grep -q 'restore_ap' "${MOCK_STATE}/socket_commands"
 }
 
 test_fresh_boot_without_profile_starts_ap() {
     touch "${MOCK_STATE}/no_saved_profiles"
     run_cycle; run_cycle; run_cycle
     state_is AP_ACTIVE \
-        && [ -f "${MOCK_STATE}/service_hostapd" ] \
-        && [ -f "${MOCK_STATE}/service_dnsmasq" ]
+        && grep -q 'restore_ap' "${MOCK_STATE}/socket_commands"
 }
 
 test_connected_dead_gateway_is_link_dead_transition() {
     set_dead_gateway
     run_cycle; run_cycle; run_cycle
     state_is AP_ACTIVE \
-        && grep -q '^REASON=gateway_and_external_probes_failed' "$STATE_FILE" \
         && grep -q '^CLIENT_STATE=CLIENT_LINK_DEAD' "$STATE_FILE" \
-        && grep -q '^DEAD_PROFILE_DEACTIVATED=1' "$STATE_FILE"
+        && grep -q 'restore_ap' "${MOCK_STATE}/socket_commands"
 }
 
-test_dead_profile_deactivated_once() {
+test_no_profile_deactivation_by_fallback() {
     set_dead_gateway
     run_cycle; run_cycle; run_cycle; run_cycle
-    [ "$(grep -c '^connection down id KnownNet$' "${MOCK_STATE}/nmcli_calls")" -eq 1 ]
+    # DEAD_PROFILE_DEACTIVATED was removed — profile deactivation
+    # is now exclusive to sigil-wifi-control (deactivate_profile socket command)
+    [ ! -f "${MOCK_STATE}/socket_commands" ] \
+        || ! grep -q 'deactivate_profile' "${MOCK_STATE}/socket_commands"
 }
 
 write_ap_state() {
@@ -313,51 +370,59 @@ write_ap_state() {
 test_recovery_cooldown_respected() {
     write_ap_state "$(( $(date +%s) + 1000 ))"
     run_cycle
-    ! grep -q '^device connect wlan0$' "${MOCK_STATE}/nmcli_calls"
+    # ensure_ap sent but not recover_client (cooldown not reached)
+    grep -q 'ensure_ap' "${MOCK_STATE}/socket_commands" \
+        && ! grep -q 'recover_client' "${MOCK_STATE}/socket_commands"
 }
 
 test_successful_ap_recovery() {
     write_ap_state 0
-    touch "${MOCK_STATE}/recovery_success"
+    touch "${MOCK_STATE}/active_profile"
+    # Configure socket to return connected for recover_client
+    set_socket_response '{"accepted":true,"state":"connected","message":"Recovery connected"}'
     run_cycle
     state_is CLIENT_ONLINE \
-        && [ "$(grep -c '^stop hostapd$' "${MOCK_STATE}/systemctl_calls")" -eq 1 ] \
-        && ! grep -q '^start hostapd$' "${MOCK_STATE}/systemctl_calls" \
+        && grep -q 'recover_client' "${MOCK_STATE}/socket_commands" \
         && grep -q '^LAST_SUCCESSFUL_PROFILE=KnownNet$' "$STATE_FILE"
 }
 
 test_failed_recovery_restores_ap_once() {
     write_ap_state 0
+    # Configure socket to return ap_active for recover_client (recovery failed)
+    set_socket_response '{"accepted":false,"state":"ap_active","message":"Recovery failed"}'
     run_cycle
     state_is AP_ACTIVE \
-        && [ "$(grep -c '^start hostapd$' "${MOCK_STATE}/systemctl_calls")" -eq 1 ] \
-        && [ "$(grep -c '^start dnsmasq$' "${MOCK_STATE}/systemctl_calls")" -eq 1 ] \
+        && grep -q 'recover_client' "${MOCK_STATE}/socket_commands" \
         && grep -q '^RECOVERY_BACKOFF=240' "$STATE_FILE"
 }
 
-test_active_ap_has_no_duplicate_services() {
+test_active_ap_ensure_is_idempotent() {
     write_ap_state "$(( $(date +%s) + 1000 ))"
     run_cycle
-    ! grep -q '^start hostapd$' "${MOCK_STATE}/systemctl_calls" \
-        && ! grep -q '^start dnsmasq$' "${MOCK_STATE}/systemctl_calls"
+    local ensure_count1
+    ensure_count1=$(grep -c 'ensure_ap' "${MOCK_STATE}/socket_commands" || true)
+    run_cycle
+    local ensure_count2
+    ensure_count2=$(grep -c 'ensure_ap' "${MOCK_STATE}/socket_commands" || true)
+    # Two AP cycles → two ensure_ap commands (daemon handles idempotency)
+    [ "$ensure_count2" -eq $((ensure_count1 + 1)) ]
 }
 
-test_ap_ownership_is_exclusive() {
+test_restore_ap_sent_on_threshold() {
     run_cycle; run_cycle; run_cycle
     state_is AP_ACTIVE \
-        && grep -q '^device set wlan0 managed no$' "${MOCK_STATE}/nmcli_calls" \
-        && grep -q '^addr add 192.168.4.1/24 dev wlan0$' "${MOCK_STATE}/ip_calls" \
-        && [ -f "${MOCK_STATE}/service_hostapd" ] \
-        && [ -f "${MOCK_STATE}/service_dnsmasq" ] \
-        && ! grep -q '^device set wlan0 managed yes$' "${MOCK_STATE}/nmcli_calls"
+        && grep -q 'restore_ap' "${MOCK_STATE}/socket_commands"
 }
 
-test_repeated_ap_reconciliation_is_idempotent() {
-    write_ap_state "$(( $(date +%s) + 1000 ))"
-    run_cycle
-    run_cycle
-    ! grep -q '^start hostapd$' "${MOCK_STATE}/systemctl_calls" \
-        && ! grep -q '^start dnsmasq$' "${MOCK_STATE}/systemctl_calls"
+test_no_mutations_from_fallback() {
+    run_cycle; run_cycle; run_cycle
+    # Zero direct mutation commands from wifi-fallback to systemctl/ip/nmcli/iw/modprobe
+    ! grep -q 'systemctl start\|systemctl stop\|ip link\|ip addr\|nmcli device\|nmcli connection\|modprobe' \
+        "${MOCK_STATE}/systemctl_calls" "${MOCK_STATE}/ip_calls" "${MOCK_STATE}/nmcli_calls" \
+        "${MOCK_STATE}/iw_calls" 2>/dev/null
+    # Also check mutation markers
+    [ ! -f "${MOCK_STATE}/iw_mutation_detected" ] || return 1
+    [ ! -f "${MOCK_STATE}/modprobe_mutation_detected" ] || return 1
 }
 
 test_duplicate_fallback_process_refused() {
@@ -395,7 +460,25 @@ spec = importlib.util.spec_from_file_location(
 wifi = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(wifi)
 
-with patch.object(wifi.time, 'sleep', return_value=None):
+OP_ID = 'test-handoff-op-id'
+
+# Mock the socket call to simulate sigil-wifi-control accepting the request
+def mock_send_command(cmd, **kwargs):
+    if cmd == 'connect':
+        return {'accepted': True, 'operation_id': OP_ID}
+    return {'error': 'unknown command'}
+
+# Mock state reading to simulate completion (sigil-wifi-control wrote this)
+mock_state = {
+    'operation_id': OP_ID,
+    'phase': 'connected',
+    'success': True,
+    'message': 'Conectado',
+}
+
+with patch.object(wifi, '_send_wifi_command', side_effect=mock_send_command), \
+     patch.object(wifi, '_read_control_state', return_value=mock_state), \
+     patch.object(wifi.time, 'sleep', return_value=None):
     success, _message = wifi.connect_wifi('KnownNet', os.environ['PANEL_SECRET'])
 
 expected = os.environ['PANEL_EXPECT_SUCCESS'] == '1'
@@ -410,7 +493,8 @@ PYEOF
 test_inhibit_blocks_ap() {
     write_inhibit "$(( $(date +%s) + 120 ))"
     run_cycle; run_cycle; run_cycle
-    state_is CLIENT_CONNECTING && ! grep -q '^start hostapd$' "${MOCK_STATE}/systemctl_calls"
+    # When inhibit is active, cycle returns early without sending socket commands
+    state_is CLIENT_CONNECTING && [ ! -s "${MOCK_STATE}/socket_commands" ]
 }
 
 test_expired_inhibit_removed() {
@@ -419,69 +503,94 @@ test_expired_inhibit_removed() {
     [ ! -e "$INHIBIT_FILE" ] && state_is CLIENT_CONNECTING
 }
 
-test_panel_success_handoff_prevents_stale_ap_restart() {
-    local starts_before
+test_daemon_handoff_detected() {
+    # Simulate daemon completing a panel-initiated connection by
+    # writing the daemon state file and running a fallback cycle
     write_ap_state "$(( $(date +%s) + 1000 ))"
     set_online
-    run_panel_connect 1 || return 1
-    [ ! -e "$INHIBIT_FILE" ] || return 1
+    # Daemon state shows connected → handoff
+    printf '{"phase":"connected","success":true,"message":"Conectado","connectivity":{"associated":true}}' \
+        > "$DAEMON_STATE_FILE"
+    run_cycle
     state_is CLIENT_CONNECTING || return 1
     [ "${WIFI_STATE[AP_ACTIVE]}" = 0 ] || return 1
     [ "${WIFI_STATE[CLIENT_STATE]}" = CLIENT_CONNECTING ] || return 1
     grep -q '^REASON=panel_client_handoff$' "$STATE_FILE" || return 1
     grep -q '^FAIL_COUNT=0$' "$STATE_FILE" || return 1
-    grep -q '^SUCCESS_COUNT=0$' "$STATE_FILE" || return 1
-    grep -q '^FAIL_STARTED_AT=0$' "$STATE_FILE" || return 1
     grep -q '^NEXT_RETRY_AT=0$' "$STATE_FILE" || return 1
     grep -q '^RECOVERY_BACKOFF=120$' "$STATE_FILE" || return 1
-    grep -q '^LOCAL_PROBE_BACKOFF=30$' "$STATE_FILE" || return 1
-    grep -q '^NEXT_PROBE_AT=0$' "$STATE_FILE" || return 1
-    grep -q '^DEAD_PROFILE=$' "$STATE_FILE" || return 1
-    grep -q '^DEAD_PROFILE_DEACTIVATED=0$' "$STATE_FILE" || return 1
-    [ -z "$(find "${TEST_ROOT}/var" -name '.wifi-fallback-state.*' -print -quit)" ] || return 1
-    starts_before=$(grep -c '^start hostapd$' "${MOCK_STATE}/systemctl_calls" || true)
-    [ "$starts_before" -eq 0 ] || return 1
-    [ "$(grep -c '^stop hostapd$' "${MOCK_STATE}/systemctl_calls")" -eq 1 ] || return 1
-    [ "$(grep -c '^stop dnsmasq$' "${MOCK_STATE}/systemctl_calls")" -eq 1 ] || return 1
+    # No socket commands sent (handoff detected before inhibit check)
+    [ ! -s "${MOCK_STATE}/socket_commands" ] || return 1
     run_cycle
+    # After handoff, probe finds client online
     state_is CLIENT_ONLINE \
-        && [ "${WIFI_STATE[AP_ACTIVE]}" = 0 ] \
-        && ! grep -q '^start hostapd$' "${MOCK_STATE}/systemctl_calls" \
-        && ! grep -q '^start dnsmasq$' "${MOCK_STATE}/systemctl_calls"
+        && [ "${WIFI_STATE[AP_ACTIVE]}" = 0 ]
 }
 
-test_panel_local_only_handoff_does_not_restore_ap() {
-    write_ap_state "$(( $(date +%s) + 1000 ))"
-    set_local_only
-    run_panel_connect 1 || return 1
-    [ ! -e "$INHIBIT_FILE" ] || return 1
+test_daemon_ap_restore_synced() {
+    # Simulate daemon restoring AP (e.g. after failed recovery from another component)
+    load_state
+    WIFI_STATE[AP_ACTIVE]="0"
+    WIFI_STATE[STATE]="CLIENT_CONNECTING"
+    save_state
+    # Daemon state shows ap_active
+    printf '{"phase":"ap_active","success":true,"message":"AP restored"}' \
+        > "$DAEMON_STATE_FILE"
     run_cycle
-    state_is CLIENT_LOCAL_ONLY \
-        && [ "${WIFI_STATE[AP_ACTIVE]}" = 0 ] \
-        && ! grep -q '^start hostapd$' "${MOCK_STATE}/systemctl_calls" \
-        && ! grep -q '^start dnsmasq$' "${MOCK_STATE}/systemctl_calls"
+    state_is AP_ACTIVE && [ "${WIFI_STATE[AP_ACTIVE]}" = 1 ]
 }
 
-test_panel_uses_canonical_ownership_helper() {
+test_static_no_forbidden_mutations() {
+    local script="${ROOT}/scripts/wifi-fallback.sh"
+    local errors=0
+    # Static invariant: wifi-fallback must never execute wlan0/NM mutations
+    for pattern in \
+        'ip link set' \
+        'ip addr add' \
+        'ip addr flush' \
+        'nmcli device connect' \
+        'nmcli device disconnect' \
+        'nmcli device set' \
+        'nmcli connection up' \
+        'nmcli connection down' \
+        'nmcli connection load' \
+        'systemctl start hostapd' \
+        'systemctl stop hostapd' \
+        'systemctl start dnsmasq' \
+        'systemctl stop dnsmasq' \
+        'modprobe'
+    do
+        # Forbid pattern on non-comment lines
+        if grep -n "$pattern" "$script" 2>/dev/null \
+            | grep -qvE '^[0-9]+:[[:space:]]*#'; then
+            printf '  FAIL: forbidden pattern found: %s\n' "$pattern" >&2
+            errors=$((errors + 1))
+        fi
+    done
+    [ "$errors" -eq 0 ]
+}
+
+test_panel_uses_exclusive_socket_path() {
     write_ap_state "$(( $(date +%s) + 1000 ))"
     set_online
     run_panel_connect 1 || return 1
-    grep -qxF "${SIGIL_WIFI_FALLBACK_HELPER} --prepare-client" \
-        "${MOCK_STATE}/sudo_calls" || return 1
-    grep -qxF "${SIGIL_WIFI_FALLBACK_HELPER} --external-client-handoff" \
-        "${MOCK_STATE}/sudo_calls" || return 1
-    ! grep -q '^systemctl stop \|^ip addr flush \|^nmcli device set wlan0 managed' \
-        "${MOCK_STATE}/sudo_calls"
+    # No sudo calls for wifi operations — panel uses socket exclusively
+    ! grep -q 'wifi-fallback.sh' "${MOCK_STATE}/sudo_calls" || return 1
+    ! grep -q 'nmcli' "${MOCK_STATE}/sudo_calls" || return 1
+    ! grep -q '^systemctl\|^ip \|^iw ' "${MOCK_STATE}/sudo_calls" || return 1
 }
 
 test_client_ownership_is_exclusive() {
     write_ap_state "$(( $(date +%s) + 1000 ))"
     set_online
-    run_panel_connect 1 || return 1
-    [ ! -f "${MOCK_STATE}/service_hostapd" ] \
-        && [ ! -f "${MOCK_STATE}/service_dnsmasq" ] \
-        && grep -q '^device set wlan0 managed yes$' "${MOCK_STATE}/nmcli_calls" \
-        && ! grep -q '^device set wlan0 managed no$' "${MOCK_STATE}/nmcli_calls"
+    # Simulate daemon completing a connection (handoff)
+    printf '{"phase":"connected","success":true,"message":"Conectado","connectivity":{"associated":true}}' \
+        > "$DAEMON_STATE_FILE"
+    run_cycle
+    # wifi-fallback detects daemon handoff, resets to CLIENT_CONNECTING
+    state_is CLIENT_CONNECTING \
+        && [ "${WIFI_STATE[AP_ACTIVE]}" = 0 ] \
+        && [ ! -s "${MOCK_STATE}/socket_commands" ]
 }
 
 test_static_mac_policy_never_blocks_client_ownership() {
@@ -492,176 +601,287 @@ test_static_mac_policy_never_blocks_client_ownership() {
         && grep -q 'unmanaged-devices.*wlan0' "${ROOT}/install.sh"
 }
 
-test_failed_panel_transition_restores_ap_once() {
-    local original_retry="$(( $(date +%s) + 1000 ))"
-    write_ap_state "$original_retry"
-    load_state
-    WIFI_STATE[REASON]="preexisting_ap_failure"
-    save_state
-    touch "${MOCK_STATE}/panel_up_fail"
-    run_panel_connect 0 || return 1
-    [ ! -e "$INHIBIT_FILE" ] || return 1
-    [ "$(grep -c -- '--restore-ap$' "${MOCK_STATE}/sudo_calls")" -eq 1 ] || return 1
-    state_is AP_ACTIVE || return 1
-    [ "${WIFI_STATE[REASON]}" = preexisting_ap_failure ] || return 1
-    [ "${WIFI_STATE[RECOVERY_BACKOFF]}" = 120 ] || return 1
-    [ "${WIFI_STATE[NEXT_RETRY_AT]}" = "$original_retry" ] || return 1
-    run_cycle
-    state_is AP_ACTIVE || return 1
-    [ "$(grep -c '^start hostapd$' "${MOCK_STATE}/systemctl_calls")" -eq 1 ] || return 1
-    [ "$(grep -c '^start dnsmasq$' "${MOCK_STATE}/systemctl_calls")" -eq 1 ] || return 1
-    grep -q '^device set wlan0 managed no$' "${MOCK_STATE}/nmcli_calls" || return 1
-    run_cycle
-    [ "$(grep -c '^start hostapd$' "${MOCK_STATE}/systemctl_calls")" -eq 1 ] \
-        && [ "$(grep -c '^start dnsmasq$' "${MOCK_STATE}/systemctl_calls")" -eq 1 ]
-}
-
-test_unmanaged_client_preparation_fails_closed_to_ap() {
-    write_ap_state "$(( $(date +%s) + 1000 ))"
-    touch "${MOCK_STATE}/nm_unmanaged"
-    run_panel_connect 0 || return 1
-    state_is AP_ACTIVE \
-        && [ -f "${MOCK_STATE}/service_hostapd" ] \
-        && [ -f "${MOCK_STATE}/service_dnsmasq" ] \
-        && [ "$(grep -c -- '--restore-ap$' "${MOCK_STATE}/sudo_calls")" -eq 1 ]
-}
-
-test_panel_transitions_share_one_lock() {
+test_panel_connect_failure_reports_error() {
+    # Panel reports the error returned by sigil-wifi-control via socket
     ROOT="$ROOT" python3 - <<'PYEOF'
-import fcntl
 import importlib.util
 import os
 from unittest.mock import patch
 
 root = os.environ['ROOT']
 spec = importlib.util.spec_from_file_location(
-    'sigil_wifi_lock_test', os.path.join(root, 'panel', 'wifi.py')
+    'sigil_wifi_fail_test', os.path.join(root, 'panel', 'wifi.py')
 )
 wifi = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(wifi)
 
-os.makedirs(os.path.dirname(wifi.WIFI_TRANSITION_LOCK), exist_ok=True)
-with open(wifi.WIFI_TRANSITION_LOCK, 'a+', encoding='utf-8') as holder:
-    fcntl.flock(holder.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-    with patch.object(wifi.time, 'sleep', return_value=None):
-        success, message = wifi.connect_wifi('KnownNet', 'never-used-secret')
-    assert not success
-    assert message == 'Otra transición WiFi está en progreso'
-assert not os.path.exists(wifi.WIFI_INHIBIT_FILE)
+# Mock socket to return error
+def mock_send_command(cmd, **kwargs):
+    if cmd == 'connect':
+        return {'error': 'busy', 'accepted': False,
+                'message': 'Otra transición WiFi está en progreso'}
+    return {'error': 'unknown command'}
+
+with patch.object(wifi, '_send_wifi_command', side_effect=mock_send_command), \
+     patch.object(wifi.time, 'sleep', return_value=None):
+    success, message = wifi.connect_wifi('KnownNet', 'dummy-secret')
+
+assert not success, 'expected failure'
+assert message == 'Otra transición WiFi está en progreso', message
+PYEOF
+}
+
+test_panel_no_sudo_paths_exist() {
+    # Verify the panel has no sudo-based fallback for any wifi operation
+    ROOT="$ROOT" python3 - <<'PYEOF'
+import importlib.util
+import os
+import re
+
+root = os.environ['ROOT']
+spec = importlib.util.spec_from_file_location(
+    'sigil_wifi_sudo_test', os.path.join(root, 'panel', 'wifi.py')
+)
+wifi = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(wifi)
+
+source = (root + '/panel/wifi.py')
+with open(source, encoding='utf-8') as f:
+    text = f.read()
+
+# Remove docstrings (both """ and ''') so they don't trigger false positives
+text_no_docs = re.sub(
+    r'""".*?"""|\'\'\'.*?\'\'\'',
+    '',
+    text,
+    flags=re.DOTALL,
+)
+
+# No executable sudo calls for any wifi operation
+exec_lines = [l for l in text_no_docs.splitlines()
+              if l.strip() and not l.strip().startswith('#')]
+exec_text = '\n'.join(exec_lines)
+assert 'sudo' not in exec_text, 'panel wifi.py must not contain executable sudo calls'
+assert 'WIFI_FALLBACK_HELPER' not in text, (
+    'panel wifi.py must not reference WIFI_FALLBACK_HELPER'
+)
+PYEOF
+}
+
+test_panel_socket_busy_returns_busy_message() {
+    # When sigil-wifi-control returns busy, the panel propagates the message.
+    ROOT="$ROOT" python3 - <<'PYEOF'
+import importlib.util
+import os
+from unittest.mock import patch
+
+root = os.environ['ROOT']
+spec = importlib.util.spec_from_file_location(
+    'sigil_wifi_busy_test', os.path.join(root, 'panel', 'wifi.py')
+)
+wifi = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(wifi)
+
+def mock_send_command(cmd, **kwargs):
+    if cmd == 'connect':
+        return {'error': 'busy', 'accepted': False,
+                'message': 'Otra transición WiFi está en progreso'}
+    return {'error': 'unknown command'}
+
+with patch.object(wifi, '_send_wifi_command', side_effect=mock_send_command), \
+     patch.object(wifi.time, 'sleep', return_value=None):
+    success, message = wifi.connect_wifi('KnownNet', 'never-used-secret')
+assert not success
+assert message == 'Otra transición WiFi está en progreso', message
 PYEOF
 }
 
 test_panel_credentials_never_reach_logs_or_argv() {
     local secret="handoff-password-not-for-logs"
-    write_ap_state "$(( $(date +%s) + 1000 ))"
-    set_online
-    run_panel_connect 1 || return 1
-    ! grep -R -F "$secret" \
-        "${MOCK_STATE}/sudo_calls" \
-        "${MOCK_STATE}/nmcli_calls" \
-        "${MOCK_STATE}/systemctl_calls" \
-        "${MOCK_STATE}/panel_output"
-}
-
-test_panel_secret_is_persisted_only_in_root_profile() {
-    local profile="${SIGIL_NM_CONNECTION_DIR}/KnownNet.nmconnection"
-    write_ap_state "$(( $(date +%s) + 1000 ))"
-    set_online
-    run_panel_connect 1 || return 1
-    [ "$(stat -c %a "$profile")" = 600 ] \
-        && grep -qx 'psk=handoff-password-not-for-logs' "$profile" \
-        && grep -qx 'psk-flags=0' "$profile" \
-        && ! grep -R -F 'handoff-password-not-for-logs' \
-            "${MOCK_STATE}/sudo_calls" "${MOCK_STATE}/nmcli_calls" \
-            "${MOCK_STATE}/panel_output"
-}
-
-test_panel_transition_contract() {
-    SIGIL_TEST_ROOT="$TEST_ROOT" ROOT="$ROOT" python3 - <<'PYEOF'
-import glob
+    ROOT="$ROOT" python3 - <<'PYEOF'
 import importlib.util
 import logging
 import os
-import subprocess
-import sys
 from unittest.mock import patch
 
 root = os.environ['ROOT']
-test_root = os.environ['SIGIL_TEST_ROOT']
-os.environ['SIGIL_WIFI_INHIBIT_FILE'] = os.path.join(test_root, 'panel-inhibit.json')
-os.environ['SIGIL_WIFI_TRANSITION_LOCK'] = os.path.join(test_root, 'panel-transition.lock')
-os.environ['SIGIL_WIFI_CONNECT_INHIBIT_SECONDS'] = '30'
-os.environ['SIGIL_WIFI_CONNECT_STABILIZATION_SECONDS'] = '2'
-os.environ['SIGIL_WIFI_CONNECT_STABLE_CHECKS'] = '2'
-os.environ['SIGIL_WIFI_CONNECT_CHECK_INTERVAL'] = '0'
-spec = importlib.util.spec_from_file_location('sigil_wifi_test', os.path.join(root, 'panel', 'wifi.py'))
+secret = 'handoff-password-not-for-logs'
+
+spec = importlib.util.spec_from_file_location(
+    'sigil_wifi_credential_test', os.path.join(root, 'panel', 'wifi.py')
+)
 wifi = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(wifi)
 
-class Result:
-    def __init__(self, rc=0, stdout='', stderr=''):
-        self.returncode = rc
-        self.stdout = stdout
-        self.stderr = stderr
+OP_ID = 'cred-test-op-id'
 
-commands = []
-inhibit_seen = False
-fail_up = False
+def mock_send_command(cmd, **kwargs):
+    if cmd == 'connect':
+        # Verify password is passed to the socket (required for connect)
+        assert 'password' in kwargs
+        return {'accepted': True, 'operation_id': OP_ID}
+    return {'error': 'unknown command'}
 
-def fake_run(args, **_kwargs):
-    global inhibit_seen
-    commands.append(list(args))
-    joined = ' '.join(args)
-    if 'connection show' in joined:
-        return Result(stdout='KnownNet:802-11-wireless\n')
-    if '--persist-client-secret' in args:
-        inhibit_seen = inhibit_seen or os.path.exists(wifi.WIFI_INHIBIT_FILE)
-        password_file = args[-1]
-        assert oct(os.stat(password_file).st_mode & 0o777) == '0o600'
-        with open(password_file, encoding='utf-8') as handle:
-            assert handle.read() == f'802-11-wireless-security.psk:{secret}\n'
-        return Result()
-    if args[:5] == ['sudo', 'nmcli', 'con', 'up', 'KnownNet']:
-        return Result(1 if fail_up else 0)
-    if 'GENERAL.STATE' in args:
-        return Result(stdout='GENERAL.STATE:100 (connected)\n')
-    if args and args[0] == 'ip':
-        return Result(stdout='3: wlan0 inet 192.0.2.2/24 scope global\n')
-    return Result()
+mock_state = {
+    'operation_id': OP_ID,
+    'phase': 'connected',
+    'success': True,
+    'message': 'Conectado',
+}
 
-messages = []
+log_entries = []
 class Capture(logging.Handler):
     def emit(self, record):
-        messages.append(record.getMessage())
+        log_entries.append(record.getMessage())
 wifi.logger.addHandler(Capture())
 
-secret = 'test-password-not-for-logs'
-with patch.object(subprocess, 'run', side_effect=fake_run), patch.object(wifi.time, 'sleep', return_value=None):
-    success, _message = wifi.connect_wifi('KnownNet', secret)
-assert success and inhibit_seen
-persist = next(command for command in commands if '--persist-client-secret' in command)
-activation = next(
-    command for command in commands
-    if command[:4] == ['sudo', 'nmcli', 'con', 'up']
-)
-assert persist[:4] == ['sudo', wifi.WIFI_FALLBACK_HELPER, '--persist-client-secret', 'KnownNet']
-assert activation == ['sudo', 'nmcli', 'con', 'up', 'KnownNet']
-assert 'passwd-file' not in activation
-assert not os.path.exists(wifi.WIFI_INHIBIT_FILE)
-assert not any(
-    'systemctl' in command and 'wifi-fallback' in command
-    for command in commands
-)
-assert not any(secret in ' '.join(command) for command in commands)
-assert not any(secret in message for message in messages)
-assert not glob.glob(os.path.join(test_root, '.nmcli-password.*'))
+try:
+    with patch.object(wifi, '_send_wifi_command', side_effect=mock_send_command), \
+         patch.object(wifi, '_read_control_state', return_value=mock_state), \
+         patch.object(wifi.time, 'sleep', return_value=None):
+        success, message = wifi.connect_wifi('KnownNet', secret)
+    assert success, message
+    # Verify secret does not appear in any log
+    for entry in log_entries:
+        assert secret not in entry, f'Secret leaked to log: {entry}'
+    # Verify secret does not appear in the return message
+    assert secret not in message, f'Secret leaked to message: {message}'
+finally:
+    wifi.logger.removeHandler(Capture())
+PYEOF
+}
 
-commands.clear()
-fail_up = True
-with patch.object(subprocess, 'run', side_effect=fake_run), patch.object(wifi.time, 'sleep', return_value=None):
-    success, _message = wifi.connect_wifi('KnownNet', secret)
-assert not success
-assert not os.path.exists(wifi.WIFI_INHIBIT_FILE)
+test_panel_secret_is_not_exposed_via_socket() {
+    # The panel sends credentials via the Unix socket (not argv).
+    # Verify the socket payload does not leak the secret in logs or metadata.
+    ROOT="$ROOT" python3 - <<'PYEOF'
+import importlib.util
+import json
+import logging
+import os
+from unittest.mock import patch
+
+root = os.environ['ROOT']
+secret = 'socket-secret-not-for-logs'
+
+spec = importlib.util.spec_from_file_location(
+    'sigil_wifi_secret_test', os.path.join(root, 'panel', 'wifi.py')
+)
+wifi = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(wifi)
+
+OP_ID = 'secret-test-op-id'
+
+def mock_send_command(cmd, **kwargs):
+    if cmd == 'connect':
+        # Verify password is in kwargs (passed to socket)
+        assert 'password' in kwargs
+        assert kwargs['password'] == secret
+        return {'accepted': True, 'operation_id': OP_ID}
+    return {'error': 'unknown command'}
+
+mock_state = {
+    'operation_id': OP_ID,
+    'phase': 'connected',
+    'success': True,
+    'message': 'Conectado',
+}
+
+log_entries = []
+class Capture(logging.Handler):
+    def emit(self, record):
+        log_entries.append(record.getMessage())
+wifi.logger.addHandler(Capture())
+
+try:
+    with patch.object(wifi, '_send_wifi_command', side_effect=mock_send_command), \
+         patch.object(wifi, '_read_control_state', return_value=mock_state), \
+         patch.object(wifi.time, 'sleep', return_value=None):
+        success, message = wifi.connect_wifi('KnownNet', secret)
+    assert success, message
+    for entry in log_entries:
+        assert secret not in entry, f'Secret leaked to log: {entry}'
+    assert secret not in message, f'Secret leaked to message: {message}'
+finally:
+    wifi.logger.removeHandler(Capture())
+PYEOF
+}
+
+test_panel_socket_transition_contract() {
+    ROI="$ROOT" ROOT="$ROOT" python3 - <<'PYEOF'
+import importlib.util
+import logging
+import os
+from unittest.mock import patch
+
+root = os.environ['ROOT']
+
+spec = importlib.util.spec_from_file_location(
+    'sigil_wifi_contract_test', os.path.join(root, 'panel', 'wifi.py')
+)
+wifi = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(wifi)
+
+OP_ID = 'contract-test-op-id'
+
+def mock_send_command(cmd, **kwargs):
+    assert 'password' in kwargs or cmd != 'connect', \
+        'connect must include password'
+    if cmd == 'connect':
+        return {'accepted': True, 'operation_id': OP_ID}
+    return {'error': 'unknown command'}
+
+# Test 1: Successful transition
+def mock_state_success():
+    return {
+        'operation_id': OP_ID,
+        'phase': 'connected',
+        'success': True,
+        'message': 'Conectado',
+        'connectivity': {
+            'associated': True,
+            'ip_acquired': True,
+            'gateway_reachable': True,
+            'dns_available': True,
+            'local_only': False,
+            'internet_online': True,
+        },
+    }
+
+log_entries = []
+class Capture(logging.Handler):
+    def emit(self, record):
+        log_entries.append(record.getMessage())
+wifi.logger.addHandler(Capture())
+
+try:
+    secret = 'test-password-not-for-logs'
+    with patch.object(wifi, '_send_wifi_command', side_effect=mock_send_command), \
+         patch.object(wifi, '_read_control_state', side_effect=mock_state_success), \
+         patch.object(wifi.time, 'sleep', return_value=None):
+        success, message = wifi.connect_wifi('KnownNet', secret)
+    assert success, f'should succeed: {message}'
+    assert secret not in message, f'secret leaked to message: {message}'
+    for entry in log_entries:
+        assert secret not in entry, f'secret leaked to log: {entry}'
+
+    # Test 2: Failed transition
+    def mock_state_fail():
+        return {
+            'operation_id': OP_ID,
+            'phase': 'failed',
+            'success': False,
+            'message': 'Error de conexión',
+        }
+
+    with patch.object(wifi, '_send_wifi_command', side_effect=mock_send_command), \
+         patch.object(wifi, '_read_control_state', side_effect=mock_state_fail), \
+         patch.object(wifi.time, 'sleep', return_value=None):
+        success, message = wifi.connect_wifi('KnownNet', secret)
+    assert not success, 'should fail'
+    assert secret not in message, f'secret leaked: {message}'
+finally:
+    wifi.logger.removeHandler(Capture())
 PYEOF
 }
 
@@ -675,27 +895,28 @@ run_test "one or two temporary failures do not start AP" test_temporary_failures
 run_test "no client link after threshold enters AP_ACTIVE once" test_threshold_starts_ap
 run_test "fresh boot without a client profile starts the provisioning AP" test_fresh_boot_without_profile_starts_ap
 run_test "connected NM state with dead gateway confirms link-dead transition" test_connected_dead_gateway_is_link_dead_transition
-run_test "dead profile is deactivated at most once per transition" test_dead_profile_deactivated_once
+run_test "no profile deactivation by fallback (daemon-only)" test_no_profile_deactivation_by_fallback
 run_test "AP recovery respects persisted retry cooldown" test_recovery_cooldown_respected
 run_test "known-profile recovery leaves AP and enters client mode" test_successful_ap_recovery
 run_test "failed recovery restores AP exactly once with backoff" test_failed_recovery_restores_ap_once
-run_test "active AP services are not duplicated" test_active_ap_has_no_duplicate_services
-run_test "AP mode owns wlan0 exclusively" test_ap_ownership_is_exclusive
-run_test "repeated AP reconciliation is idempotent" test_repeated_ap_reconciliation_is_idempotent
+run_test "active AP ensure_ap is idempotent at call site" test_active_ap_ensure_is_idempotent
+run_test "restore_ap socket command sent on threshold" test_restore_ap_sent_on_threshold
+run_test "static invariant: no forbidden mutation patterns" test_static_no_forbidden_mutations
+run_test "fallback performs zero direct mutations" test_no_mutations_from_fallback
 run_test "a second wifi-fallback process is refused by the canonical lock" test_duplicate_fallback_process_refused
 run_test "panel inhibit prevents fallback AP activation" test_inhibit_blocks_ap
 run_test "expired inhibit is removed and monitoring resumes" test_expired_inhibit_removed
-run_test "panel handoff clears stale AP before the next online cycle" test_panel_success_handoff_prevents_stale_ap_restart
-run_test "panel local-only handoff does not reactivate AP" test_panel_local_only_handoff_does_not_restore_ap
-run_test "panel delegates ownership only to wifi-fallback" test_panel_uses_canonical_ownership_helper
-run_test "client mode gives NetworkManager exclusive wlan0 ownership" test_client_ownership_is_exclusive
+run_test "daemon handoff clears stale AP before next online cycle" test_daemon_handoff_detected
+run_test "daemon AP restore is synchronised to fallback state" test_daemon_ap_restore_synced
+run_test "panel uses exclusive socket path (no sudo)" test_panel_uses_exclusive_socket_path
+run_test "client mode handoff detected via daemon state" test_client_ownership_is_exclusive
 run_test "stable MAC policy contains no permanent unmanaged rule" test_static_mac_policy_never_blocks_client_ownership
-run_test "failed panel transition restores AP exactly once" test_failed_panel_transition_restores_ap_once
-run_test "permanently unmanaged client preparation fails closed to AP" test_unmanaged_client_preparation_fails_closed_to_ap
-run_test "two panel transitions serialize on the canonical lock" test_panel_transitions_share_one_lock
+run_test "panel connect failure reports error without sudo fallback" test_panel_connect_failure_reports_error
+run_test "panel has no sudo wifi fallback paths" test_panel_no_sudo_paths_exist
+run_test "panel socket busy returns busy message" test_panel_socket_busy_returns_busy_message
 run_test "panel credentials never enter logs or argv" test_panel_credentials_never_reach_logs_or_argv
-run_test "panel PSK persists only in the root-owned NetworkManager profile" test_panel_secret_is_persisted_only_in_root_profile
-run_test "panel transition uses bounded inhibit and hides password" test_panel_transition_contract
+run_test "panel socket does not expose secret" test_panel_secret_is_not_exposed_via_socket
+run_test "panel socket transition contract (success + failure + no leak)" test_panel_socket_transition_contract
 
 printf '\nWiFi fallback: %d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
