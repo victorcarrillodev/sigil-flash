@@ -1,27 +1,26 @@
 """
 wifi.py — Lógica completa de gestión WiFi para el panel Sigil.
-Usa iwlist para escanear (compatible con modo AP activo) y nmcli para conectar.
+Usa iwlist para escanear (compatible con modo AP activo) y un servicio
+root privilegiado para transiciones AP↔cliente.
 """
-import fcntl
 import json
 import logging
 import os
 import re
+import socket
 import subprocess
-import tempfile
 import time
 import uuid
-from contextlib import contextmanager
 
 logger = logging.getLogger(__name__)
 
 WIFI_INTERFACE = os.environ.get('SIGIL_WIFI_INTERFACE', 'wlan0')
 
-WIFI_INHIBIT_FILE = os.environ.get(
-    'SIGIL_WIFI_INHIBIT_FILE', '/run/sigil/wifi-fallback-inhibit.json'
+WIFI_CONTROL_SOCKET = os.environ.get(
+    'SIGIL_WIFI_CONTROL_SOCKET', '/run/sigil/wifi-control.sock'
 )
-WIFI_TRANSITION_LOCK = os.environ.get(
-    'SIGIL_WIFI_TRANSITION_LOCK', '/run/sigil/wifi-transition.lock'
+WIFI_CONTROL_STATE = os.environ.get(
+    'SIGIL_WIFI_CONTROL_STATE', '/run/sigil/wifi-control-state.json'
 )
 WIFI_SCAN_LOCK = os.environ.get(
     'SIGIL_WIFI_SCAN_LOCK', '/run/sigil/wifi-scan.lock'
@@ -31,9 +30,6 @@ WIFI_SCAN_TIMEOUT_SECONDS = int(
 )
 WIFI_FALLBACK_HELPER = os.environ.get(
     'SIGIL_WIFI_FALLBACK_HELPER', '/usr/local/bin/wifi-fallback.sh'
-)
-WIFI_CONNECT_INHIBIT_SECONDS = int(
-    os.environ.get('SIGIL_WIFI_CONNECT_INHIBIT_SECONDS', '150')
 )
 WIFI_CONNECT_STABILIZATION_SECONDS = int(
     os.environ.get('SIGIL_WIFI_CONNECT_STABILIZATION_SECONDS', '90')
@@ -46,12 +42,12 @@ WIFI_CONNECT_CHECK_INTERVAL = float(
 )
 
 
-class WifiScanBusy(RuntimeError):
-    """An active scan or WiFi ownership transition already has the radio."""
-
-
 class WifiCredentialError(ValueError):
     """A WiFi request is structurally invalid without exposing its secret."""
+
+
+class WifiScanBusy(RuntimeError):
+    """An active scan or WiFi ownership transition already has the radio."""
 
 
 def validate_wifi_credentials(ssid: object, password: object) -> tuple[str, str]:
@@ -77,113 +73,53 @@ def validate_wifi_credentials(ssid: object, password: object) -> tuple[str, str]
     return ssid, password
 
 
-@contextmanager
-def _nonblocking_lock(path: str, busy_message: str):
-    """Acquire a process-safe flock; an unused stale lock file is harmless."""
-    directory = os.path.dirname(path) or '.'
-    os.makedirs(directory, mode=0o770, exist_ok=True)
-    flags = os.O_CREAT | os.O_RDWR | getattr(os, 'O_CLOEXEC', 0)
-    flags |= getattr(os, 'O_NOFOLLOW', 0)
-    fd = os.open(path, flags, 0o660)
-    handle = os.fdopen(fd, 'r+', encoding='utf-8')
-    try:
-        try:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as error:
-            raise WifiScanBusy(busy_message) from error
-        try:
-            yield
-        finally:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-    finally:
-        handle.close()
+# ---------------------------------------------------------------------------
+# Socket client for sigil-wifi-control.service (root privileged daemon)
+# ---------------------------------------------------------------------------
 
-
-@contextmanager
-def _wifi_scan_guard():
-    """Serialize scans and exclude AP/client ownership transitions.
-
-    Lock order is always transition then scan. wifi-fallback and panel client
-    transitions already use the first lock, so they cannot change wlan0 while
-    iwlist is actively using the single onboard radio.
-    """
-    with _nonblocking_lock(
-        WIFI_TRANSITION_LOCK, 'Transición WiFi en progreso; reintenta en breve'
-    ):
-        with _nonblocking_lock(
-            WIFI_SCAN_LOCK, 'Otro escaneo WiFi está en progreso; reintenta en breve'
-        ):
-            yield
-
-
-def _run_active_wifi_scan() -> str:
-    """Run the only production active-scan command under canonical locks."""
-    with _wifi_scan_guard():
+def _scan_via_socket() -> str:
+    """Ask the root service to perform a WiFi scan and return raw iwlist output."""
+    resp = _send_wifi_command('scan')
+    if resp.get('error'):
+        # Fallback: direct sudo call (the scan command is not yet in root service)
+        logger.warning('Socket scan failed, falling back to direct sudo: %s', resp.get('error'))
         result = subprocess.run(
             ['sudo', WIFI_FALLBACK_HELPER, '--panel-scan'],
-            capture_output=True,
-            text=True,
-            timeout=WIFI_SCAN_TIMEOUT_SECONDS,
+            capture_output=True, text=True, timeout=WIFI_SCAN_TIMEOUT_SECONDS,
         )
-    if result.returncode != 0:
-        raise RuntimeError(f'WiFi scan exited with status {result.returncode}')
-    return result.stdout
+        if result.returncode != 0:
+            raise RuntimeError(f'WiFi scan exited with status {result.returncode}')
+        return result.stdout
+    scan_raw = resp.get('scan_data', '')
+    if not scan_raw:
+        raise RuntimeError('Empty scan result')
+    return scan_raw
 
-
-def _process_start_time(pid: int) -> int:
-    with open(f'/proc/{pid}/stat', encoding='utf-8') as handle:
-        remainder = handle.read().rsplit(')', 1)[1].split()
-    return int(remainder[19])
-
-
-def _create_fallback_inhibit() -> str:
-    directory = os.path.dirname(WIFI_INHIBIT_FILE)
-    os.makedirs(directory, mode=0o770, exist_ok=True)
-    operation_id = uuid.uuid4().hex
-    document = {
-        '_schema_version': '1.0',
-        'operation_id': operation_id,
-        'reason': 'panel_connect_wifi',
-        'pid': os.getpid(),
-        'process_start_time': _process_start_time(os.getpid()),
-        'created_at': int(time.time()),
-        'expires_at': int(time.time()) + WIFI_CONNECT_INHIBIT_SECONDS,
-    }
-    fd, temporary = tempfile.mkstemp(prefix='.wifi-inhibit.', dir=directory)
+def _send_wifi_command(cmd: str, **kwargs) -> dict:
+    """Send a JSON command to the root WiFi control socket and read reply."""
     try:
-        os.fchmod(fd, 0o640)
-        with os.fdopen(fd, 'w', encoding='utf-8') as handle:
-            fd = -1
-            json.dump(document, handle, sort_keys=True)
-            handle.write('\n')
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, WIFI_INHIBIT_FILE)
-        temporary = ''
-        directory_fd = os.open(directory, os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0))
-        try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
-    finally:
-        if fd >= 0:
-            os.close(fd)
-        if temporary:
-            try:
-                os.unlink(temporary)
-            except FileNotFoundError:
-                pass
-    return operation_id
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(10)
+        s.connect(WIFI_CONTROL_SOCKET)
+        payload = {'command': cmd}
+        payload.update(kwargs)
+        s.sendall(json.dumps(payload).encode('utf-8') + b'\n')
+        data = s.recv(65536)
+        s.close()
+        return json.loads(data.decode('utf-8'))
+    except socket.error as e:
+        return {'error': f'socket error: {e}', 'accepted': False}
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        return {'error': f'protocol error: {e}', 'accepted': False}
 
 
-def _remove_fallback_inhibit(operation_id: str) -> None:
+def _read_control_state() -> dict | None:
+    """Read the state file written by sigil-wifi-control.service."""
     try:
-        with open(WIFI_INHIBIT_FILE, encoding='utf-8') as handle:
-            document = json.load(handle)
-        if document.get('operation_id') == operation_id:
-            os.unlink(WIFI_INHIBIT_FILE)
+        with open(WIFI_CONTROL_STATE) as f:
+            return json.load(f)
     except (FileNotFoundError, json.JSONDecodeError, OSError):
-        pass
+        return None
 
 
 def _client_link_stable() -> bool:
@@ -216,89 +152,13 @@ def _wait_for_client_stability() -> bool:
     return False
 
 
-def _run_owner_action(action: str) -> bool:
-    """Ask the canonical root helper to change or commit wlan0 ownership."""
-    try:
-        result = subprocess.run(
-            ['sudo', WIFI_FALLBACK_HELPER, action],
-            capture_output=True, timeout=20
-        )
-    except (OSError, subprocess.TimeoutExpired) as error:
-        logger.error(
-            'Canonical WiFi ownership action could not run: %s (%s)',
-            action,
-            type(error).__name__,
-        )
-        return False
-    if result.returncode != 0:
-        logger.error('Canonical WiFi ownership action failed: %s', action)
-        return False
-    return True
-
-
-def _prepare_client_ownership() -> bool:
-    return _run_owner_action('--prepare-client')
-
-
-def _restore_ap_ownership() -> bool:
-    return _run_owner_action('--restore-ap')
-
-
-def _record_client_handoff() -> bool:
-    return _run_owner_action('--external-client-handoff')
-
-
-def _disable_power_save() -> bool:
-    return _run_owner_action('--disable-power-save')
-
-
-def _persist_client_secret(profile: str, password_file: str) -> bool:
-    """Persist a system-owned PSK without exposing it through process argv."""
-    try:
-        result = subprocess.run(
-            [
-                'sudo', WIFI_FALLBACK_HELPER, '--persist-client-secret',
-                profile, password_file,
-            ],
-            capture_output=True, timeout=20
-        )
-    except (OSError, subprocess.TimeoutExpired) as error:
-        logger.error('WiFi secret persistence could not run: %s', type(error).__name__)
-        return False
-    if result.returncode != 0:
-        logger.error('WiFi secret persistence failed')
-        return False
-    return True
-
-
-@contextmanager
-def _nmcli_password_file(password: str):
-    directory = os.path.dirname(WIFI_INHIBIT_FILE)
-    fd, path = tempfile.mkstemp(prefix='.nmcli-password.', dir=directory)
-    try:
-        os.fchmod(fd, 0o600)
-        with os.fdopen(fd, 'w', encoding='utf-8') as handle:
-            fd = -1
-            handle.write(f'802-11-wireless-security.psk:{password}\n')
-            handle.flush()
-            os.fsync(handle.fileno())
-        yield path
-    finally:
-        if fd >= 0:
-            os.close(fd)
-        try:
-            os.unlink(path)
-        except FileNotFoundError:
-            pass
-
-
 def scan_wifi_networks() -> list[dict]:
     """
     Escanea redes WiFi con iwlist — funciona aunque hostapd esté activo.
     Devuelve lista ordenada por señal descendente.
     """
     try:
-        scan_output = _run_active_wifi_scan()
+        scan_output = _scan_via_socket()
 
         networks, seen = [], set()
         saved_profiles = _get_saved_profiles()
@@ -358,7 +218,7 @@ def _get_saved_profiles() -> set[str]:
     """Devuelve el conjunto de SSIDs con perfil guardado en NetworkManager."""
     try:
         sp = subprocess.run(
-            ['sudo', 'nmcli', '-t', '-f', 'NAME,TYPE', 'connection', 'show'],
+            ['nmcli', '-t', '-f', 'NAME,TYPE', 'connection', 'show'],
             capture_output=True, text=True, timeout=5
         )
         saved = set()
@@ -378,123 +238,51 @@ def _wifi_profile_exists(ssid: str) -> bool:
 
 def connect_wifi(ssid: str, password: str) -> tuple[bool, str]:
     """
-    Conecta a una red WiFi bajo el lock/inhibit canónico de transición.
+    Conecta a una red WiFi delegando la transición AP→cliente al servicio
+    root sigil-wifi-control via Unix socket, y espera estabilidad local.
 
-    Detiene el AP, devuelve wlan0 a NetworkManager y espera asociación/DHCP
-    estable. wifi-fallback continúa ejecutándose, pero no puede activar el AP
-    durante este intervalo acotado.
+    El servicio root gestiona el inhibit, la reconversión de interfaz,
+    el perfil NM, el secreto y la activación en segundo plano; el panel
+    solo valida, envía el comando y monitorea el resultado.
     """
-    transition_handle = None
-    operation_id = ''
-    ownership_attempted = False
-    client_handoff_complete = False
-    profile_created = False
     try:
         ssid, password = validate_wifi_credentials(ssid, password)
-        os.makedirs(os.path.dirname(WIFI_TRANSITION_LOCK), mode=0o770, exist_ok=True)
-        transition_handle = open(WIFI_TRANSITION_LOCK, 'a+', encoding='utf-8')
-        try:
-            fcntl.flock(transition_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            return False, 'Otra transición WiFi está en progreso'
 
-        operation_id = _create_fallback_inhibit()
+        # 1. Enviar comando connect al servicio root
+        resp = _send_wifi_command('connect', ssid=ssid, password=password)
+        if resp.get('error'):
+            return False, resp['error']
+        if not resp.get('accepted'):
+            return False, resp.get('message', 'Transición no aceptada')
 
-        # wifi-fallback is the only component that changes AP/client ownership.
-        # The panel retains the lock and bounded inhibit for the whole request.
-        ownership_attempted = True
-        if not _prepare_client_ownership():
-            return False, 'No se pudo devolver wlan0 a NetworkManager'
+        operation_id = resp.get('operation_id', '')
+        logger.info('WiFi connect accepted (operation_id=%s)', operation_id)
 
-        profile_exists = _wifi_profile_exists(ssid)
+        # 2. Esperar a que el servicio complete la transición (timeout ~120s)
+        deadline = time.monotonic() + 150
+        while time.monotonic() < deadline:
+            state = _read_control_state()
+            if state and state.get('operation_id') == operation_id:
+                if state.get('phase') in ('connected', 'idle'):
+                    success = state.get('success')
+                    if success is True:
+                        # 3. Verificación extra de estabilidad local
+                        if _wait_for_client_stability():
+                            return True, f'Conectado a {ssid}'
+                        return False, 'La conexión no alcanzó estabilidad'
+                    elif success is False:
+                        msg = state.get('message', 'El servicio raíz falló la transición')
+                        return False, msg
+                    # phase idle but no success flag → still running
+            time.sleep(2)
 
-        if password:
-            if not profile_exists:
-                add = subprocess.run(
-                    ['sudo', 'nmcli', 'con', 'add',
-                     'con-name', ssid, 'type', 'wifi', 'ifname', WIFI_INTERFACE, 'ssid', ssid],
-                    capture_output=True, text=True, timeout=10
-                )
-                if add.returncode != 0:
-                    return False, 'Error al crear el perfil WiFi'
-                profile_created = True
-            modified = subprocess.run(
-                ['sudo', 'nmcli', 'con', 'mod', ssid,
-                 'wifi-sec.key-mgmt', 'wpa-psk',
-                 'ipv4.method', 'auto', 'ipv6.method', 'auto'],
-                capture_output=True, timeout=10
-            )
-            if modified.returncode != 0:
-                return False, 'Error al configurar el perfil WiFi'
-            with _nmcli_password_file(password) as password_file:
-                if not _persist_client_secret(ssid, password_file):
-                    return False, 'No se pudo guardar la clave WiFi de forma segura'
-                up = subprocess.run(
-                    ['sudo', 'nmcli', 'con', 'up', ssid],
-                    capture_output=True, text=True, timeout=45
-                )
-            _disable_power_save()
-            if up.returncode != 0:
-                return False, 'NetworkManager no pudo activar la conexión'
-            if not _wait_for_client_stability():
-                return False, 'La conexión no alcanzó asociación y DHCP estables'
-            if not _record_client_handoff():
-                return False, 'No se pudo confirmar el estado WiFi cliente'
-            client_handoff_complete = True
-            return True, f'Conectado a {ssid}'
+        return False, 'Timeout: el servicio raíz no completó la transición'
 
-        elif profile_exists:
-            up = subprocess.run(['sudo', 'nmcli', 'con', 'up', ssid], capture_output=True, text=True, timeout=45)
-            _disable_power_save()
-            if up.returncode != 0:
-                return False, 'NetworkManager no pudo reactivar la conexión guardada'
-            if not _wait_for_client_stability():
-                return False, 'La conexión guardada no alcanzó asociación y DHCP estables'
-            if not _record_client_handoff():
-                return False, 'No se pudo confirmar el estado WiFi cliente'
-            client_handoff_complete = True
-            return True, f'Reconectado a {ssid}'
-
-        else:
-            result = subprocess.run(
-                ['sudo', 'nmcli', 'dev', 'wifi', 'connect', ssid],
-                capture_output=True, text=True, timeout=45
-            )
-            _disable_power_save()
-            if result.returncode != 0:
-                return False, 'NetworkManager no pudo establecer la conexión'
-            if not _wait_for_client_stability():
-                return False, 'La conexión no alcanzó asociación y DHCP estables'
-            if not _record_client_handoff():
-                return False, 'No se pudo confirmar el estado WiFi cliente'
-            client_handoff_complete = True
-            return True, f'Conectado a {ssid}'
-
-    except subprocess.TimeoutExpired:
-        return False, 'Timeout: el comando tardó demasiado'
+    except WifiCredentialError:
+        raise
     except Exception as e:
-        logger.error('WiFi transition failed: %s', type(e).__name__)
-        return False, 'Error interno durante la transición WiFi'
-    finally:
-        if profile_created and not client_handoff_complete:
-            try:
-                subprocess.run(
-                    ['sudo', 'nmcli', 'connection', 'delete', ssid],
-                    capture_output=True,
-                    timeout=10,
-                )
-            except (OSError, subprocess.TimeoutExpired):
-                logger.error('Could not remove the incomplete WiFi profile')
-        if operation_id and ownership_attempted and not client_handoff_complete:
-            if not _restore_ap_ownership():
-                logger.error('Canonical WiFi AP rollback failed')
-        if transition_handle is not None:
-            try:
-                fcntl.flock(transition_handle.fileno(), fcntl.LOCK_UN)
-            finally:
-                transition_handle.close()
-        if operation_id:
-            _remove_fallback_inhibit(operation_id)
+        logger.error('WiFi connect error: %s', type(e).__name__)
+        return False, 'Error interno al enviar comando WiFi'
 
 
 def get_current_wifi() -> str | None:
@@ -530,7 +318,7 @@ def scan_wifi_aps() -> list[dict]:
     Ordenado por señal descendente.
     """
     try:
-        scan_output = _run_active_wifi_scan()
+        scan_output = _scan_via_socket()
 
         seen = {}
 

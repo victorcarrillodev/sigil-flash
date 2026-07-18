@@ -1708,6 +1708,14 @@ fn install_sigil_hardware(
             provision_panel_credential(&mount_dir, config)?;
             provision_wifi_profile(&mount_dir, config)?;
             provision_ssh_access(&mount_dir, config)?;
+
+            // `install.sh` habilita los servicios con `systemctl enable`
+            // dentro del chroot, pero sin daemon systemd activo esa llamada
+            // puede fallar de forma silenciosa (especialmente para
+            // sigil-firstboot.service, que es crítico para el primer
+            // arranque).  Reafirmamos el symlink a mano para garantizarlo.
+            enable_sigil_firstboot(&mount_dir)?;
+
             Ok(())
         })();
         let _ = std::fs::remove_file(&policy_path);
@@ -2103,14 +2111,81 @@ fn copy_directory_contents(source: &Path, target: &Path) -> AppResult<()> {
         .arg(source.join("."))
         .arg(target)
         .status()?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(AppError::Flash(format!(
+    if !status.success() {
+        return Err(AppError::Flash(format!(
             "No se pudo copiar el repositorio offline desde {}",
             source.display()
-        )))
+        )));
     }
+
+    // `cp -a` solo preserva dueño cuando se ejecuta como root.  Cuando el
+    // flasher corre como usuario normal (lo común en el escritorio), los
+    // archivos quedan con dueño `ubuntu:ubuntu`, lo que rompe el chroot
+    // posterior (systemctl, install.sh, etc.).  Forzamos root:root y modo
+    // saneado (755 dirs, 644 ficheros) de forma independiente al EUID.
+    let chown = std::process::Command::new("chown")
+        .args(["-R", "root:root"])
+        .arg(target)
+        .status()?;
+    if !chown.success() {
+        return Err(AppError::Flash(format!(
+            "No se pudo reasignar ownership root:root en {} (¿el flasher se ejecuta como root?)",
+            target.display()
+        )));
+    }
+    let chmod_dirs = std::process::Command::new("find")
+        .arg(target)
+        .args(["-type", "d", "-exec", "chmod", "0755", "{}", "+"])
+        .status()?;
+    let chmod_files = std::process::Command::new("find")
+        .arg(target)
+        .args(["-type", "f", "-exec", "chmod", "0644", "{}", "+"])
+        .status()?;
+    if !chmod_dirs.success() || !chmod_files.success() {
+        return Err(AppError::Flash(format!(
+            "No se pudo normalizar permisos en {}",
+            target.display()
+        )));
+    }
+    Ok(())
+}
+
+/// Habilita `sigil-firstboot.service` creando el symlink manualmente en
+/// `multi-user.target.wants`.  Esto reemplaza a `systemctl enable` cuando
+/// este se ejecuta dentro de un chroot sin daemon systemd activo (escenario
+/// habitual durante la preparación offline de la imagen).
+fn enable_sigil_firstboot(rootfs: &Path) -> AppResult<()> {
+    let unit = "sigil-firstboot.service";
+    let unit_path = rootfs.join(format!("etc/systemd/system/{unit}"));
+    if !unit_path.exists() {
+        return Err(AppError::Flash(format!(
+            "No se encontró {unit} en el rootfs preparado (¿install.sh no lo copió?)"
+        )));
+    }
+    let wants_dir = rootfs.join("etc/systemd/system/multi-user.target.wants");
+    std::fs::create_dir_all(&wants_dir)?;
+    let symlink = wants_dir.join(unit);
+    if symlink.exists() {
+        // Ya habilitado por install.sh dentro del chroot — nada que hacer.
+        return Ok(());
+    }
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(&unit_path, &symlink).map_err(|error| {
+            AppError::Flash(format!(
+                "No se pudo crear el symlink de habilitación para {unit}: {error}"
+            ))
+        })?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = symlink;
+        return Err(AppError::Flash(
+            "La habilitación manual de unidades systemd requiere un host Unix".into(),
+        ));
+    }
+    println!("sigil-firstboot.service habilitado manualmente vía symlink");
+    Ok(())
 }
 
 fn unmount_all(mounted: &mut Vec<PathBuf>) -> AppResult<()> {
