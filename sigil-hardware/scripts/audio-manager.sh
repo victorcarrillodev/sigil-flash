@@ -5,7 +5,7 @@
 # Responsibilities:
 #   - Evaluate desired vs. current audio mode every cycle
 #   - Write audio_mode.json atomically for audio-player to consume
-#   - Detect internet availability (direct check, not via player)
+#   - Detect SIGIL API server availability (direct check, not via player)
 #   - Read cache_meta.json for cache health
 #   - Detect audio sink availability
 #   - Detect legacy radio-stream.sh coexistence
@@ -278,7 +278,11 @@ doc = {
     "desired_mode": desired,
     "reason": reason,
     "since": now,
+    # Kept for state-schema compatibility; this boolean now means the SIGIL
+    # API health endpoint returned HTTP 2xx, not generic Internet reachability.
     "internet_available": (internet_str == "true"),
+    "server_reachable": (internet_str == "true"),
+    "connectivity_scope": "sigil_api_server",
     "cache_status": cache_status,
     "active_playlist_version": pv if pv else None,
     "last_transition_at": lta if lta else None,
@@ -296,10 +300,10 @@ with os.fdopen(fd, 'w') as f:
 os.replace(tmp_path, out_file)
 PYEOF
 
-    log "INFO" "audio_mode.json: ${mode} (desired: ${desired}, reason: ${reason}, internet: ${internet_str}, cache: ${CACHE_STATUS})"
+    log "INFO" "audio_mode.json: ${mode} (desired: ${desired}, reason: ${reason}, server_reachable: ${internet_str}, cache: ${CACHE_STATUS})"
 }
 
-# ── Internet check ──────────────────────────────────────────────────────────
+# ── SIGIL server health check ───────────────────────────────────────────────
 
 check_internet() {
     local now_epoch
@@ -313,32 +317,52 @@ check_internet() {
 
     LAST_INTERNET_CHECK_EPOCH="$now_epoch"
 
-    # Method: HEAD against SERVER_URL with short timeout
-    # Using GET instead of HEAD because some servers reject HEAD
+    # This checks the SIGIL API server, not generic public Internet.  Capture
+    # both curl transport status and HTTP status so DNS/connect/TLS/auth/server
+    # failures remain distinguishable after reboot.
     local health_url="${SERVER_URL}/api/health"
     local health_rc=0
+    local http_code="000"
     if [ -n "$CURL_CONFIG" ]; then
-        curl -s -o /dev/null --connect-timeout "${CONNECT_TIMEOUT_SECONDS}" --max-time "${HEALTHCHECK_TIMEOUT_SECONDS}" \
+        http_code=$(curl -s -L -o /dev/null -w '%{http_code}' --connect-timeout "${CONNECT_TIMEOUT_SECONDS}" --max-time "${HEALTHCHECK_TIMEOUT_SECONDS}" \
             --config "$CURL_CONFIG" \
-            "$health_url" 2>/dev/null || health_rc=$?
+            "$health_url" 2>/dev/null) || health_rc=$?
     else
-        curl -s -o /dev/null --connect-timeout "${CONNECT_TIMEOUT_SECONDS}" --max-time "${HEALTHCHECK_TIMEOUT_SECONDS}" \
-            "$health_url" 2>/dev/null || health_rc=$?
+        http_code=$(curl -s -L -o /dev/null -w '%{http_code}' --connect-timeout "${CONNECT_TIMEOUT_SECONDS}" --max-time "${HEALTHCHECK_TIMEOUT_SECONDS}" \
+            "$health_url" 2>/dev/null) || health_rc=$?
     fi
-    if [ "$health_rc" -eq 0 ]; then
+    if [ "$health_rc" -eq 0 ] && [[ "$http_code" =~ ^2[0-9][0-9]$ ]]; then
         if ! $INTERNET_AVAILABLE; then
-            log "INFO" "Internet restored — server reachable"
+            log "INFO" "SIGIL server reachability restored"
             INTERNET_RESTORED_AT=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
             INTERNET_RESTORE_CHECKED=false
         fi
         INTERNET_AVAILABLE=true
-        log "DEBUG" "Internet check: OK"
+        log "INFO" "SIGIL_EVENT event_id=SERVER_HEALTH_RESULT operation_id=audio-manager phase=server_health result=success error_id=none curl_exit=0 http_status=${http_code}"
     else
+        local error_id="API_SERVER_UNREACHABLE"
+        if [ "$health_rc" -eq 0 ]; then
+            case "$http_code" in
+                401|403) error_id="API_AUTH_FAILED" ;;
+                404) error_id="API_ENDPOINT_NOT_FOUND" ;;
+                429) error_id="API_RATE_LIMITED" ;;
+                5??) error_id="API_SERVER_ERROR" ;;
+                *) error_id="API_HTTP_ERROR" ;;
+            esac
+        else
+            case "$health_rc" in
+                6) error_id="DNS_RESOLUTION_FAILED" ;;
+                7) error_id="SERVER_CONNECT_FAILED" ;;
+                28) error_id="SERVER_TIMEOUT" ;;
+                35|51|58|60) error_id="TLS_VALIDATION_FAILED" ;;
+            esac
+            http_code="000"
+        fi
         if $INTERNET_AVAILABLE; then
-            log "WARN" "Internet lost — server unreachable"
+            log "WARN" "SIGIL server became unavailable (${error_id})"
         fi
         INTERNET_AVAILABLE=false
-        log "DEBUG" "Internet check: FAIL"
+        log "INFO" "SIGIL_EVENT event_id=SERVER_HEALTH_RESULT operation_id=audio-manager phase=server_health result=failure error_id=${error_id} curl_exit=${health_rc} http_status=${http_code:-invalid}"
     fi
 }
 
@@ -740,13 +764,13 @@ evaluate_state() {
     # --- Desired mode: RADIO ---
     if [ "$CURRENT_DESIRED" = "RADIO" ]; then
         if ! $INTERNET_AVAILABLE; then
-            # Internet is down — try LOCAL if cache available
+            # SIGIL server is unavailable — try LOCAL if cache is available.
             if [ "$CACHE_STATUS" = "COMPLETE" ] || [ "$CACHE_STATUS" = "PARTIAL" ] || [ "$CACHE_STATUS" = "EXPIRED" ]; then
                 # Only transition if not already LOCAL
                 if [ "$CURRENT_MODE" = "RADIO" ] || [ "$CURRENT_MODE" = "TRANSITION_TO_RADIO" ]; then
                     new_mode="TRANSITION_TO_LOCAL"
                     new_reason="server_unreachable"
-                    log "INFO" "Eval: RADIO → TRANSITION_TO_LOCAL (no internet, cache: ${CACHE_STATUS})"
+                    log "INFO" "Eval: RADIO → TRANSITION_TO_LOCAL (server unavailable, cache: ${CACHE_STATUS})"
                 elif [ "$CURRENT_MODE" = "TRANSITION_TO_LOCAL" ]; then
                     # Complete the transition
                     log "INFO" "Eval: TRANSITION_TO_LOCAL → LOCAL"
@@ -755,18 +779,18 @@ evaluate_state() {
                 else
                     new_mode="LOCAL"
                     new_reason="network_lost"
-                    log "INFO" "Eval: staying LOCAL (no internet, cache: ${CACHE_STATUS})"
+                    log "INFO" "Eval: staying LOCAL (server unavailable, cache: ${CACHE_STATUS})"
                 fi
             else
-                # No cache and no internet — blocked
+                # No cache and no server access — blocked.
                 if [ "$CURRENT_MODE" != "BLOCKED_NO_CACHE" ]; then
-                    log "WARN" "Eval: BLOCKED_NO_CACHE (no internet, cache: ${CACHE_STATUS})"
+                    log "WARN" "Eval: BLOCKED_NO_CACHE (server unavailable, cache: ${CACHE_STATUS})"
                 fi
                 new_mode="BLOCKED_NO_CACHE"
                 new_reason="cache_empty"
             fi
         else
-            # Internet is available
+            # SIGIL server is available.
             if [ "$CURRENT_MODE" = "LOCAL" ] || [ "$CURRENT_MODE" = "BLOCKED_NO_CACHE" ] || \
                [ "$CURRENT_MODE" = "TRANSITION_TO_LOCAL" ]; then
                 # Currently in LOCAL or blocked — can we return to RADIO?

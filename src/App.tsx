@@ -86,6 +86,8 @@ export default function App() {
   const [logPassword, setLogPassword] = useState("");
   const [hostname, setHostname] = useState("sigil");
   const [serialNumber, setSerialNumber] = useState("");
+  const [sigilModel, setSigilModel] = useState("Sigil-Streamer");
+  const [sigilModelVersion, setSigilModelVersion] = useState("v1");
   const [wifiSsid, setWifiSsid] = useState("");
   const [wifiPassword, setWifiPassword] = useState("");
 
@@ -169,6 +171,8 @@ export default function App() {
         sshEnabled,
         rpiModel,
         serialNumber: serialNumber || null,
+        sigilModel: sigilModel || null,
+        sigilModelVersion: sigilModelVersion || null,
         panelPin: pinPanel || null,
       };
       await invoke("start_flash", {
@@ -244,6 +248,8 @@ export default function App() {
           logPassword={logPassword} setLogPassword={setLogPassword}
           hostname={hostname} setHostname={setHostname}
           serialNumber={serialNumber} setSerialNumber={setSerialNumber}
+          sigilModel={sigilModel} setSigilModel={setSigilModel}
+          sigilModelVersion={sigilModelVersion} setSigilModelVersion={setSigilModelVersion}
           wifiSsid={wifiSsid} setWifiSsid={setWifiSsid}
           wifiPassword={wifiPassword} setWifiPassword={setWifiPassword}
         />

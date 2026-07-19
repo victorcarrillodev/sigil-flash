@@ -1297,8 +1297,12 @@ main() {
                 if ! $TEMP_FALLBACK_ENABLED; then
                     log "DEBUG" "TEMP_FALLBACK_ENABLED=false — RADIO mode (manual fallback only)"
                 fi
-                radio_playback_cycle
-                local rc=$?
+                local rc=0
+                if radio_playback_cycle; then
+                    rc=0
+                else
+                    rc=$?
+                fi
                 if $ONCE; then
                     log "INFO" "--once specified, exiting after RADIO cycle"
                     break
@@ -1314,8 +1318,12 @@ main() {
                 if [ "$CURRENT_MODE" = "CACHE_EXPIRED" ]; then
                     log "WARN" "Playing from EXPIRED cache (TTL exceeded)"
                 fi
-                local_playback_cycle
-                local rc=$?
+                local rc=0
+                if local_playback_cycle; then
+                    rc=0
+                else
+                    rc=$?
+                fi
                 if $ONCE; then
                     log "INFO" "--once specified, exiting after LOCAL cycle"
                     break

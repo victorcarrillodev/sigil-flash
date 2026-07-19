@@ -13,6 +13,14 @@ ACTION="$2"
 [ "$INTERFACE" != "wlan0" ] && exit 0
 [ "$ACTION" != "up" ] && exit 0
 
+# Geolocation is opt-in. Keep the dispatcher installed for manufacturing
+# images, but never transmit a WiFi scan unless explicitly enabled.
+GEO_CONFIG="${SIGIL_GEO_CONFIG:-/etc/sigil/audio.conf}"
+if [ -z "${SIGIL_GEO_SCRIPT:-}" ] && [ -f "$GEO_CONFIG" ]; then
+    GEO_ENABLED=$(awk -F= '/^[[:space:]]*SIGIL_GEOLOCATION_ENABLED[[:space:]]*=/{v=$2; gsub(/^[[:space:]"\047]+|[[:space:]"\047]+$/, "", v); print tolower(v); exit}' "$GEO_CONFIG")
+    [ "$GEO_ENABLED" = "true" ] || exit 0
+fi
+
 # Production defaults; overrides exist only to permit isolated execution of this
 # exact dispatcher in the repository test suite.
 GEO_DELAY_SECONDS="${SIGIL_GEO_DELAY_SECONDS:-5}"

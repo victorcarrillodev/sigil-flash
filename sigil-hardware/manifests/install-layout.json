@@ -129,6 +129,22 @@
       "description": "Runtime directory ownership contract"
     },
     {
+      "source": "conf/90-sigil-persistent-journal.conf",
+      "destination": "/etc/systemd/journald.conf.d/90-sigil-persistent.conf",
+      "type": "file",
+      "owner": "root:root",
+      "mode": "644",
+      "description": "Bounded persistent systemd journal configuration"
+    },
+    {
+      "source": "conf/sigil-logrotate",
+      "destination": "/etc/logrotate.d/sigil",
+      "type": "file",
+      "owner": "root:root",
+      "mode": "644",
+      "description": "Bounded rotation for legacy SIGIL file logs"
+    },
+    {
       "source": "conf/90-sigil-geolocate",
       "destination": "/etc/NetworkManager/dispatcher.d/90-sigil-geolocate",
       "type": "file",

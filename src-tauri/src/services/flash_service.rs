@@ -11,6 +11,17 @@ use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
 
+#[derive(serde::Deserialize)]
+struct HardwarePayloadManifest {
+    files: Vec<HardwarePayloadManifestFile>,
+}
+
+#[derive(serde::Deserialize)]
+struct HardwarePayloadManifestFile {
+    path: String,
+    mode: String,
+}
+
 pub struct FlashService {
     // Stores the active child process spawn handle for cancellation
     active_process: Arc<Mutex<Option<tokio::process::Child>>>,
@@ -174,7 +185,7 @@ impl FlashService {
             api_key_file: flash_root
                 .join("artifacts")
                 .join("secrets")
-                .join("device-api-key"),
+                .join("enrollment-key"),
         }
     }
 
@@ -548,7 +559,7 @@ fn manufacturing_config_with_api_key(
 fn validate_device_api_key(api_key: Option<&str>) -> AppResult<()> {
     let api_key = api_key.ok_or_else(|| {
         AppError::Validation(
-            "Falta artifacts/secrets/device-api-key para fabricar la imagen".into(),
+            "Falta la enrollment key en artifacts/secrets/enrollment-key. Créala con permisos 0600 antes de flashear; la clave se inyectará y se consumirá automáticamente en el primer arranque".into(),
         )
     })?;
     if !(8..=256).contains(&api_key.len()) || !api_key.bytes().all(|byte| byte.is_ascii_graphic()) {
@@ -577,7 +588,7 @@ fn read_local_device_api_key(path: &Path) -> AppResult<String> {
         || before.len() > 512
     {
         return Err(AppError::Validation(
-            "artifacts/secrets/device-api-key debe ser un archivo regular del usuario actual, modo 0600 y máximo 512 bytes"
+            "artifacts/secrets/enrollment-key debe ser un archivo regular del usuario actual, modo 0600 y máximo 512 bytes"
                 .into(),
         ));
     }
@@ -588,14 +599,14 @@ fn read_local_device_api_key(path: &Path) -> AppResult<String> {
     let opened = file.metadata()?;
     if before.dev() != opened.dev() || before.ino() != opened.ino() {
         return Err(AppError::Validation(
-            "artifacts/secrets/device-api-key cambió mientras se abría".into(),
+            "artifacts/secrets/enrollment-key cambió mientras se abría".into(),
         ));
     }
     let mut bytes = Vec::new();
     file.take(513).read_to_end(&mut bytes)?;
     if bytes.len() > 512 {
         return Err(AppError::Validation(
-            "artifacts/secrets/device-api-key excede 512 bytes".into(),
+            "artifacts/secrets/enrollment-key excede 512 bytes".into(),
         ));
     }
     if bytes.last() == Some(&b'\n') {
@@ -1129,8 +1140,8 @@ fn write_manufacturing_provision(root: &Path, config: &DeviceConfig) -> AppResul
     let provision = serde_json::json!({
         "_schema_version": "1.0",
         "serial_number": serial,
-        "model": "Sigil-Streamer",
-        "model_version": "v1",
+        "model": config.sigil_model.as_deref().unwrap_or("Sigil-Streamer"),
+        "model_version": config.sigil_model_version.as_deref().unwrap_or("v1"),
         "batch": format!("flash-{}", chrono::Utc::now().format("%Y-%m")),
         "capabilities": {
             "i2s_dac": false
@@ -1330,7 +1341,7 @@ fn provision_panel_credential(root: &Path, config: &DeviceConfig) -> AppResult<(
 fn provision_device_api_key(root: &Path, config: &DeviceConfig) -> AppResult<()> {
     let api_key = config.api_key.as_deref().ok_or_else(|| {
         AppError::Validation(
-            "Falta artifacts/secrets/device-api-key para fabricar la imagen".into(),
+            "Falta la enrollment key en artifacts/secrets/enrollment-key. Créala con permisos 0600 antes de flashear; la clave se inyectará y se consumirá automáticamente en el primer arranque".into(),
         )
     })?;
     validate_device_api_key(Some(api_key))?;
@@ -1344,16 +1355,16 @@ fn provision_device_api_key(root: &Path, config: &DeviceConfig) -> AppResult<()>
             "El directorio de secretos dentro de la imagen no puede ser un symlink".into(),
         ));
     }
-    let target = secrets_dir.join("device-api-key");
+    let target = secrets_dir.join("enrollment-key");
     if target.exists() {
         let metadata = std::fs::symlink_metadata(&target)?;
         if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
             return Err(AppError::Validation(
-                "El destino device-api-key dentro de la imagen no es un archivo regular".into(),
+                "El destino enrollment-key dentro de la imagen no es un archivo regular".into(),
             ));
         }
     }
-    let temporary = secrets_dir.join(format!(".device-api-key.{}", std::process::id()));
+    let temporary = secrets_dir.join(format!(".enrollment-key.{}", std::process::id()));
     if temporary.exists() {
         std::fs::remove_file(&temporary)?;
     }
@@ -2086,6 +2097,7 @@ fn copy_hardware_payload(source: &Path, target: &Path) -> AppResult<()> {
     }
 
     copy_directory_contents(source, target)?;
+    restore_payload_manifest_modes(target)?;
 
     let mut target_items = Vec::new();
     flasher_rs::validate::validate_payload(target, &mut target_items);
@@ -2121,13 +2133,13 @@ fn copy_directory_contents(source: &Path, target: &Path) -> AppResult<()> {
     // `cp -a` solo preserva dueño cuando se ejecuta como root.  Cuando el
     // flasher corre como usuario normal (lo común en el escritorio), los
     // archivos quedan con dueño `ubuntu:ubuntu`, lo que rompe el chroot
-    // posterior (systemctl, install.sh, etc.).  Forzamos root:root y modo
-    // saneado (755 dirs, 644 ficheros) de forma independiente al EUID.
+    // posterior (systemctl, install.sh, etc.).  Forzamos root:root y luego
+    // restauramos los modos declarados por el manifiesto del payload.
     let chown = std::process::Command::new("chown")
         .args(["-R", "root:root"])
         .arg(target)
         .status()?;
-    if !chown.success() {
+    if !chown.success() && effective_user_id_is_root() {
         return Err(AppError::Flash(format!(
             "No se pudo reasignar ownership root:root en {} (¿el flasher se ejecuta como root?)",
             target.display()
@@ -2137,17 +2149,67 @@ fn copy_directory_contents(source: &Path, target: &Path) -> AppResult<()> {
         .arg(target)
         .args(["-type", "d", "-exec", "chmod", "0755", "{}", "+"])
         .status()?;
-    let chmod_files = std::process::Command::new("find")
-        .arg(target)
-        .args(["-type", "f", "-exec", "chmod", "0644", "{}", "+"])
-        .status()?;
-    if !chmod_dirs.success() || !chmod_files.success() {
+    if !chmod_dirs.success() {
         return Err(AppError::Flash(format!(
-            "No se pudo normalizar permisos en {}",
+            "No se pudo normalizar directorios en {}",
             target.display()
         )));
     }
     Ok(())
+}
+
+#[cfg(unix)]
+fn restore_payload_manifest_modes(target: &Path) -> AppResult<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let manifest_path = target.join("payload-manifest.json");
+    let manifest_bytes = std::fs::read(&manifest_path).map_err(|error| {
+        AppError::Validation(format!(
+            "No se pudo leer payload-manifest.json para restaurar permisos: {error}"
+        ))
+    })?;
+    let manifest: HardwarePayloadManifest =
+        serde_json::from_slice(&manifest_bytes).map_err(|error| {
+            AppError::Validation(format!(
+                "payload-manifest.json inválido al restaurar permisos: {error}"
+            ))
+        })?;
+
+    for entry in manifest.files {
+        let mode = u32::from_str_radix(&entry.mode, 8).map_err(|error| {
+            AppError::Validation(format!(
+                "modo inválido en payload-manifest.json para {}: {error}",
+                entry.path
+            ))
+        })?;
+        let path = target.join(&entry.path);
+        let metadata = std::fs::symlink_metadata(&path)?;
+        if !metadata.is_file() {
+            return Err(AppError::Validation(format!(
+                "entrada de payload no es archivo regular: {}",
+                entry.path
+            )));
+        }
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode))?;
+    }
+
+    std::fs::set_permissions(&manifest_path, std::fs::Permissions::from_mode(0o644))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn restore_payload_manifest_modes(_target: &Path) -> AppResult<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn effective_user_id_is_root() -> bool {
+    unsafe { libc::geteuid() == 0 }
+}
+
+#[cfg(not(unix))]
+fn effective_user_id_is_root() -> bool {
+    false
 }
 
 /// Habilita `sigil-firstboot.service` creando el symlink manualmente en
@@ -2165,13 +2227,14 @@ fn enable_sigil_firstboot(rootfs: &Path) -> AppResult<()> {
     let wants_dir = rootfs.join("etc/systemd/system/multi-user.target.wants");
     std::fs::create_dir_all(&wants_dir)?;
     let symlink = wants_dir.join(unit);
-    if symlink.exists() {
+    if std::fs::symlink_metadata(&symlink).is_ok() {
         // Ya habilitado por install.sh dentro del chroot — nada que hacer.
         return Ok(());
     }
     #[cfg(unix)]
     {
-        std::os::unix::fs::symlink(&unit_path, &symlink).map_err(|error| {
+        let unit_target = format!("/etc/systemd/system/{unit}");
+        std::os::unix::fs::symlink(&unit_target, &symlink).map_err(|error| {
             AppError::Flash(format!(
                 "No se pudo crear el symlink de habilitación para {unit}: {error}"
             ))
@@ -2249,13 +2312,13 @@ mod tests {
     }
 
     #[test]
-    fn manufacturing_contract_rejects_missing_device_api_key() {
+    fn manufacturing_contract_rejects_missing_enrollment_key() {
         let mut config = manufacturing_config();
         config.api_key = None;
 
         let error = validate_device_config(&config).expect_err("missing API key must fail");
 
-        assert!(error.to_string().contains("device-api-key"));
+        assert!(error.to_string().contains("enrollment-key"));
     }
 
     #[cfg(unix)]
@@ -2264,14 +2327,14 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let root = isolated_lock_dir("local-api-key-valid");
-        let path = root.join("device-api-key");
-        std::fs::write(&path, "synthetic-device-api-key\n").expect("write API key fixture");
+        let path = root.join("enrollment-key");
+        std::fs::write(&path, "synthetic-enrollment-key\n").expect("write enrollment key fixture");
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
             .expect("set private mode");
 
         let result = read_local_device_api_key(&path);
 
-        assert_eq!(result.expect("valid API key"), "synthetic-device-api-key");
+        assert_eq!(result.expect("valid enrollment key"), "synthetic-enrollment-key");
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -2281,8 +2344,8 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let root = isolated_lock_dir("local-api-key-mode");
-        let path = root.join("device-api-key");
-        std::fs::write(&path, "synthetic-device-api-key\n").expect("write API key fixture");
+        let path = root.join("enrollment-key");
+        std::fs::write(&path, "synthetic-enrollment-key\n").expect("write enrollment key fixture");
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640))
             .expect("set insecure mode");
 
@@ -2298,8 +2361,8 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let root = isolated_lock_dir("manufacturing-config-api-key");
-        let path = root.join("device-api-key");
-        std::fs::write(&path, "synthetic-device-api-key\n").expect("write API key fixture");
+        let path = root.join("enrollment-key");
+        std::fs::write(&path, "synthetic-enrollment-key\n").expect("write enrollment key fixture");
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
             .expect("set private mode");
         let mut config = manufacturing_config();
@@ -2309,7 +2372,7 @@ mod tests {
 
         assert_eq!(
             prepared.api_key.as_deref(),
-            Some("synthetic-device-api-key")
+            Some("synthetic-enrollment-key")
         );
         let _ = std::fs::remove_dir_all(root);
     }
@@ -2323,7 +2386,7 @@ mod tests {
 
         provision_device_api_key(&root, &manufacturing_config()).expect("provision API key");
 
-        let path = root.join("etc/sigil/secrets/device-api-key");
+        let path = root.join("etc/sigil/secrets/enrollment-key");
         let mode = std::fs::metadata(&path)
             .expect("API key metadata")
             .permissions()
@@ -2632,6 +2695,53 @@ mod tests {
             b"fixture index"
         );
         assert!(target.join("packages/demo.deb").is_file());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn firstboot_enable_accepts_existing_absolute_unit_symlink() {
+        let root = isolated_lock_dir("firstboot-existing-symlink");
+        let unit_dir = root.join("etc/systemd/system");
+        let wants_dir = unit_dir.join("multi-user.target.wants");
+        std::fs::create_dir_all(&wants_dir).expect("wants dir");
+        std::fs::write(unit_dir.join("sigil-firstboot.service"), b"[Unit]\n")
+            .expect("unit fixture");
+        std::os::unix::fs::symlink(
+            "/etc/systemd/system/sigil-firstboot.service",
+            wants_dir.join("sigil-firstboot.service"),
+        )
+        .expect("existing symlink");
+
+        enable_sigil_firstboot(&root).expect("existing symlink is idempotent");
+
+        let target =
+            std::fs::read_link(wants_dir.join("sigil-firstboot.service")).expect("read symlink");
+        assert_eq!(
+            target,
+            PathBuf::from("/etc/systemd/system/sigil-firstboot.service")
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn firstboot_enable_creates_rootfs_relative_absolute_unit_symlink() {
+        let root = isolated_lock_dir("firstboot-create-symlink");
+        let unit_dir = root.join("etc/systemd/system");
+        std::fs::create_dir_all(&unit_dir).expect("unit dir");
+        std::fs::write(unit_dir.join("sigil-firstboot.service"), b"[Unit]\n")
+            .expect("unit fixture");
+
+        enable_sigil_firstboot(&root).expect("create symlink");
+
+        let target =
+            std::fs::read_link(unit_dir.join("multi-user.target.wants/sigil-firstboot.service"))
+                .expect("read symlink");
+        assert_eq!(
+            target,
+            PathBuf::from("/etc/systemd/system/sigil-firstboot.service")
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 

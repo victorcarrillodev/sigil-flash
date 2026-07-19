@@ -1,21 +1,26 @@
 [Unit]
 Description=Sigil WiFi Control — single-owner wlan0 mutation daemon
-After=network.target NetworkManager.service
+After=network.target NetworkManager.service systemd-tmpfiles-setup.service sigil-firstboot.service
 Wants=network.target NetworkManager.service
 Before=wifi-fallback.service bluetooth-panel.service
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 Type=simple
 User=root
+Group=sigil
 EnvironmentFile=-/etc/sigil/wifi-fallback.conf
 ExecStart=/usr/local/bin/sigil-wifi-control.py
 Restart=on-failure
-RestartSec=5
+RestartSec=10
+UMask=0007
 StandardOutput=journal
 StandardError=journal
 
-# Capabilities needed for iw, ip, nmcli, iwlist, systemctl
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE CAP_SYS_ADMIN
+# Capabilities needed for iw, ip, nmcli, and iwlist.  Group=sigil creates the
+# socket as root:sigil directly, so no ownership or DAC-bypass caps are needed.
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
 AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
 
 [Install]

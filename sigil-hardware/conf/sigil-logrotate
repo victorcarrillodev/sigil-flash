@@ -1,0 +1,19 @@
+/var/log/sigil/*.log
+/var/log/bt-connect.log
+/var/log/radio-stream.log
+/var/log/audio-manager.log
+/var/log/wifi-fallback.log
+/var/log/wifi-manager.log
+/var/log/sigil-geolocate.log
+/var/log/sigil-wifi-control.log {
+    daily
+    rotate 4
+    size 1M
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+    create 0640 sigil sigil
+}
+

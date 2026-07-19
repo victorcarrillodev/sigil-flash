@@ -3,6 +3,7 @@
 # aligned with install.sh; development files and whole directories are not
 # implicitly copied.
 install.sh
+manifests/install-layout.json
 manifests/offline-package-contract.json
 panel/app.py
 panel/bluetooth.py
@@ -54,12 +55,14 @@ services/ssh-monitor.service
 services/wifi-fallback.service
 conf/90-sigil-geolocate
 conf/99-sigil-mac-fixed.conf
+conf/90-sigil-persistent-journal.conf
 conf/audio.conf
 conf/bluetooth-main.conf
 conf/dnsmasq.conf
 conf/hostapd.conf
 conf/pulse-daemon.conf
 conf/security.conf
+conf/sigil-logrotate
 conf/sigil-network.sudoers
 conf/sigil-tmpfiles.conf
 conf/sigil.sudoers

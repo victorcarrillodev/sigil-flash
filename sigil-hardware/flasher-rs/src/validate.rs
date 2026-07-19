@@ -1,7 +1,7 @@
 use crate::model::{ManufacturingSecrets, Provision, Severity, ValidationItem, ValidationResult};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufReader, Read};
 use std::path::{Component, Path};
@@ -14,6 +14,14 @@ const PAYLOAD_MANIFEST: &str = "payload-manifest.json";
 const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
 const MAX_PROVISION_BYTES: u64 = 4096;
 const MAX_SECRETS_BYTES: u64 = 1024;
+const MAX_DIAGNOSTIC_CONFIG_BYTES: u64 = 64 * 1024;
+const REQUIRED_DIAGNOSTIC_FILES: [&str; 5] = [
+    "conf/90-sigil-persistent-journal.conf",
+    "conf/sigil-logrotate",
+    "manifests/install-layout.json",
+    "scripts/sigil-wifi-control.py",
+    "services/sigil-wifi-control.service",
+];
 
 #[derive(Debug, Deserialize)]
 struct PayloadManifest {
@@ -503,6 +511,8 @@ pub fn validate_payload(payload: &Path, items: &mut Vec<ValidationItem>) {
         }
     }
 
+    validate_persistent_diagnostics(payload, &declared, items);
+
     if !items
         .iter()
         .any(|item| matches!(item.severity, Severity::Error))
@@ -515,6 +525,195 @@ pub fn validate_payload(payload: &Path, items: &mut Vec<ValidationItem>) {
                 manifest.source_commit
             ),
         );
+    }
+}
+
+fn validate_persistent_diagnostics(
+    payload: &Path,
+    declared: &BTreeSet<String>,
+    items: &mut Vec<ValidationItem>,
+) {
+    for required in REQUIRED_DIAGNOSTIC_FILES {
+        if !declared.contains(required) {
+            error(
+                items,
+                format!("persistent diagnostics payload file is missing: {required}"),
+            );
+        }
+    }
+
+    let journal_path = payload.join("conf/90-sigil-persistent-journal.conf");
+    match read_bounded_text(&journal_path) {
+        Ok(content) => match parse_journal_settings(&content) {
+            Ok(settings) => validate_journal_settings(&settings, items),
+            Err(message) => error(items, message),
+        },
+        Err(message) => error(items, message),
+    }
+
+    validate_text_contract(
+        &payload.join("conf/sigil-logrotate"),
+        "SIGIL logrotate contract",
+        &[
+            "/var/log/sigil/*.log",
+            "/var/log/sigil-wifi-control.log",
+            "daily",
+            "rotate 4",
+            "size 1M",
+            "compress",
+        ],
+        items,
+    );
+    validate_text_contract(
+        &payload.join("services/sigil-wifi-control.service"),
+        "WiFi control service contract",
+        &[
+            "User=root",
+            "Group=sigil",
+            "StandardOutput=journal",
+            "StandardError=journal",
+            "CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW",
+        ],
+        items,
+    );
+    validate_text_contract(
+        &payload.join("install.sh"),
+        "installer diagnostics contract",
+        &[
+            "90-sigil-persistent-journal.conf",
+            "/etc/systemd/journald.conf.d/90-sigil-persistent.conf",
+            "sigil-logrotate",
+            "/etc/logrotate.d/sigil",
+            "/var/log/journal",
+        ],
+        items,
+    );
+    validate_install_layout(&payload.join("manifests/install-layout.json"), items);
+}
+
+fn read_bounded_text(path: &Path) -> Result<String, String> {
+    let metadata = fs::metadata(path)
+        .map_err(|error_value| format!("cannot inspect {}: {error_value}", path.display()))?;
+    if !metadata.is_file() || metadata.len() > MAX_DIAGNOSTIC_CONFIG_BYTES {
+        return Err(format!(
+            "diagnostic contract must be a regular file no larger than 64 KiB: {}",
+            path.display()
+        ));
+    }
+    fs::read_to_string(path)
+        .map_err(|error_value| format!("cannot read {}: {error_value}", path.display()))
+}
+
+fn parse_journal_settings(content: &str) -> Result<BTreeMap<String, String>, String> {
+    let mut in_journal_section = false;
+    let mut settings = BTreeMap::new();
+    for raw_line in content.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+            continue;
+        }
+        if line.starts_with('[') && line.ends_with(']') {
+            in_journal_section = line == "[Journal]";
+            continue;
+        }
+        if !in_journal_section {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            return Err("persistent journal configuration contains an invalid line".into());
+        };
+        settings.insert(key.trim().to_owned(), value.trim().to_owned());
+    }
+    if settings.is_empty() {
+        return Err("persistent journal configuration has no [Journal] settings".into());
+    }
+    Ok(settings)
+}
+
+fn validate_journal_settings(settings: &BTreeMap<String, String>, items: &mut Vec<ValidationItem>) {
+    for (key, expected) in [
+        ("Storage", "persistent"),
+        ("Compress", "yes"),
+        ("SystemMaxUse", "64M"),
+        ("SystemKeepFree", "128M"),
+        ("SystemMaxFileSize", "8M"),
+        ("MaxRetentionSec", "14day"),
+        ("MaxFileSec", "1day"),
+        ("RuntimeMaxUse", "16M"),
+    ] {
+        if settings.get(key).map(String::as_str) != Some(expected) {
+            error(
+                items,
+                format!("persistent journal setting {key} must be {expected}"),
+            );
+        }
+    }
+}
+
+fn validate_text_contract(
+    path: &Path,
+    contract_name: &str,
+    required_fragments: &[&str],
+    items: &mut Vec<ValidationItem>,
+) {
+    match read_bounded_text(path) {
+        Ok(content) => {
+            for fragment in required_fragments {
+                if !content.contains(fragment) {
+                    error(
+                        items,
+                        format!("{contract_name} is missing required entry: {fragment}"),
+                    );
+                }
+            }
+        }
+        Err(message) => error(items, message),
+    }
+}
+
+fn validate_install_layout(path: &Path, items: &mut Vec<ValidationItem>) {
+    let content = match read_bounded_text(path) {
+        Ok(content) => content,
+        Err(message) => {
+            error(items, message);
+            return;
+        }
+    };
+    let document: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(document) => document,
+        Err(error_value) => {
+            error(
+                items,
+                format!("invalid diagnostics install layout: {error_value}"),
+            );
+            return;
+        }
+    };
+    let entries = document
+        .get("entries")
+        .and_then(serde_json::Value::as_array);
+    for (source, destination, mode) in [
+        (
+            "conf/90-sigil-persistent-journal.conf",
+            "/etc/systemd/journald.conf.d/90-sigil-persistent.conf",
+            "644",
+        ),
+        ("conf/sigil-logrotate", "/etc/logrotate.d/sigil", "644"),
+    ] {
+        let present = entries.is_some_and(|entries| {
+            entries.iter().any(|entry| {
+                entry.get("source").and_then(serde_json::Value::as_str) == Some(source)
+                    && entry.get("destination").and_then(serde_json::Value::as_str)
+                        == Some(destination)
+                    && entry.get("mode").and_then(serde_json::Value::as_str) == Some(mode)
+            })
+        });
+        if !present {
+            error(
+                items,
+                format!("install layout is missing diagnostics mapping {source} -> {destination}"),
+            );
+        }
     }
 }
 
@@ -1162,17 +1361,51 @@ mod tests {
             let payload = root.join("payload");
             fs::create_dir_all(&payload).expect("payload directory");
             let files: Vec<(&str, Vec<u8>, u32)> = vec![
-                ("install.sh", b"#!/bin/bash\n".to_vec(), 0o755),
+                (
+                    "install.sh",
+                    b"#!/bin/bash\ninstall -D conf/90-sigil-persistent-journal.conf /etc/systemd/journald.conf.d/90-sigil-persistent.conf\ninstall -D conf/sigil-logrotate /etc/logrotate.d/sigil\ninstall -d /var/log/journal\n"
+                        .to_vec(),
+                    0o755,
+                ),
                 ("panel/app.py", b"print('sigil')\n".to_vec(), 0o644),
                 ("scripts/firstboot.sh", b"#!/bin/bash\n".to_vec(), 0o755),
+                (
+                    "scripts/sigil-wifi-control.py",
+                    b"#!/usr/bin/env python3\n".to_vec(),
+                    0o755,
+                ),
                 (
                     "services/sigil-firstboot.service",
                     b"[Service]\n".to_vec(),
                     0o644,
                 ),
                 (
+                    "services/sigil-wifi-control.service",
+                    b"[Service]\nUser=root\nGroup=sigil\nStandardOutput=journal\nStandardError=journal\nCapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW\n"
+                        .to_vec(),
+                    0o644,
+                ),
+                (
                     "conf/audio.conf",
                     b"API_KEY=\"<placeholder>\"\n".to_vec(),
+                    0o644,
+                ),
+                (
+                    "conf/90-sigil-persistent-journal.conf",
+                    b"[Journal]\nStorage=persistent\nCompress=yes\nSystemMaxUse=64M\nSystemKeepFree=128M\nSystemMaxFileSize=8M\nMaxRetentionSec=14day\nMaxFileSec=1day\nRuntimeMaxUse=16M\n"
+                        .to_vec(),
+                    0o644,
+                ),
+                (
+                    "conf/sigil-logrotate",
+                    b"/var/log/sigil/*.log /var/log/sigil-wifi-control.log {\n    daily\n    rotate 4\n    size 1M\n    compress\n}\n"
+                        .to_vec(),
+                    0o644,
+                ),
+                (
+                    "manifests/install-layout.json",
+                    br#"{"entries":[{"source":"conf/90-sigil-persistent-journal.conf","destination":"/etc/systemd/journald.conf.d/90-sigil-persistent.conf","mode":"644"},{"source":"conf/sigil-logrotate","destination":"/etc/logrotate.d/sigil","mode":"644"}]}"#
+                        .to_vec(),
                     0o644,
                 ),
                 (
@@ -1480,6 +1713,19 @@ mod tests {
         let fixture = Fixture::new();
         fs::write(fixture.payload.join("panel/app.py"), b"modified").expect("modify");
         assert!(!fixture.validate().valid);
+    }
+
+    #[test]
+    fn persistent_diagnostics_rejects_volatile_journal_storage() {
+        let settings = parse_journal_settings("[Journal]\nStorage=volatile\n")
+            .expect("journal fixture must parse");
+        let mut items = Vec::new();
+
+        validate_journal_settings(&settings, &mut items);
+
+        assert!(items.iter().any(|item| {
+            item.message == "persistent journal setting Storage must be persistent"
+        }));
     }
 
     #[test]

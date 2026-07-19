@@ -477,7 +477,7 @@ else
     fi
     cat > /etc/sigil/panel.env << ENVEOF
 SIGIL_SECRET_KEY=${_secret_key}
-SIGIL_SERVER_URL=https://devproserver.tail942ea3.ts.net
+SIGIL_SERVER_URL=https://sigil-server.tail942ea3.ts.net
 ENVEOF
     chmod 600 /etc/sigil/panel.env
     chown root:root /etc/sigil/panel.env
@@ -502,30 +502,10 @@ chown root:sigil /etc/sigil/audio.conf
 chmod 640 /etc/sigil/audio.conf
 log_ok "/etc/sigil/audio.conf (640, root:sigil, I2S=${I2S_DAC_PRESENT})"
 
-# The device API token has one canonical location and is never part of provision JSON.
-DEVICE_API_KEY_FILE=/etc/sigil/secrets/device-api-key
-legacy_api_key=""
-if [ -f /etc/sigil/audio.conf ]; then
-    legacy_api_key=$(awk -F= '/^[[:space:]]*API_KEY[[:space:]]*=/{v=$2; gsub(/^[[:space:]"\047]+|[[:space:]"\047]+$/, "", v); print v; exit}' /etc/sigil/audio.conf)
-fi
-if [ -z "$legacy_api_key" ] && [ -f /etc/sigil/panel.env ]; then
-    legacy_api_key=$(awk -F= '/^[[:space:]]*SIGIL_API_KEY[[:space:]]*=/{v=$2; gsub(/^[[:space:]"\047]+|[[:space:]"\047]+$/, "", v); print v; exit}' /etc/sigil/panel.env)
-fi
-if [ ! -f "$DEVICE_API_KEY_FILE" ]; then
-    token_temp=$(mktemp /etc/sigil/secrets/.device-api-key.XXXXXX)
-    chmod 640 "$token_temp"
-    chown root:sigil "$token_temp"
-    if [ -n "$legacy_api_key" ] && [ "$legacy_api_key" != "<placeholder>" ]; then
-        printf '%s\n' "$legacy_api_key" > "$token_temp"
-    fi
-    mv -f -- "$token_temp" "$DEVICE_API_KEY_FILE"
-fi
-sed -i '/^[[:space:]]*API_KEY[[:space:]]*=/d' /etc/sigil/audio.conf
-sed -i '/^[[:space:]]*SIGIL_API_KEY[[:space:]]*=/d' /etc/sigil/panel.env
-chown root:sigil "$DEVICE_API_KEY_FILE"
-chmod 640 "$DEVICE_API_KEY_FILE"
-unset legacy_api_key token_temp
-log_ok "/etc/sigil/secrets/device-api-key (640, root:sigil; token separado de identidad)"
+# Permanent API credentials are created by firstboot from the injected,
+# one-use enrollment key. Never generate or embed a shared token here.
+rm -f -- /etc/sigil/secrets/device-api-key
+log_ok "API credential deferred to firstboot enrollment"
 
 if [[ -f /etc/sigil/security.conf ]]; then
     log_ok "/etc/sigil/security.conf ya existe"
@@ -544,6 +524,19 @@ fi
 chown root:root /etc/sigil/wifi-fallback.conf
 chmod 644 /etc/sigil/wifi-fallback.conf
 log_ok "/etc/sigil/wifi-fallback.conf (644, root:root)"
+
+# Persist bounded journal evidence across normal reboots.  Do not restart
+# journald while preparing an image; the target boot activates this policy and
+# systemd-journal-flush moves early volatile records into /var/log/journal.
+install -d -o root -g root -m 0755 /etc/systemd/journald.conf.d
+install -o root -g root -m 0644 \
+    "${REPO_DIR}/conf/90-sigil-persistent-journal.conf" \
+    /etc/systemd/journald.conf.d/90-sigil-persistent.conf
+install -d -o root -g systemd-journal -m 2755 /var/log/journal
+install -o root -g root -m 0644 \
+    "${REPO_DIR}/conf/sigil-logrotate" /etc/logrotate.d/sigil
+log_ok "Journal persistente acotado (64 MiB, retención máxima 14 días)"
+log_ok "/etc/logrotate.d/sigil instalado para logs heredados"
 
 # ── Paso 10: Configuración de NetworkManager ──────────────────────────────────
 log_step "Configurando NetworkManager"

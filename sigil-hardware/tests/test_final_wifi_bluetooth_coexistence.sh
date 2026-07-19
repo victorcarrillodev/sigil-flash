@@ -19,6 +19,17 @@ run_test() {
     fi
 }
 
+python_syntax_valid() {
+    python3 - "${ROOT}/panel/wifi.py" "${ROOT}/panel/geolocation.py" <<'PYEOF'
+import pathlib
+import sys
+
+for filename in sys.argv[1:]:
+    path = pathlib.Path(filename)
+    compile(path.read_text(encoding="utf-8"), str(path), "exec")
+PYEOF
+}
+
 run_test "cross-process scan/transition behavior" \
     python3 "${HERE}/test_wifi_bluetooth_coexistence.py"
 run_test "Bluetooth SUSPENDED remains usable and route recovery is automatic" \
@@ -26,7 +37,7 @@ run_test "Bluetooth SUSPENDED remains usable and route recovery is automatic" \
 run_test "wifi-fallback keeps canonical AP/client ownership" \
     bash "${HERE}/test_final_wifi_fallback.sh"
 run_test "WiFi and geolocation Python syntax" \
-    python3 -m py_compile "${ROOT}/panel/wifi.py" "${ROOT}/panel/geolocation.py"
+    python_syntax_valid
 run_test "wifi-fallback shell syntax" \
     bash -n "${ROOT}/scripts/wifi-fallback.sh"
 

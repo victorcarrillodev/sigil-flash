@@ -23,6 +23,7 @@ class DeviceIdentityTests(unittest.TestCase):
         self.audio_conf = root / "audio.conf"
         self.cpuinfo = root / "cpuinfo"
         self.machine_id = root / "machine-id"
+        self.wlan_address = root / "wlan-address"
         self.document = {
             "_schema_version": "1.0",
             "serial_number": "SIGIL-TEST-0001",
@@ -53,6 +54,7 @@ class DeviceIdentityTests(unittest.TestCase):
             str(self.audio_conf),
             str(self.cpuinfo),
             str(self.machine_id),
+            str(self.wlan_address),
         )
 
     def test_device_conf_is_atomic_contract_with_mode_0640(self):
@@ -75,6 +77,11 @@ class DeviceIdentityTests(unittest.TestCase):
         self.assertEqual(actual["serial_number"], "SIGIL-TEST-0001")
         self.assertEqual(actual["model_version"], "v1")
         self.assertEqual(actual["capabilities"], {"i2s_dac": True})
+
+    def test_permanent_wlan_mac_is_preferred_for_device_identity(self):
+        self.wlan_address.write_text("D8:3A:DD:71:1C:13\n", encoding="utf-8")
+        self.persist()
+        self.assertEqual(self.load()["device_id"], "d8:3a:dd:71:1c:13")
 
     def test_empty_machine_id_never_returns_empty_device_id(self):
         self.cpuinfo.write_text("Serial : 0000000000000000\n", encoding="utf-8")

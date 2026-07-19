@@ -416,7 +416,8 @@ test_manager_tolerates_unreachable_server() {
 
     [ "$INTERNET_AVAILABLE" = false ] \
         && [ "$(wc -l < "${MOCK_STATE}/curl_calls")" -eq 1 ] \
-        && grep -q 'Internet lost' "$LOG"
+        && grep -q 'SIGIL server became unavailable (SERVER_CONNECT_FAILED)' "$LOG" \
+        && grep -q 'error_id=SERVER_CONNECT_FAILED.*curl_exit=7.*http_status=000' "$LOG"
 }
 
 test_root_uses_sigil_pulse_session() {

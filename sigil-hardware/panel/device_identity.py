@@ -1,8 +1,9 @@
 """Canonical SIGIL device identity loading and provisioning persistence.
 
 Manufacturing identity is stored in ``/etc/sigil/device.conf``.  The runtime
-``device_id`` is discovered from the Raspberry Pi CPU serial, then machine-id,
-and finally the non-empty sentinel ``sigil-unknown``.  API credentials are
+``device_id`` is discovered from the permanent ``wlan0`` MAC, then Raspberry Pi
+CPU serial, then machine-id, and finally the non-empty sentinel
+``sigil-unknown``.  API credentials are
 intentionally outside this module and are never returned or logged here.
 """
 
@@ -22,6 +23,7 @@ DEVICE_CONF = "/etc/sigil/device.conf"
 AUDIO_CONF = "/etc/sigil/audio.conf"
 CPUINFO = "/proc/cpuinfo"
 MACHINE_ID = "/etc/machine-id"
+WLAN_ADDRESS = "/sys/class/net/wlan0/address"
 
 _DEVICE_KEYS = {
     "serial_number": "SIGIL_SERIAL_NUMBER",
@@ -56,8 +58,15 @@ def _read_text(path: str) -> str:
         return ""
 
 
-def resolve_device_id(cpuinfo_path: str = CPUINFO, machine_id_path: str = MACHINE_ID) -> str:
+def resolve_device_id(
+    cpuinfo_path: str = CPUINFO,
+    machine_id_path: str = MACHINE_ID,
+    wlan_address_path: str = WLAN_ADDRESS,
+) -> str:
     """Resolve a non-empty runtime identifier without using manufacturing data."""
+    wlan_address = _read_text(wlan_address_path).strip().lower()
+    if re.fullmatch(r"[0-9a-f]{2}(?::[0-9a-f]{2}){5}", wlan_address):
+        return wlan_address
     for line in _read_text(cpuinfo_path).splitlines():
         key, separator, value = line.partition(":")
         if separator and key.strip() == "Serial":
@@ -158,6 +167,7 @@ def load_identity(
     audio_conf_path: str = AUDIO_CONF,
     cpuinfo_path: str = CPUINFO,
     machine_id_path: str = MACHINE_ID,
+    wlan_address_path: str = WLAN_ADDRESS,
 ) -> dict[str, Any]:
     """Return the complete non-secret identity contract."""
     assignments = _parse_assignments(device_conf_path)
@@ -166,7 +176,9 @@ def load_identity(
     if unknown:
         raise IdentityError(f"unknown identity fields: {', '.join(sorted(unknown))}")
 
-    identity: dict[str, Any] = {"device_id": resolve_device_id(cpuinfo_path, machine_id_path)}
+    identity: dict[str, Any] = {
+        "device_id": resolve_device_id(cpuinfo_path, machine_id_path, wlan_address_path)
+    }
     for field, key in _DEVICE_KEYS.items():
         if key not in assignments:
             legacy = " (legacy devices must be explicitly migrated)" if field == "model_version" else ""

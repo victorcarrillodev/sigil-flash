@@ -10,7 +10,7 @@ import re
 import socket
 import subprocess
 import time
-import uuid
+from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +33,23 @@ class WifiCredentialError(ValueError):
 
 class WifiScanBusy(RuntimeError):
     """An active scan or WiFi ownership transition already has the radio."""
+
+
+def _log_wifi_event(event_id: str, phase: str, result: str,
+                    operation_id: str = 'none', error_id: str = 'none',
+                    **details: object) -> None:
+    """Emit a credential-free structured panel event to journald."""
+    record: dict[str, object] = {
+        'event_id': event_id,
+        'operation_id': operation_id or 'none',
+        'phase': phase,
+        'result': result,
+        'error_id': error_id,
+        'realtime_utc': datetime.now(timezone.utc).isoformat(timespec='milliseconds'),
+        'monotonic_ms': int(time.monotonic() * 1000),
+    }
+    record.update(details)
+    logger.info('SIGIL_EVENT %s', json.dumps(record, sort_keys=True))
 
 
 def validate_wifi_credentials(ssid: object, password: object) -> tuple[str, str]:
@@ -82,20 +99,49 @@ def _scan_via_socket() -> str:
 
 def _send_wifi_command(cmd: str, **kwargs) -> dict:
     """Send a JSON command to the root WiFi control socket and read reply."""
+    safe_command = cmd if cmd in {
+        'scan', 'connect', 'ensure_ap', 'restore_ap', 'recover_client',
+        'deactivate_profile', 'status', 'probe', 'ping',
+    } else 'unknown'
+    _log_wifi_event('PANEL_WIFI_REQUEST', 'panel_socket_request', 'started',
+                    command=safe_command)
     try:
-        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        s.settimeout(10)
-        s.connect(WIFI_CONTROL_SOCKET)
-        payload = {'command': cmd}
-        payload.update(kwargs)
-        s.sendall(json.dumps(payload).encode('utf-8') + b'\n')
-        data = s.recv(65536)
-        s.close()
-        return json.loads(data.decode('utf-8'))
-    except socket.error as e:
-        return {'error': f'socket error: {e}', 'accepted': False}
-    except (json.JSONDecodeError, UnicodeDecodeError) as e:
-        return {'error': f'protocol error: {e}', 'accepted': False}
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as channel:
+            channel.settimeout(10)
+            channel.connect(WIFI_CONTROL_SOCKET)
+            payload = {'command': cmd}
+            payload.update(kwargs)
+            channel.sendall(json.dumps(payload).encode('utf-8') + b'\n')
+            data = channel.recv(65536)
+        response = json.loads(data.decode('utf-8'))
+        _log_wifi_event(
+            'PANEL_WIFI_RESPONSE', 'panel_socket_response', 'complete',
+            operation_id=str(response.get('operation_id', 'none')),
+            error_id=str(response.get('error') or 'none'),
+            command=safe_command, accepted=bool(response.get('accepted')),
+            final_state=response.get('state'),
+        )
+        return response
+    except socket.error as error:
+        _log_wifi_event(
+            'WIFI_CONTROL_UNAVAILABLE', 'panel_socket_request', 'failure',
+            error_id='WIFI_CONTROL_UNAVAILABLE', command=safe_command,
+            exception=type(error).__name__,
+        )
+        return {
+            'error': 'wifi_control_unavailable', 'accepted': False,
+            'message': 'El control WiFi no está disponible',
+        }
+    except (json.JSONDecodeError, UnicodeDecodeError) as error:
+        _log_wifi_event(
+            'WIFI_CONTROL_PROTOCOL_ERROR', 'panel_socket_response', 'failure',
+            error_id='WIFI_CONTROL_PROTOCOL_ERROR', command=safe_command,
+            exception=type(error).__name__,
+        )
+        return {
+            'error': 'wifi_control_protocol_error', 'accepted': False,
+            'message': 'Respuesta inválida del control WiFi',
+        }
 
 
 def _read_control_state() -> dict | None:
@@ -211,7 +257,8 @@ def connect_wifi(ssid: str, password: str) -> tuple[bool, str]:
             return False, resp.get('message', 'Transición no aceptada')
 
         operation_id = resp.get('operation_id', '')
-        logger.info('WiFi connect accepted (operation_id=%s)', operation_id)
+        _log_wifi_event('PANEL_WIFI_TRANSITION_ACCEPTED', 'panel_wait',
+                        'success', operation_id=operation_id)
 
         # 2. Esperar a que el servicio complete la transición (timeout ~150s)
         # sigil-wifi-control handles stability checks and connectivity probing;
@@ -220,17 +267,37 @@ def connect_wifi(ssid: str, password: str) -> tuple[bool, str]:
         while time.monotonic() < deadline:
             state = _read_control_state()
             if state and state.get('operation_id') == operation_id:
+                # A terminal failure can be published as failed, ap_active, or
+                # AP_RESTORE_FAILED.  Do not keep polling solely because its
+                # phase is not the successful connected/idle phase.
+                if state.get('success') is False:
+                    msg = state.get('message', 'El servicio raíz falló la transición')
+                    _log_wifi_event(
+                        'PANEL_WIFI_FINAL_STATE', 'panel_final_state',
+                        'failure', operation_id=operation_id,
+                        error_id=str(state.get('error_id') or 'WIFI_TRANSITION_FAILED'),
+                        final_state=state.get('phase'),
+                    )
+                    return False, msg
                 if state.get('phase') in ('connected', 'idle'):
                     success = state.get('success')
                     if success is True:
                         msg = state.get('message', f'Conectado a {ssid}')
+                        _log_wifi_event(
+                            'PANEL_WIFI_FINAL_STATE', 'panel_final_state',
+                            'success', operation_id=operation_id,
+                            final_state=state.get('connectivity', {}).get(
+                                'network_state', 'IP_ACQUIRED'),
+                        )
                         return True, msg
-                    elif success is False:
-                        msg = state.get('message', 'El servicio raíz falló la transición')
-                        return False, msg
                     # phase idle but no success flag → still running
             time.sleep(2)
 
+        _log_wifi_event(
+            'PANEL_WIFI_FINAL_STATE', 'panel_final_state', 'failure',
+            operation_id=operation_id, error_id='WIFI_TRANSITION_TIMEOUT',
+            final_state='WIFI_CONTROL_UNAVAILABLE',
+        )
         return False, 'Timeout: el servicio raíz no completó la transición'
 
     except WifiCredentialError:

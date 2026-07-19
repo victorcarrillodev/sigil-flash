@@ -117,16 +117,19 @@ class PanelProductContractTests(unittest.TestCase):
         self.assertIn("http://sigil.local", wifi_block)
 
     def test_failed_new_profile_is_cleaned_but_existing_profile_is_retained(self):
-        wifi = (PANEL / "wifi.py").read_text(encoding="utf-8")
-        self.assertIn("profile_created = False", wifi)
-        self.assertIn("if profile_created and not client_handoff_complete", wifi)
-        self.assertNotIn("if profile_exists and not client_handoff_complete", wifi)
+        daemon = (ROOT / "scripts/sigil-wifi-control.py").read_text(encoding="utf-8")
+        self.assertIn("profile_created = False", daemon)
+        self.assertIn("if profile_created and profile_id is not None", daemon)
+        self.assertIn("_delete_nm_profile(profile_id)", daemon)
+        self.assertNotIn("if not profile_created and profile_id is not None", daemon)
 
     def test_wifi_recovery_delegates_known_profile_selection_to_networkmanager(self):
         helper = (ROOT / "scripts/wifi-fallback.sh").read_text(encoding="utf-8")
-        recovery = helper[helper.index("attempt_ap_recovery()") : helper.index("handle_local_only()")]
-        self.assertIn('timeout 45 nmcli device connect "$AP_INTERFACE"', recovery)
-        self.assertNotIn("connection up id", recovery)
+        daemon = (ROOT / "scripts/sigil-wifi-control.py").read_text(encoding="utf-8")
+        self.assertIn("'{\"command\":\"recover_client\"}'", helper)
+        self.assertNotIn('nmcli device connect "$AP_INTERFACE"', helper)
+        self.assertIn("['nmcli', 'device', 'connect', WIFI_INTERFACE]", daemon)
+        self.assertNotIn("connection up id", helper)
         self.assertIn("LAST_SUCCESSFUL_PROFILE", helper)
 
     def test_automatic_bluetooth_never_blocks_or_untrusts_unrelated_devices(self):

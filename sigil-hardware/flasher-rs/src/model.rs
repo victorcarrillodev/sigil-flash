@@ -91,6 +91,7 @@ pub struct EngineStatus {
 /// Services to enable in the customized image.
 pub const SERVICES_ENABLE: &[&str] = &[
     "NetworkManager",
+    "sigil-wifi-control",
     "bluetooth-panel",
     "bt-connect",
     "sigil-leds",
@@ -120,6 +121,8 @@ pub const CONFIG_COPIES: &[&str] = &[
     "conf/sigil-network.sudoers -> /etc/sudoers.d/sigil-network",
     "conf/sigil.sudoers -> /etc/sudoers.d/sigil",
     "conf/sigil-tmpfiles.conf -> /etc/tmpfiles.d/sigil.conf",
+    "conf/90-sigil-persistent-journal.conf -> /etc/systemd/journald.conf.d/90-sigil-persistent.conf",
+    "conf/sigil-logrotate -> /etc/logrotate.d/sigil",
     "conf/90-sigil-geolocate -> /etc/NetworkManager/dispatcher.d/90-sigil-geolocate",
     "conf/99-sigil-mac-fixed.conf -> /etc/NetworkManager/conf.d/99-sigil-mac-fixed.conf",
     "conf/audio.conf -> /etc/sigil/audio.conf",
@@ -160,6 +163,7 @@ pub const STATE_DIRECTORIES: &[&str] = &[
     "/etc/sigil",
     "/etc/sigil/secrets (root:sigil, 0750)",
     "/etc/sigil/manufacturing (root:root, 0700; temporary input only)",
+    "/var/log/journal (root:systemd-journal, 2755; persistent and bounded)",
 ];
 
 /// State files with owner:group and mode.

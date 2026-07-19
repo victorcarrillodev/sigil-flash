@@ -26,6 +26,10 @@ interface Props {
   setHostname: (val: string) => void;
   serialNumber: string;
   setSerialNumber: (val: string) => void;
+  sigilModel: string;
+  setSigilModel: (val: string) => void;
+  sigilModelVersion: string;
+  setSigilModelVersion: (val: string) => void;
   wifiSsid: string;
   setWifiSsid: (val: string) => void;
   wifiPassword: string;
@@ -83,6 +87,7 @@ export default function Sidebar({
   logPassword, setLogPassword,
   hostname, setHostname,
   serialNumber, setSerialNumber,
+  sigilModel, setSigilModel, sigilModelVersion, setSigilModelVersion,
   wifiSsid, setWifiSsid,
   wifiPassword, setWifiPassword
 }: Props) {
@@ -244,6 +249,14 @@ export default function Sidebar({
           <div className="form-group">
             <label className="form-label">NÚMERO DE SERIE</label>
             <input type="text" className="form-input" value={serialNumber} onChange={(e) => setSerialNumber(e.target.value)} placeholder="Introduce el número de serie" />
+          </div>
+          <div className="form-group">
+            <label className="form-label">MODELO SIGIL</label>
+            <input type="text" className="form-input" value={sigilModel} onChange={(e) => setSigilModel(e.target.value)} placeholder="Sigil-Streamer" />
+          </div>
+          <div className="form-group">
+            <label className="form-label">VERSIÓN DEL MODELO</label>
+            <input type="text" className="form-input" value={sigilModelVersion} onChange={(e) => setSigilModelVersion(e.target.value)} placeholder="v1" />
           </div>
         </div>
       </div>

@@ -59,6 +59,7 @@ LOG_LEVEL="INFO"
 
 # --- Authentication state (set by init_curl_auth) ---
 CURL_CONFIG=""
+OPERATION_ID="none"
 
 # --- Flags ---
 DRY_RUN=false
@@ -89,6 +90,20 @@ log() {
     echo "$line" >> "$LOG"
     # Only print to stderr to avoid capturing in command substitutions
     echo "$line" >&2
+}
+
+log_event() {
+    local event_id="$1"
+    local phase="$2"
+    local result="$3"
+    local error_id="${4:-none}"
+    shift 4 || true
+    local uptime_seconds="0"
+    if [ -r /proc/uptime ]; then
+        IFS=' ' read -r uptime_seconds _ < /proc/uptime || uptime_seconds="0"
+        uptime_seconds="${uptime_seconds%%.*}"
+    fi
+    log "INFO" "SIGIL_EVENT event_id=${event_id} operation_id=${OPERATION_ID} phase=${phase} result=${result} error_id=${error_id} monotonic_ms=$((uptime_seconds * 1000)) $*"
 }
 
 die() {
@@ -138,6 +153,10 @@ load_config() {
     fi
     if [ -z "$API_KEY" ]; then
         log "WARN" "Device API key is not provisioned — fetcher may be rejected by server"
+        log_event "API_AUTH_MATERIAL_MISSING" "credential_load" "failure" \
+            "API_KEY_NOT_PROVISIONED"
+    else
+        log_event "API_AUTH_MATERIAL_READY" "credential_load" "success" "none"
     fi
     [ "${AUTH_MODE}" = "query" ] || die "Invalid AUTH_MODE='${AUTH_MODE}' (expected: query)"
     init_curl_auth
@@ -493,6 +512,69 @@ check_cache_ttl() {
 
 # ── Server communication ────────────────────────────────────────────────────
 
+http_get_to_file() {
+    local endpoint_class="$1"
+    local request_url="$2"
+    local output_file="$3"
+    local http_code="000"
+    local curl_rc=0
+    local -a curl_args=(
+        --silent --show-error --location
+        --connect-timeout "${CONNECT_TIMEOUT_SECONDS}"
+        --max-time "${4}"
+        --output "$output_file"
+        --write-out '%{http_code}'
+    )
+    if [ -n "$CURL_CONFIG" ]; then
+        curl_args+=(--config "$CURL_CONFIG")
+    fi
+
+    if http_code=$(curl "${curl_args[@]}" "$request_url" 2>/dev/null); then
+        curl_rc=0
+    else
+        curl_rc=$?
+    fi
+
+    if [ "$curl_rc" -ne 0 ]; then
+        local error_id="API_SERVER_UNREACHABLE"
+        case "$curl_rc" in
+            6) error_id="DNS_RESOLUTION_FAILED" ;;
+            7) error_id="SERVER_CONNECT_FAILED" ;;
+            28) error_id="SERVER_TIMEOUT" ;;
+            35|51|58|60) error_id="TLS_VALIDATION_FAILED" ;;
+        esac
+        rm -f "$output_file"
+        log_event "HTTP_REQUEST_FAILED" "${endpoint_class}" "failure" \
+            "$error_id" "curl_exit=${curl_rc} http_status=000"
+        return 1
+    fi
+
+    if ! [[ "$http_code" =~ ^[0-9]{3}$ ]]; then
+        rm -f "$output_file"
+        log_event "HTTP_REQUEST_FAILED" "${endpoint_class}" "failure" \
+            "HTTP_STATUS_INVALID" "curl_exit=0 http_status=invalid"
+        return 1
+    fi
+
+    case "$http_code" in
+        2??)
+            log_event "HTTP_REQUEST_COMPLETED" "${endpoint_class}" "success" \
+                "none" "curl_exit=0 http_status=${http_code}"
+            return 0
+            ;;
+        401|403) error_id="API_AUTH_FAILED" ;;
+        404) error_id="API_ENDPOINT_NOT_FOUND" ;;
+        408) error_id="API_REQUEST_TIMEOUT" ;;
+        429) error_id="API_RATE_LIMITED" ;;
+        5??) error_id="API_SERVER_ERROR" ;;
+        *) error_id="API_HTTP_ERROR" ;;
+    esac
+    rm -f "$output_file"
+    log_event "HTTP_REQUEST_FAILED" "${endpoint_class}" "failure" \
+        "$error_id" "curl_exit=0 http_status=${http_code}"
+    return 1
+}
+
 fetch_remote_playlist() {
     local device_id="$1"
     if $DRY_RUN; then
@@ -500,24 +582,16 @@ fetch_remote_playlist() {
         echo '{"dry_run": true, "tracks": []}'
         return 0
     fi
-    local result
-    if [ -n "$CURL_CONFIG" ]; then
-        result=$(curl -s --connect-timeout "${CONNECT_TIMEOUT_SECONDS}" --max-time "${PLAYLIST_FETCH_TIMEOUT_SECONDS}" \
-            --config "$CURL_CONFIG" \
-            "${SERVER_URL}/api/devices/${device_id}/playlist" 2>/dev/null) || {
-            log "WARN" "Failed to fetch playlist from server"
-            echo ""
-            return 1
-        }
-    else
-        result=$(curl -s --connect-timeout "${CONNECT_TIMEOUT_SECONDS}" --max-time "${PLAYLIST_FETCH_TIMEOUT_SECONDS}" \
-            "${SERVER_URL}/api/devices/${device_id}/playlist" 2>/dev/null) || {
-            log "WARN" "Failed to fetch playlist from server"
-            echo ""
-            return 1
-        }
+    local response_file
+    response_file=$(mktemp /tmp/sigil-playlist-response.XXXXXX)
+    chmod 600 "$response_file"
+    if ! http_get_to_file "playlist_request" \
+        "${SERVER_URL}/api/devices/${device_id}/playlist" \
+        "$response_file" "${PLAYLIST_FETCH_TIMEOUT_SECONDS}"; then
+        return 1
     fi
-    echo "$result"
+    cat "$response_file"
+    rm -f "$response_file"
 }
 
 # Compute a stable content hash from the playlist JSON.
@@ -587,21 +661,10 @@ download_track() {
     local download_url="${SERVER_URL}${safe_url}"
 
     log "DEBUG" "Downloading track"
-    if [ -n "$CURL_CONFIG" ]; then
-        if ! curl -s -L --connect-timeout "${CONNECT_TIMEOUT_SECONDS}" --max-time "${DOWNLOAD_TIMEOUT_SECONDS}" \
-            --config "$CURL_CONFIG" \
-            "$download_url" \
-            -o "$output_path" 2>/dev/null; then
-            log "ERROR" "Download failed"
-            return 1
-        fi
-    else
-        if ! curl -s -L --connect-timeout "${CONNECT_TIMEOUT_SECONDS}" --max-time "${DOWNLOAD_TIMEOUT_SECONDS}" \
-            "$download_url" \
-            -o "$output_path" 2>/dev/null; then
-            log "ERROR" "Download failed"
-            return 1
-        fi
+    if ! http_get_to_file "audio_request" "$download_url" "$output_path" \
+        "${DOWNLOAD_TIMEOUT_SECONDS}"; then
+        log "ERROR" "Audio request failed; classification logged"
+        return 1
     fi
 
     if [ ! -s "$output_path" ]; then
@@ -1051,6 +1114,12 @@ cache_fetch_coordination_allowed() {
 }
 
 sync_cycle() {
+    if [ -r /proc/sys/kernel/random/uuid ]; then
+        IFS= read -r OPERATION_ID < /proc/sys/kernel/random/uuid || OPERATION_ID="none"
+    else
+        OPERATION_ID="none"
+    fi
+    log_event "MEDIA_SYNC_REQUESTED" "sync_cycle" "started" "none"
     # Normal continuous cycles check before taking the component lock so they
     # cannot briefly starve the explicit SSH-logout fetch.  The authorized
     # one-shot waits for a pre-existing cycle to release the component lock.
@@ -1079,6 +1148,7 @@ sync_cycle() {
     # Locks released at end of function in reverse order: flock -u 201; flock -u 200
 
     log "INFO" "=== Sync cycle started ==="
+    log_event "MEDIA_SYNC_LOCKS_ACQUIRED" "sync_cycle" "success" "none"
 
     # Recheck both SSH markers after acquiring both locks.  This closes the
     # race between the pre-lock check and lock acquisition.
@@ -1113,18 +1183,20 @@ sync_cycle() {
     # --- Get device identity ---
     local device_id
     device_id=$(get_device_id)
-    log "DEBUG" "Device ID: $device_id"
+    log "DEBUG" "Device identity loaded"
 
     # --- Fetch remote playlist ---
     local remote_json
     remote_json=$(fetch_remote_playlist "$device_id") || {
-        log "WARN" "Server unreachable — will retry next cycle"
+        log "WARN" "Playlist request failed; classified HTTP event logged"
         local failed
         failed=$(read_json_field "$CACHE_META_FILE" "statistics.failed_syncs")
         failed=$((failed + 1))
         update_cache_meta "statistics.failed_syncs" "$failed"
         flock -u 201
         flock -u 200
+        log_event "MEDIA_SYNC_FAILED" "playlist_request" "failure" \
+            "PLAYLIST_REQUEST_FAILED"
         return 1
     }
 
@@ -1470,6 +1542,8 @@ for t in tracks:
     fi
 
     log "INFO" "=== Sync cycle complete (new cache: ${downloaded} tracks, expires ${expires_8601}) ==="
+    log_event "MEDIA_SYNC_COMPLETED" "cache_commit" "success" "none" \
+        "tracks=${downloaded}"
     flock -u 201
     flock -u 200
     return 0
@@ -1506,7 +1580,7 @@ main() {
 
     local device_id
     device_id=$(get_device_id)
-    log "INFO" "Device: ${device_id}"
+    log "INFO" "Device identity loaded"
 
     # Open lock file descriptor for the lifetime of this process
     exec 200>"$LOCK_FILE"

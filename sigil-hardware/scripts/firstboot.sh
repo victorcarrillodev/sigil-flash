@@ -23,6 +23,7 @@ SIGIL_CONFIG_DIR="/etc/sigil"
 LOG_DIR="/var/log/sigil"
 AUDIO_CONF="${SIGIL_CONFIG_DIR}/audio.conf"
 API_KEY_FILE="${SIGIL_API_KEY_FILE:-${SIGIL_CONFIG_DIR}/secrets/device-api-key}"
+ENROLLMENT_KEY_FILE="${SIGIL_ENROLLMENT_KEY_FILE:-${SIGIL_CONFIG_DIR}/secrets/enrollment-key}"
 
 REGISTRATION_FILE="${SIGIL_STATE_DIR}/registration.json"
 AUDIO_MODE_FILE="${SIGIL_STATE_DIR}/audio_mode.json"
@@ -44,6 +45,7 @@ PROVISION_TO_REMOVE=""
 # --- Config defaults ---
 SERVER_URL=""
 API_KEY=""
+ENROLLMENT_KEY=""
 
 # --- Flags ---
 DRY_RUN=false
@@ -80,6 +82,9 @@ load_config() {
     if [ -r "$API_KEY_FILE" ]; then
         IFS= read -r API_KEY < "$API_KEY_FILE" || true
     fi
+    if [ -r "$ENROLLMENT_KEY_FILE" ]; then
+        IFS= read -r ENROLLMENT_KEY < "$ENROLLMENT_KEY_FILE" || true
+    fi
 }
 
 CURL_AUTH_CONFIG=""
@@ -94,6 +99,69 @@ cleanup_curl_auth() {
     if [ -n "$CURL_AUTH_CONFIG" ] && [ -f "$CURL_AUTH_CONFIG" ]; then
         rm -f "$CURL_AUTH_CONFIG"
     fi
+}
+
+provision_device_credential() {
+    if [ -n "$API_KEY" ]; then
+        log "INFO" "Device API credential already provisioned"
+        return 0
+    fi
+    if [ -z "$SERVER_URL" ]; then
+        log "WARN" "SERVER_URL not configured — cannot consume enrollment key"
+        return 1
+    fi
+    if $DRY_RUN; then
+        log "DRY" "Would consume the manufacturing enrollment key and request a permanent credential"
+        return 0
+    fi
+    if [ -z "$ENROLLMENT_KEY" ]; then
+        log "WARN" "Enrollment key missing at ${ENROLLMENT_KEY_FILE} — waiting for manufacturing injection"
+        return 1
+    fi
+    local device_id response token
+    device_id=$(get_device_id)
+    response=$(mktemp /tmp/sigil-provision-response.XXXXXX)
+    chmod 600 "$response"
+    if ! curl -sS -m 15 -o "$response" \
+        -X POST \
+        -H "x-api-key: ${ENROLLMENT_KEY}" \
+        -H "Content-Type: application/json" \
+        -d "{\"device_id\":\"${device_id}\"}" \
+        "${SERVER_URL%/}/api/devices/bootstrap"; then
+        rm -f "$response"
+        log "WARN" "Enrollment provisioning request failed"
+        return 1
+    fi
+    if ! token=$(python3 - "$response" <<'PYEOF'
+import json, sys
+try:
+    document = json.load(open(sys.argv[1], encoding="utf-8"))
+    value = document.get("token")
+except (OSError, ValueError, TypeError):
+    raise SystemExit(1)
+if not isinstance(value, str) or not (32 <= len(value) <= 256):
+    raise SystemExit(1)
+if not value.isascii() or any(character.isspace() for character in value):
+    raise SystemExit(1)
+print(value)
+PYEOF
+    ); then
+        rm -f "$response"
+        log "WARN" "Enrollment provisioning response did not contain a valid token"
+        return 1
+    fi
+    rm -f "$response"
+    local temporary
+    temporary="${API_KEY_FILE}.tmp.$$"
+    umask 077
+    printf '%s\n' "$token" > "$temporary"
+    chown root:sigil "$temporary"
+    chmod 640 "$temporary"
+    mv -f "$temporary" "$API_KEY_FILE"
+    rm -f -- "$ENROLLMENT_KEY_FILE"
+    API_KEY="$token"
+    ENROLLMENT_KEY=""
+    log "INFO" "Device credential provisioned; enrollment key consumed"
 }
 
 get_device_id() {
@@ -638,28 +706,23 @@ create_logrotate() {
     fi
     log "INFO" "Creating logrotate config at ${LOGROTATE_FILE}"
     cat > "$LOGROTATE_FILE" <<'EOF'
-/var/log/sigil/*.log {
-    weekly
-    rotate 4
-    compress
-    delaycompress
-    missingok
-    notifempty
-    copytruncate
-    create 640 sigil sigil
-}
-
+/var/log/sigil/*.log
 /var/log/bt-connect.log
 /var/log/radio-stream.log
-/var/log/audio-manager.log {
-    weekly
+/var/log/audio-manager.log
+/var/log/wifi-fallback.log
+/var/log/wifi-manager.log
+/var/log/sigil-geolocate.log
+/var/log/sigil-wifi-control.log {
+    daily
     rotate 4
+    size 1M
     compress
     delaycompress
     missingok
     notifempty
     copytruncate
-    create 644 sigil sigil
+    create 0640 sigil sigil
 }
 EOF
     chmod 644 "$LOGROTATE_FILE"
@@ -670,7 +733,7 @@ EOF
 
 ensure_run_sigil() {
     local dir="${SIGIL_RUN_DIR:-/run/sigil}"
-    local wanted_owner="sigil"
+    local wanted_owner="root"
     local wanted_group="sigil"
     local wanted_mode="0770"
     local wanted_stat_mode="${wanted_mode#0}"
@@ -989,6 +1052,9 @@ log "INFO" "=== firstboot starting ==="
 
 apply_manufacturing_identity
 provision_panel_credential
+load_config
+provision_device_credential
+load_config
 
 log "INFO" "Device ID: $(get_device_id)"
 log "INFO" "Hostname: $(get_hostname)"
@@ -1007,6 +1073,11 @@ fi
 
 # Step 1: registration state (identity remains canonical in device.conf)
 create_registration_state
+
+# Step 1b: register only after the permanent credential exists.
+init_curl_auth
+register_device
+cleanup_curl_auth
 
 # Step 2: State files
 create_audio_mode_json

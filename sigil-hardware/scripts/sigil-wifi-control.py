@@ -19,7 +19,6 @@ Security invariants
 """
 # ---------------------------------------------------------------------------
 import fcntl
-import grp
 import json
 import logging
 import os
@@ -31,6 +30,7 @@ import sys
 import threading
 import time
 import tempfile
+from datetime import datetime, timezone
 
 # ---------------------------------------------------------------------------
 # Configuration (all overridable via environment for testing)
@@ -76,6 +76,29 @@ _handler.setFormatter(logging.Formatter(
 ))
 logger.addHandler(_handler)
 logger.setLevel(logging.INFO)
+_diagnostic_context = threading.local()
+
+
+def _current_operation_id() -> str:
+    """Return the non-secret correlation ID for the active request."""
+    return getattr(_diagnostic_context, 'operation_id', 'none')
+
+
+def _log_event(event_id: str, phase: str, result: str,
+               error_id: str | None = None, **details: object) -> None:
+    """Write a bounded structured event to stdout for journald capture."""
+    record: dict[str, object] = {
+        'event_id': event_id,
+        'operation_id': _current_operation_id(),
+        'phase': phase,
+        'result': result,
+        'realtime_utc': datetime.now(timezone.utc).isoformat(timespec='milliseconds'),
+        'monotonic_ms': int(time.monotonic() * 1000),
+    }
+    if error_id:
+        record['error_id'] = error_id
+    record.update(details)
+    logger.info('SIGIL_EVENT %s', json.dumps(record, sort_keys=True))
 
 
 # ---------------------------------------------------------------------------
@@ -85,18 +108,24 @@ logger.setLevel(logging.INFO)
 def _acquire_lock(path: str, nonblocking: bool = True) -> int | None:
     """Acquire exclusive flock.  Returns fd (caller MUST release) or None."""
     try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
+        os.makedirs(os.path.dirname(path), mode=0o770, exist_ok=True)
         fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o660)
-    except OSError:
+    except OSError as exc:
+        logger.warning('_acquire_lock: cannot open %s: %s', path, exc)
+        _log_event('WIFI_TRANSITION_LOCK_FAILED', 'transition_lock', 'failure',
+                   'LOCK_OPEN_FAILED', exception=type(exc).__name__)
         return None
     flags = fcntl.LOCK_EX
     if nonblocking:
         flags |= fcntl.LOCK_NB
     try:
         fcntl.flock(fd, flags)
+        _log_event('WIFI_TRANSITION_LOCK_ACQUIRED', 'transition_lock', 'success')
         return fd
     except (IOError, OSError):
         os.close(fd)
+        _log_event('WIFI_TRANSITION_LOCK_BUSY', 'transition_lock', 'failure',
+                   'LOCK_BUSY')
         return None
 
 
@@ -126,26 +155,34 @@ def _read_boot_id() -> str:
 BOOT_ID = _read_boot_id()
 
 
-def _write_inhibit() -> None:
+def _write_inhibit() -> bool:
     """Write inhibit file so wifi-fallback does not start AP during transition."""
     now = int(time.time())
     record = {
         'pid': os.getpid(),
         'boot_id': BOOT_ID,
         'expires_at': now + INHIBIT_TTL,
+        'operation_id': _current_operation_id(),
     }
     try:
         os.makedirs(os.path.dirname(INHIBIT_FILE), exist_ok=True)
         with open(INHIBIT_FILE, 'w', encoding='utf-8') as f:
             json.dump(record, f)
+        os.chmod(INHIBIT_FILE, 0o640)
+        _log_event('WIFI_INHIBIT_CREATED', 'inhibit', 'success')
+        return True
     except OSError as exc:
         logger.error('cannot write inhibit: %s', exc)
+        _log_event('WIFI_INHIBIT_CREATE_FAILED', 'inhibit', 'failure',
+                   'INHIBIT_WRITE_FAILED', exception=type(exc).__name__)
+        return False
 
 
 def _remove_inhibit() -> None:
     """Remove inhibit file after successful handoff or error."""
     try:
         os.unlink(INHIBIT_FILE)
+        _log_event('WIFI_INHIBIT_REMOVED', 'inhibit', 'success')
     except FileNotFoundError:
         pass
     except OSError as exc:
@@ -159,6 +196,8 @@ def _remove_inhibit() -> None:
 def _write_state(state: dict) -> None:
     """Atomically write state file for panel polling."""
     try:
+        state.setdefault('operation_id', _current_operation_id())
+        state.setdefault('monotonic_ms', int(time.monotonic() * 1000))
         os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
         tmp = tempfile.mkstemp(
             prefix='.wifi-control-state.',
@@ -166,6 +205,7 @@ def _write_state(state: dict) -> None:
         )
         fd, tmp_path = tmp
         try:
+            os.fchmod(fd, 0o640)
             with os.fdopen(fd, 'w', encoding='utf-8') as f:
                 json.dump(state, f)
                 f.flush()
@@ -193,8 +233,20 @@ def _stop_ap_services() -> bool:
     drivers (mt7601u, rtl87xx) do NOT automatically switch from AP mode
     to station mode when hostapd exits — rfkill forces a driver reset.
     """
-    subprocess.run(['systemctl', 'stop', 'hostapd'], capture_output=True, timeout=10)
-    subprocess.run(['systemctl', 'stop', 'dnsmasq'], capture_output=True, timeout=10)
+    _log_event('WIFI_AP_STOP_STARTED', 'ap_stop', 'started')
+    hostapd_rc = subprocess.run(
+        ['systemctl', 'stop', 'hostapd'], capture_output=True, timeout=10,
+    ).returncode
+    dnsmasq_rc = subprocess.run(
+        ['systemctl', 'stop', 'dnsmasq'], capture_output=True, timeout=10,
+    ).returncode
+    stop_ok = hostapd_rc == 0 and dnsmasq_rc == 0
+    _log_event(
+        'WIFI_AP_SERVICES_STOPPED' if stop_ok else 'WIFI_AP_SERVICE_STOP_FAILED',
+        'ap_stop', 'success' if stop_ok else 'failure',
+        None if stop_ok else 'AP_SERVICE_STOP_FAILED',
+        hostapd_exit=hostapd_rc, dnsmasq_exit=dnsmasq_rc,
+    )
     subprocess.run(
         ['ip', 'addr', 'flush', 'dev', WIFI_INTERFACE],
         capture_output=True, timeout=5,
@@ -210,11 +262,20 @@ def _stop_ap_services() -> bool:
         capture_output=True, timeout=5,
     )
     time.sleep(1)
+    # NetworkManager may retain the software radio disabled after AP teardown;
+    # explicitly enable it before requesting wlan0 ownership.
+    subprocess.run(
+        ['nmcli', 'radio', 'wifi', 'on'],
+        capture_output=True, timeout=5,
+    )
+    time.sleep(1)
     subprocess.run(
         ['nmcli', 'device', 'set', WIFI_INTERFACE, 'managed', 'yes'],
         capture_output=True, timeout=10,
     )
-    # Wait for NM ownership — poll until state >= 20 (disconnected)
+    # Wait for NM ownership and availability.  GENERAL.STATE=20 means
+    # "unavailable"; activating a profile at that point fails with
+    # "device wlan0 not available because device is not available".
     for _ in range(15):  # 15s max (rfkill may need extra time)
         result = subprocess.run(
             ['nmcli', '-t', '-f', 'GENERAL.STATE', 'device', 'show', WIFI_INTERFACE],
@@ -224,17 +285,22 @@ def _stop_ap_services() -> bool:
         if out and 'unmanaged' not in out:
             try:
                 state_num = int(out.split(':')[-1].split()[0])
-                if state_num >= 20:
+                if state_num >= 30:
+                    _log_event('WIFI_NM_OWNERSHIP_ACQUIRED', 'client_ownership',
+                               'success', nm_state=state_num)
                     return True
             except (ValueError, IndexError):
                 pass
         time.sleep(1)
     logger.warning('NM did not take ownership of %s within timeout', WIFI_INTERFACE)
+    _log_event('WIFI_NM_OWNERSHIP_FAILED', 'client_ownership', 'failure',
+               'NM_OWNERSHIP_TIMEOUT')
     return False
 
 
 def _start_ap_services() -> bool:
     """Start hostapd/dnsmasq for AP mode recovery."""
+    _log_event('WIFI_AP_RESTORE_STARTED', 'ap_restore', 'started')
     subprocess.run(
         ['nmcli', 'device', 'disconnect', WIFI_INTERFACE],
         capture_output=True, timeout=10,
@@ -249,11 +315,7 @@ def _start_ap_services() -> bool:
         capture_output=True, timeout=5,
     )
     subprocess.run(['ip', 'link', 'set', WIFI_INTERFACE, 'up'], capture_output=True, timeout=5)
-    ap_ip = os.environ.get('SIGIL_WIFI_AP_IP', '192.168.4.1')
-    subprocess.run(
-        ['ip', 'addr', 'add', f'{ap_ip}/24', 'dev', WIFI_INTERFACE],
-        capture_output=True, timeout=5,
-    )
+    subprocess.run(['rfkill', 'unblock', 'wifi'], capture_output=True, timeout=5)
     ap_ip = os.environ.get('SIGIL_WIFI_AP_IP', '192.168.4.1')
     subprocess.run(
         ['ip', 'addr', 'add', f'{ap_ip}/24', 'dev', WIFI_INTERFACE],
@@ -266,13 +328,39 @@ def _start_ap_services() -> bool:
     rc2 = subprocess.run(
         ['systemctl', 'start', 'dnsmasq'], capture_output=True, timeout=10,
     ).returncode
-    return rc1 == 0 and rc2 == 0
+    if rc1 != 0 or rc2 != 0:
+        _log_event('WIFI_AP_RESTORE_FAILED', 'ap_restore', 'failure',
+                   'AP_SERVICE_START_FAILED', hostapd_exit=rc1,
+                   dnsmasq_exit=rc2)
+        return False
+    for _ in range(5):
+        if _ap_ready():
+            _log_event('WIFI_AP_ACTIVE', 'ap_restore', 'success')
+            return True
+        time.sleep(1)
+    _log_event('WIFI_AP_RESTORE_FAILED', 'ap_restore', 'failure',
+               'AP_READINESS_TIMEOUT')
+    return False
 
 
-def _create_nm_profile(ssid: str, password: str) -> str | None:
+def _delete_nm_profile(profile_id: str) -> None:
+    """Best-effort cleanup for a profile created by a failed transition."""
+    result = subprocess.run(
+        ['nmcli', 'connection', 'delete', 'id', profile_id],
+        capture_output=True, timeout=10,
+    )
+    _log_event(
+        'WIFI_NEW_PROFILE_CLEANUP', 'profile_cleanup',
+        'success' if result.returncode == 0 else 'failure',
+        None if result.returncode == 0 else 'NM_PROFILE_DELETE_FAILED',
+        nmcli_exit=result.returncode,
+    )
+
+
+def _create_nm_profile(ssid: str, password: str) -> tuple[str, bool] | None:
     """Create or update an NM connection profile with O_NOFOLLOW safety.
 
-    Returns the connection id (SSID) on success, None on failure.
+    Returns ``(connection id, created_by_this_request)`` on success.
     Password is written directly into the .nmconnection file — never argv.
     """
     # Check if a profile for this SSID already exists
@@ -281,6 +369,7 @@ def _create_nm_profile(ssid: str, password: str) -> str | None:
         capture_output=True, text=True, timeout=5,
     )
     exists = ssid in existing.stdout.splitlines()
+    created = False
 
     if not exists:
         # Create minimal connection first
@@ -294,23 +383,9 @@ def _create_nm_profile(ssid: str, password: str) -> str | None:
             capture_output=True, timeout=10,
         ).returncode
         if rc != 0:
-            logger.error('failed to create NM profile for %s', ssid)
+            logger.error('failed to create NM WiFi profile')
             return None
-
-    # Now securely set the PSK using a password file (never in argv)
-    # Create temporary password file with O_NOFOLLOW safety
-    try:
-        run_dir = os.path.dirname(INHIBIT_FILE)
-        os.makedirs(run_dir, exist_ok=True)
-        pw_fd, pw_path = tempfile.mkstemp(
-            prefix='.nmcli-password.', dir=run_dir,
-        )
-        os.fchmod(pw_fd, 0o600)
-        with os.fdopen(pw_fd, 'w', encoding='utf-8') as f:
-            f.write(f'802-11-wireless-security.psk:{password}\n')
-    except OSError as exc:
-        logger.error('cannot create password file: %s', exc)
-        return None
+        created = True
 
     try:
         # Set key-mgmt
@@ -330,7 +405,9 @@ def _create_nm_profile(ssid: str, password: str) -> str | None:
         )
         conn_uuid = uuid_result.stdout.strip()
         if not conn_uuid or len(conn_uuid) != 36:
-            logger.error('cannot resolve UUID for profile %s', ssid)
+            logger.error('cannot resolve UUID for WiFi profile')
+            if created:
+                _delete_nm_profile(ssid)
             return None
 
         # Write the connection file atomically with O_NOFOLLOW safety
@@ -342,16 +419,13 @@ def _create_nm_profile(ssid: str, password: str) -> str | None:
             ['nmcli', 'connection', 'load', conn_path],
             capture_output=True, timeout=10, check=True,
         )
-        logger.info('NM profile %s created/updated securely', ssid)
-        return ssid
+        logger.info('NM WiFi profile created/updated securely')
+        return ssid, created
     except Exception as exc:
         logger.error('NM profile update failed: %s', exc)
+        if created:
+            _delete_nm_profile(ssid)
         return None
-    finally:
-        try:
-            os.unlink(pw_path)
-        except OSError:
-            pass
 
 
 def _write_nmconnection_file(path: str, ssid: str, uuid_str: str,
@@ -443,24 +517,25 @@ def _systemctl_is_active(service: str) -> bool:
     return rc == 0
 
 
+def _ap_ready() -> bool:
+    """Return True only when both AP services and the AP address are ready."""
+    if not (_systemctl_is_active('hostapd') and _systemctl_is_active('dnsmasq')):
+        return False
+    ap_ip = os.environ.get('SIGIL_WIFI_AP_IP', '192.168.4.1')
+    result = subprocess.run(
+        ['ip', '-4', 'addr', 'show', 'dev', WIFI_INTERFACE],
+        capture_output=True, text=True, timeout=5,
+    )
+    return result.returncode == 0 and ap_ip in result.stdout
+
+
 def _ensure_ap() -> bool:
     """Idempotently guarantee AP interface and services.
 
     Checks hostapd + dnsmasq + AP IP.  Only mutates what is missing.
     Never leaves wlan0 down.
     """
-    ap_ip = os.environ.get('SIGIL_WIFI_AP_IP', '192.168.4.1')
-    hostapd_up = _systemctl_is_active('hostapd')
-    dnsmasq_up = _systemctl_is_active('dnsmasq')
-
-    # Check if AP IP is set
-    ip_result = subprocess.run(
-        ['ip', '-4', 'addr', 'show', 'dev', WIFI_INTERFACE],
-        capture_output=True, text=True, timeout=5,
-    )
-    has_ip = ap_ip in ip_result.stdout
-
-    if hostapd_up and dnsmasq_up and has_ip:
+    if _ap_ready():
         return True
 
     # Start full AP transition
@@ -530,6 +605,7 @@ def _internet_reachable() -> bool:
     """Check HTTPS connectivity."""
     rc = subprocess.run(
         ['curl', '--fail', '--silent', '--output', '/dev/null',
+         '--interface', WIFI_INTERFACE,
          '--connect-timeout', str(PROBE_TIMEOUT),
          '--max-time', str(PROBE_TIMEOUT),
          'https://connectivitycheck.gstatic.com/generate_204'],
@@ -552,28 +628,74 @@ def probe_connectivity() -> dict:
     result: dict = {
         'associated': False,
         'ip_acquired': False,
+        'default_route': False,
         'gateway_reachable': False,
         'dns_available': False,
+        'https_reachable': False,
         'local_only': False,
         'internet_online': False,
+        'network_state': 'WIFI_NOT_ASSOCIATED',
+        'milestones': [],
     }
 
     result['associated'] = _nm_associated()
-    result['ip_acquired'] = _has_client_address()
-    route_info = _default_route()
+    if result['associated']:
+        result['ip_acquired'] = _has_client_address()
+    route_info = _default_route() if result['ip_acquired'] else None
 
     if route_info:
+        result['default_route'] = True
         family, gateway = route_info
         result['gateway_reachable'] = _gateway_reachable(family, gateway)
 
-    result['dns_available'] = _dns_available()
-    result['internet_online'] = result['dns_available'] and _internet_reachable()
+    if result['default_route']:
+        result['dns_available'] = _dns_available()
+    result['https_reachable'] = (
+        result['dns_available'] and _internet_reachable()
+    )
+    result['internet_online'] = result['https_reachable']
 
-    # If we have IP + gateway but no Internet, flag local-only
+    # Association plus an address is a valid client-local state even when the
+    # default route, gateway, DNS, or public HTTPS layer is missing.
     if (result['associated'] and result['ip_acquired']
-            and result['gateway_reachable']
             and not result['internet_online']):
         result['local_only'] = True
+
+    milestones: list[str] = []
+    for key, milestone in [
+        ('associated', 'WIFI_ASSOCIATED'),
+        ('ip_acquired', 'IP_ACQUIRED'),
+        ('default_route', 'DEFAULT_ROUTE_PRESENT'),
+        ('gateway_reachable', 'GATEWAY_REACHABLE'),
+        ('dns_available', 'DNS_WORKING'),
+        ('https_reachable', 'HTTPS_REACHABLE'),
+    ]:
+        if result[key]:
+            milestones.append(milestone)
+    result['milestones'] = milestones
+    if result['internet_online']:
+        result['network_state'] = 'INTERNET_ONLINE'
+    elif result['local_only']:
+        result['network_state'] = 'CLIENT_LOCAL_ONLY'
+    elif result['dns_available']:
+        result['network_state'] = 'DNS_WORKING'
+    elif result['gateway_reachable']:
+        result['network_state'] = 'GATEWAY_REACHABLE'
+    elif result['ip_acquired']:
+        result['network_state'] = 'IP_ACQUIRED'
+    elif result['associated']:
+        result['network_state'] = 'WIFI_ASSOCIATED'
+
+    _log_event(
+        'WIFI_CONNECTIVITY_PROBE', 'connectivity_probe', 'complete',
+        associated=result['associated'],
+        ip_acquired=result['ip_acquired'],
+        default_route=result['default_route'],
+        gateway_reachable=result['gateway_reachable'],
+        dns_working=result['dns_available'],
+        https_reachable=result['https_reachable'],
+        network_state=result['network_state'],
+    )
 
     return result
 
@@ -630,6 +752,7 @@ def _background_connect(ssid: str, password: str, op_id: str) -> None:
     Called after the initial accept so the socket can return immediately.
     """
     global _operation_id
+    _diagnostic_context.operation_id = op_id
 
     lock_fd = _acquire_lock(TRANSITION_LOCK, nonblocking=True)
     if lock_fd is None:
@@ -639,12 +762,30 @@ def _background_connect(ssid: str, password: str, op_id: str) -> None:
             'success': False,
             'message': 'WiFi transition lock is held by another process',
         })
+        _log_event('WIFI_TRANSITION_REJECTED', 'transition_lock', 'failure',
+                   'LOCK_BUSY')
+        _operation_id = None
+        delattr(_diagnostic_context, 'operation_id')
         return
 
     # Write inhibit so wifi-fallback does not race
-    _write_inhibit()
+    if not _write_inhibit():
+        _write_state({
+            'operation_id': op_id,
+            'phase': 'failed',
+            'success': False,
+            'message': 'WiFi transition inhibit could not be created',
+            'error_id': 'INHIBIT_WRITE_FAILED',
+        })
+        _release_lock(lock_fd)
+        _operation_id = None
+        delattr(_diagnostic_context, 'operation_id')
+        return
 
     # Phase tracking for reporting
+    profile_id: str | None = None
+    profile_created = False
+
     def _publish(phase: str, message: str, success: bool | None = None,
                  connectivity: dict | None = None) -> None:
         entry: dict = {
@@ -656,6 +797,31 @@ def _background_connect(ssid: str, password: str, op_id: str) -> None:
         if connectivity is not None:
             entry['connectivity'] = connectivity
         _write_state(entry)
+        _log_event(
+            'WIFI_TRANSITION_PHASE', phase, 'complete',
+            success=success,
+            network_state=(connectivity or {}).get('network_state'),
+        )
+
+    def _rollback(message: str, error_id: str) -> None:
+        """Restore AP before exposing a failed client transition."""
+        nonlocal profile_created
+        try:
+            ap_ok = _start_ap_services()
+        except Exception as exc:
+            logger.error('AP rollback raised %s', type(exc).__name__)
+            ap_ok = False
+        if profile_created and profile_id is not None:
+            _delete_nm_profile(profile_id)
+            profile_created = False
+        phase = 'ap_active' if ap_ok else 'AP_RESTORE_FAILED'
+        _publish(phase, message, False)
+        _log_event(
+            'WIFI_CLIENT_ROLLBACK', 'ap_restore',
+            'success' if ap_ok else 'failure',
+            error_id if ap_ok else 'AP_RESTORE_FAILED',
+            trigger_error_id=error_id,
+        )
 
     try:
         _publish('preparing', 'Deteniendo servicios AP…')
@@ -663,25 +829,26 @@ def _background_connect(ssid: str, password: str, op_id: str) -> None:
         # Step 1: Stop AP services, hand wlan0 to NM
         if not _stop_ap_services():
             logger.warning('connect failed: could not transfer wlan0 to NM')
-            _publish('failed', 'Error al transferir wlan0 a NetworkManager', False)
-            _remove_inhibit()
+            _rollback('Error al transferir wlan0 a NetworkManager',
+                      'NM_OWNERSHIP_TIMEOUT')
             return
 
         # Step 2: Create/update NM profile with password (securely)
         _publish('connecting', f'Configurando perfil {ssid}…')
-        profile = _create_nm_profile(ssid, password)
-        if profile is None:
-            logger.warning('connect failed: could not create NM profile for %s', ssid)
-            _publish('failed', f'Error al crear perfil para {ssid}', False)
-            _remove_inhibit()
+        profile_result = _create_nm_profile(ssid, password)
+        if profile_result is None:
+            logger.warning('connect failed: could not create NM profile')
+            _rollback(f'Error al crear perfil para {ssid}',
+                      'NM_PROFILE_CREATE_FAILED')
             return
+        profile_id, profile_created = profile_result
 
         # Step 3: Bring up connection
         _publish('connecting', f'Conectando a {ssid}…')
-        if not _activate_profile(ssid):
-            logger.warning('connect failed: NM could not activate profile for %s', ssid)
-            _publish('failed', f'NetworkManager no pudo conectar a {ssid}', False)
-            _remove_inhibit()
+        if not _activate_profile(profile_id):
+            logger.warning('connect failed: NM could not activate profile')
+            _rollback(f'NetworkManager no pudo conectar a {ssid}',
+                      'NM_PROFILE_ACTIVATION_FAILED')
             return
 
         # Step 4: Stability grace period with connectivity probing
@@ -718,25 +885,23 @@ def _background_connect(ssid: str, password: str, op_id: str) -> None:
                 final_msg = f'Conectado a {ssid} (alcance parcial)'
             _publish('connected', final_msg, True, connectivity)
             logger.info(
-                'connect success: %s associated=%s internet=%s',
-                ssid, connectivity['associated'], connectivity['internet_online'],
+                'connect success: associated=%s internet=%s',
+                connectivity['associated'], connectivity['internet_online'],
             )
         else:
-            _publish(
-                'connected' if connectivity.get('associated') else 'failed',
-                f'Conexión a {ssid} sin IP o sin asociación',
-                connectivity.get('associated', False),
-                connectivity,
-            )
+            _rollback(f'Conexión a {ssid} sin IP o sin asociación',
+                      'CLIENT_ASSOCIATION_OR_IP_FAILED')
 
-    except BaseException as exc:
+    except Exception as exc:
         logger.error('background connect failed: %s', exc)
-        _publish('failed', f'Error interno: {type(exc).__name__}', False)
+        _rollback(f'Error interno: {type(exc).__name__}',
+                  'WIFI_TRANSITION_INTERNAL_ERROR')
     finally:
         # Remove inhibit after handoff (success or failure)
         _remove_inhibit()
         _release_lock(lock_fd)
         _operation_id = None
+        delattr(_diagnostic_context, 'operation_id')
 
 
 def _handle_connect(ssid: str, password: str) -> dict:
@@ -752,7 +917,9 @@ def _handle_connect(ssid: str, password: str) -> dict:
             'message': 'A connection is already in progress',
         }
 
-    op_id = secrets.token_urlsafe(18)
+    op_id = _current_operation_id()
+    if op_id == 'none':
+        op_id = secrets.token_urlsafe(18)
     _operation_id = op_id
 
     # Write initial 'accepted' state
@@ -770,6 +937,7 @@ def _handle_connect(ssid: str, password: str) -> dict:
         name='sigil-wifi-connect',
     )
     worker.start()
+    _log_event('WIFI_TRANSITION_ACCEPTED', 'request_acceptance', 'success')
 
     return {
         'accepted': True, 'state': 'accepted',
@@ -842,13 +1010,45 @@ def _handle_restore_ap() -> dict:
         _release_lock(lock_fd)
 
 
+def _has_saved_wifi() -> bool:
+    """Return True if NetworkManager has at least one wifi connection profile."""
+    result = subprocess.run(
+        ['nmcli', '-t', '-f', 'TYPE', 'connection', 'show'],
+        capture_output=True, text=True, timeout=10,
+    )
+    if result.returncode != 0:
+        _log_event('WIFI_PROFILE_ENUMERATION_FAILED', 'profile_inventory',
+                   'failure', 'NMCLI_PROFILE_LIST_FAILED',
+                   nmcli_exit=result.returncode)
+        return False
+    profile_types = {line.strip().lower() for line in result.stdout.splitlines()}
+    has_wifi = bool(profile_types & {'wifi', '802-11-wireless', 'wireless'})
+    _log_event('WIFI_PROFILE_INVENTORY', 'profile_inventory', 'complete',
+               has_saved_wifi=has_wifi)
+    return has_wifi
+
+
 def _handle_recover_client() -> dict:
     """Socket command: transition from AP to client.
 
     Stops AP, hands wlan0 to NetworkManager, lets NM auto-connect.
     If recovery succeeds: state=connected, accepted=true.
     If any step fails: restores AP, state=ap_active, accepted=false.
+
+    If no saved WiFi networks exist, immediately returns without
+    stopping the AP — avoids a needless AP dropout that would
+    disconnect connected clients.
     """
+    # Quick check: if no saved networks, don't bother
+    if not _has_saved_wifi():
+        _log_event('WIFI_CLIENT_RECOVERY_SKIPPED', 'profile_inventory',
+                   'failure', 'NO_SAVED_WIFI_PROFILE')
+        return {
+            'accepted': False, 'state': 'ap_active',
+            'error': 'no_saved_profile',
+            'message': 'No saved WiFi networks; AP not interrupted',
+        }
+
     lock_fd = _acquire_lock(TRANSITION_LOCK, nonblocking=True)
     if lock_fd is None:
         return {
@@ -857,7 +1057,13 @@ def _handle_recover_client() -> dict:
             'message': 'WiFi transition lock is held by another process',
         }
 
-    _write_inhibit()
+    if not _write_inhibit():
+        _release_lock(lock_fd)
+        return {
+            'accepted': False, 'state': 'ap_active',
+            'error': 'inhibit_failed',
+            'message': 'Recovery inhibited state could not be created',
+        }
     recovery_stabilization = int(os.environ.get(
         'SIGIL_WIFI_RECOVERY_STABILIZATION', '60'
     ))
@@ -872,12 +1078,13 @@ def _handle_recover_client() -> dict:
         logger.info('recover_client: stopping AP')
         # Step 1 — Stop AP, hand wlan0 to NM
         if not _stop_ap_services():
-            _start_ap_services()
+            ap_ok = _start_ap_services()
             msg = 'Recovery failed: could not stop AP services'
             logger.warning('recover_client: %s', msg)
-            _write_state({'phase': 'ap_active', 'success': False, 'message': msg})
-            return {'accepted': False, 'state': 'ap_active',
-                    'error': None, 'message': msg}
+            state = 'ap_active' if ap_ok else 'AP_RESTORE_FAILED'
+            _write_state({'phase': state, 'success': False, 'message': msg})
+            return {'accepted': False, 'state': state,
+                    'error': 'client_handoff_failed', 'message': msg}
 
         _write_state({'phase': 'recovering', 'success': None,
                        'message': 'Recovery: connecting to known network'})
@@ -890,11 +1097,12 @@ def _handle_recover_client() -> dict:
 
         if rc != 0:
             logger.warning('recover_client: nmcli device connect failed (exit=%d)', rc)
-            _start_ap_services()
+            ap_ok = _start_ap_services()
             msg = 'Recovery failed: no suitable profile'
-            _write_state({'phase': 'ap_active', 'success': False, 'message': msg})
-            return {'accepted': False, 'state': 'ap_active',
-                    'error': None, 'message': msg}
+            state = 'ap_active' if ap_ok else 'AP_RESTORE_FAILED'
+            _write_state({'phase': state, 'success': False, 'message': msg})
+            return {'accepted': False, 'state': state,
+                    'error': 'nm_profile_activation_failed', 'message': msg}
 
         # Step 3 — Stability check with layered connectivity probes
         logger.info('recover_client: probing stability')
@@ -916,7 +1124,8 @@ def _handle_recover_client() -> dict:
             connectivity = probe_connectivity()
 
         # Step 4 — Determine result
-        if connectivity and connectivity['associated']:
+        if (connectivity and connectivity['associated']
+                and connectivity['ip_acquired']):
             state_msg = ('internet_online' if connectivity.get('internet_online')
                          else 'local_only' if connectivity.get('local_only')
                          else 'ip_acquired')
@@ -931,11 +1140,12 @@ def _handle_recover_client() -> dict:
 
         # Recovery failed — restore AP
         logger.warning('recover_client: no connectivity after recovery')
-        _start_ap_services()
+        ap_ok = _start_ap_services()
         msg = 'Recovery failed: no connectivity'
-        _write_state({'phase': 'ap_active', 'success': False, 'message': msg})
-        return {'accepted': False, 'state': 'ap_active',
-                'error': None, 'message': msg}
+        state = 'ap_active' if ap_ok else 'AP_RESTORE_FAILED'
+        _write_state({'phase': state, 'success': False, 'message': msg})
+        return {'accepted': False, 'state': state,
+                'error': 'client_association_or_ip_failed', 'message': msg}
 
     finally:
         _remove_inhibit()
@@ -1032,6 +1242,7 @@ def _handle_client(data: bytes) -> bytes:
         return json.dumps({
             'accepted': False, 'state': None,
             'error': 'bad_request', 'message': str(exc),
+            'operation_id': _current_operation_id(),
         }).encode()
 
     command = payload.get('command', '')
@@ -1084,6 +1295,18 @@ def _handle_client(data: bytes) -> bytes:
             'message': f'unknown command: {command}',
         }
 
+    response.setdefault('operation_id', _current_operation_id())
+    event_command = command if command in {
+        'scan', 'connect', 'ensure_ap', 'restore_ap', 'recover_client',
+        'deactivate_profile', 'status', 'probe', 'ping',
+    } else 'unknown'
+    _log_event(
+        'WIFI_SOCKET_REQUEST_COMPLETED', 'socket_dispatch', 'complete',
+        command=event_command,
+        accepted=bool(response.get('accepted')),
+        error_id=response.get('error'),
+        final_state=response.get('state'),
+    )
     return json.dumps(response).encode()
 
 
@@ -1092,32 +1315,44 @@ def _run_socket_server() -> None:
 
     Socket is created with 0o660 permissions (root:sigil) so only root
     and the sigil user can connect.  Each request is validated with
-    SO_PEERCRED (uid == 0 enforced) and bounded to MAX_REQUEST_SIZE.
+    SO_PEERCRED and bounded to MAX_REQUEST_SIZE.
     """
     try:
         os.unlink(SOCKET_PATH)
     except FileNotFoundError:
         pass
 
-    os.makedirs(os.path.dirname(SOCKET_PATH), exist_ok=True)
+    os.makedirs(os.path.dirname(SOCKET_PATH), mode=0o770, exist_ok=True)
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    server.bind(SOCKET_PATH)
-    server.listen(5)
-    # Strict socket permissions: root:rw-, sigil:rw-, others:---
-    os.chmod(SOCKET_PATH, 0o660)
-    sigil_gid = 0
+    old_umask = os.umask(0o117)
     try:
-        sigil_gid = grp.getgrnam(SIGIL_GROUP).gr_gid
-        os.chown(SOCKET_PATH, 0, sigil_gid)  # root:sigil
-    except KeyError:
-        logger.warning('group %s not found; socket owned by root:root', SIGIL_GROUP)
-        os.chown(SOCKET_PATH, 0, 0)
+        # systemd starts the root process with primary Group=sigil, so bind()
+        # creates root:sigil directly.  Avoiding chown also avoids CAP_CHOWN.
+        server.bind(SOCKET_PATH)
+    finally:
+        os.umask(old_umask)
+    os.chmod(SOCKET_PATH, 0o660)
+    server.listen(5)
+    sigil_gid = os.getegid()
 
     logger.info('listening on %s (mode 0660 root:%s)', SOCKET_PATH, SIGIL_GROUP)
+    _log_event('WIFI_CONTROL_READY', 'socket_startup', 'success',
+               socket_mode='0660')
+
+    # Socket availability must not depend on AP startup succeeding.
+    startup_worker = threading.Thread(
+        target=_startup_ap_if_needed,
+        daemon=True,
+        name='sigil-wifi-startup-ap',
+    )
+    startup_worker.start()
 
     while True:
+        conn: socket.socket | None = None
         try:
             conn, _addr = server.accept()
+            conn.settimeout(5)
+            _diagnostic_context.operation_id = secrets.token_urlsafe(18)
             # SO_PEERCRED validation: accept root (uid=0) OR any sigil group member
             try:
                 cred = conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED,
@@ -1125,22 +1360,128 @@ def _run_socket_server() -> None:
                 pid, uid, gid = struct.unpack('3i', cred)
             except OSError:
                 logger.warning('could not read SO_PEERCRED; rejecting')
-                conn.close()
+                _log_event('WIFI_SOCKET_PEER_REJECTED', 'socket_accept',
+                           'failure', 'PEER_CREDENTIALS_UNAVAILABLE')
                 continue
             if uid != 0 and gid != sigil_gid:
                 logger.warning('rejected connection from uid=%d gid=%d (pid=%d)',
                                uid, gid, pid)
-                conn.close()
+                _log_event('WIFI_SOCKET_PEER_REJECTED', 'socket_accept',
+                           'failure', 'PEER_NOT_AUTHORIZED', uid=uid, gid=gid)
                 continue
 
             # Bounded request size
-            data = conn.recv(MAX_REQUEST_SIZE)
+            data = conn.recv(MAX_REQUEST_SIZE + 1)
+            if len(data) > MAX_REQUEST_SIZE:
+                _log_event('WIFI_SOCKET_REQUEST_REJECTED', 'socket_accept',
+                           'failure', 'REQUEST_TOO_LARGE')
+                conn.sendall(json.dumps({
+                    'accepted': False, 'state': None,
+                    'error': 'request_too_large',
+                    'message': 'request exceeds maximum size',
+                    'operation_id': _current_operation_id(),
+                }).encode())
+                continue
             if data:
+                _log_event('WIFI_SOCKET_REQUEST_ACCEPTED', 'socket_accept',
+                           'success', uid=uid, gid=gid)
                 response = _handle_client(data)
                 conn.sendall(response)
-            conn.close()
-        except (OSError, UnicodeError) as exc:
+        except (OSError, UnicodeError, ValueError) as exc:
             logger.warning('socket error: %s', exc)
+            _log_event('WIFI_SOCKET_ERROR', 'socket_dispatch', 'failure',
+                       'SOCKET_IO_ERROR', exception=type(exc).__name__)
+        finally:
+            if conn is not None:
+                conn.close()
+            if hasattr(_diagnostic_context, 'operation_id'):
+                delattr(_diagnostic_context, 'operation_id')
+
+
+# ---------------------------------------------------------------------------
+# Startup AP auto-start
+# ---------------------------------------------------------------------------
+
+def _startup_ap_if_needed() -> None:
+    """Auto-start AP mode at boot if no saved WiFi connections exist.
+
+    Runs once at daemon startup.  This makes the AP appear immediately
+    on first boot / factory-reset systems without waiting for wifi-fallback
+    to detect client failure and send restore_ap (~2 minutes).
+
+    Each step is logged to /var/log/sigil-wifi-control.log for diagnostics.
+    """
+    _diagnostic_context.operation_id = f'startup-{secrets.token_urlsafe(12)}'
+    try:
+        # Wait briefly for NetworkManager and the interface to settle.
+        time.sleep(3)
+        logger.info('_startup_ap_if_needed: checking saved WiFi connections')
+
+        has_saved = _has_saved_wifi()
+        if has_saved:
+            logger.info('saved WiFi connections found; startup AP not required')
+            _log_event('WIFI_STARTUP_CLIENT_PROFILES_FOUND', 'startup_policy',
+                       'complete')
+            return
+
+        logger.info('no saved WiFi connections; auto-starting AP mode')
+        lock_fd = _acquire_lock(TRANSITION_LOCK, nonblocking=True)
+        if lock_fd is None:
+            logger.warning('could not acquire lock for startup AP; skipping')
+            return
+        try:
+            logger.info('_start_ap_services: beginning AP startup sequence')
+            ok = _start_ap_services()
+            phase = 'ap_active' if ok else 'AP_RESTORE_FAILED'
+            message = 'startup AP started' if ok else 'startup AP failed'
+            _write_state({
+                'phase': phase,
+                'success': ok,
+                'message': message,
+            })
+            logger.info('startup AP: %s', 'active' if ok else 'failed')
+            if not ok:
+                logger.warning('startup AP FAILED — check hostapd/dnsmasq status')
+        finally:
+            _release_lock(lock_fd)
+    finally:
+        delattr(_diagnostic_context, 'operation_id')
+
+
+# ---------------------------------------------------------------------------
+# Directory fix
+# ---------------------------------------------------------------------------
+
+def _ensure_run_dir() -> bool:
+    """Validate the tmpfiles contract without broadening permissions."""
+    run_dir = os.path.dirname(SOCKET_PATH)  # /run/sigil
+    try:
+        if not os.path.isdir(run_dir):
+            old_umask = os.umask(0o007)
+            try:
+                os.makedirs(run_dir, mode=0o770, exist_ok=True)
+            finally:
+                os.umask(old_umask)
+        metadata = os.stat(run_dir)
+    except OSError as exc:
+        logger.error('_ensure_run_dir: cannot inspect %s: %s', run_dir, exc)
+        _log_event('WIFI_RUNTIME_DIR_INVALID', 'runtime_contract', 'failure',
+                   'RUNTIME_DIR_UNAVAILABLE', exception=type(exc).__name__)
+        return False
+
+    mode = metadata.st_mode & 0o777
+    expected_gid = os.getegid()
+    if metadata.st_uid != 0 or metadata.st_gid != expected_gid or mode != 0o770:
+        logger.error('_ensure_run_dir: ownership/mode contract mismatch')
+        _log_event(
+            'WIFI_RUNTIME_DIR_INVALID', 'runtime_contract', 'failure',
+            'RUNTIME_DIR_METADATA_MISMATCH', mode=f'{mode:04o}',
+            owner_uid=metadata.st_uid, owner_gid=metadata.st_gid,
+        )
+        return False
+    _log_event('WIFI_RUNTIME_DIR_READY', 'runtime_contract', 'success',
+               mode='0770')
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -1148,7 +1489,11 @@ def _run_socket_server() -> None:
 # ---------------------------------------------------------------------------
 
 def main() -> int:
+    _diagnostic_context.operation_id = f'boot-{secrets.token_urlsafe(12)}'
     logger.info('starting sigil-wifi-control (single-owner WiFi daemon)')
+
+    if not _ensure_run_dir():
+        return 1
 
     # Disable power save at startup, behind TRANSITION_LOCK
     lock_fd = _acquire_lock(TRANSITION_LOCK, nonblocking=True)

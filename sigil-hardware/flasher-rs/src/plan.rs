@@ -144,6 +144,18 @@ pub fn build_plan(
             .collect(),
     });
 
+    sections.push(PlanSection {
+        title: "PERSISTENT DIAGNOSTICS".into(),
+        lines: vec![
+            "would enable Storage=persistent after the vendor volatile override".into(),
+            "would cap persistent journal use at 64 MiB and keep 128 MiB free".into(),
+            "would cap journal files at 8 MiB with a maximum retention of 14 days".into(),
+            "would rotate legacy SIGIL logs daily, at 1 MiB, retaining four compressed files"
+                .into(),
+            "service stdout and stderr would be captured by journald without credentials".into(),
+        ],
+    });
+
     // ── 8. PulseAudio Config ──────────────────────────────────────────
     sections.push(PlanSection {
         title: "PULSEAUDIO CONFIG".into(),
@@ -330,6 +342,35 @@ mod tests {
     use super::*;
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn plan_reports_the_bounded_persistent_diagnostics_contract() {
+        let plan = build_plan(
+            std::path::Path::new("/tmp/base.img"),
+            None,
+            std::path::Path::new("/tmp/payload"),
+            &None,
+            &None,
+            &None,
+            &None,
+        );
+        let diagnostics = plan
+            .sections
+            .iter()
+            .find(|section| section.title == "PERSISTENT DIAGNOSTICS")
+            .expect("persistent diagnostics section");
+
+        assert_eq!(
+            diagnostics.lines,
+            vec![
+                "would enable Storage=persistent after the vendor volatile override",
+                "would cap persistent journal use at 64 MiB and keep 128 MiB free",
+                "would cap journal files at 8 MiB with a maximum retention of 14 days",
+                "would rotate legacy SIGIL logs daily, at 1 MiB, retaining four compressed files",
+                "service stdout and stderr would be captured by journald without credentials",
+            ]
+        );
+    }
 
     #[test]
     fn plan_displays_all_non_secret_identity_fields() {

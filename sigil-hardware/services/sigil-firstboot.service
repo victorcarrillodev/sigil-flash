@@ -1,7 +1,8 @@
 [Unit]
 Description=Sigil first boot identity and secret provisioning
-After=local-fs.target
-Before=bluetooth-panel.service bt-connect.service radio-fetcher.service audio-manager.service audio-player.service wifi-fallback.service
+After=local-fs.target network-online.target
+Wants=network-online.target
+Before=sigil-wifi-control.service bluetooth-panel.service bt-connect.service radio-fetcher.service audio-manager.service audio-player.service wifi-fallback.service
 ConditionPathExists=!/var/lib/sigil/firstboot_completed.json
 
 [Service]
@@ -9,6 +10,8 @@ Type=oneshot
 ExecStart=/usr/local/bin/firstboot.sh --once
 ExecStartPost=-/bin/systemctl disable sigil-firstboot.service
 RemainAfterExit=yes
+Restart=on-failure
+RestartSec=30
 StandardOutput=journal
 StandardError=journal
 
