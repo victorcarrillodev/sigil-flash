@@ -590,7 +590,32 @@ fetch_remote_playlist() {
         "$response_file" "${PLAYLIST_FETCH_TIMEOUT_SECONDS}"; then
         return 1
     fi
-    cat "$response_file"
+    # Accept the standard 64-hex digest and the common sha256:<digest>
+    # representation returned by some server versions. Persist only the
+    # canonical digest so validation, cache reuse and active-playlist hashes
+    # all agree.
+    if ! python3 - "$response_file" <<'PYEOF'
+import json, re, sys
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    document = json.load(handle)
+tracks = document if isinstance(document, list) else document.get("tracks", [])
+if not isinstance(tracks, list):
+    raise SystemExit(1)
+for track in tracks:
+    if not isinstance(track, dict):
+        continue
+    digest = track.get("sha256")
+    if isinstance(digest, str) and digest.lower().startswith("sha256:"):
+        digest = digest.split(":", 1)[1]
+    if isinstance(digest, str):
+        track["sha256"] = digest.lower()
+print(json.dumps(document, separators=(",", ":"), ensure_ascii=False))
+PYEOF
+    then
+        rm -f "$response_file"
+        return 1
+    fi
     rm -f "$response_file"
 }
 

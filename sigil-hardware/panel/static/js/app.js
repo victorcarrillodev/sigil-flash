@@ -441,10 +441,16 @@ document.getElementById('bt-table').addEventListener('click', function(e) {
     e.preventDefault();
     stopBluetoothScan();
     setButtonLoading(target, true);
-    setBluetoothRowProgress(target, 'Conectando y verificando A2DP…');
-    setResult('bt-result', 'Conectando…', 'loading');
+    setBluetoothRowProgress(target, 'Emparejando y conectando A2DP…');
+    setResult('bt-result', 'Emparejando y conectando…', 'loading');
 
-    csrfFetch('/connect/' + encodeURIComponent(mac), { method: 'POST' })
+    // A freshly flashed device has no BlueZ pairing state.  The pair endpoint
+    // is intentionally idempotent for an already-paired speaker and completes
+    // the subsequent trusted-connect-A2DP sequence in one operation.
+    csrfFetch('/pair', {
+      method: 'POST',
+      body: 'mac=' + encodeURIComponent(mac),
+    })
       .then(r => r.json())
       .then(d => {
         setResult('bt-result', d.message || 'Conectado', d.success ? 'success' : 'error');

@@ -212,7 +212,7 @@ impl FlashService {
                 "La ruta del archivo de imagen no existe".to_string(),
             ));
         }
-        let manufacturing_config = manufacturing_config_with_api_key(config, &self.api_key_file)?;
+        let manufacturing_config = manufacturing_config_with_api_key(config, &self.api_key_file).await?;
         validate_bundle_for_image(
             &image_p,
             &self.hardware_payload,
@@ -546,14 +546,106 @@ fn validate_device_config(config: &DeviceConfig) -> AppResult<()> {
     Ok(())
 }
 
-fn manufacturing_config_with_api_key(
+async fn manufacturing_config_with_api_key(
     config: &DeviceConfig,
     api_key_file: &Path,
 ) -> AppResult<DeviceConfig> {
     let mut manufacturing_config = config.clone();
-    manufacturing_config.api_key = Some(read_local_device_api_key(api_key_file)?);
+    let _ = api_key_file;
+    manufacturing_config.api_key = Some(obtain_enrollment_key().await?);
     validate_device_config(&manufacturing_config)?;
     Ok(manufacturing_config)
+}
+
+fn manufacturing_server_url() -> AppResult<String> {
+    if let Ok(value) = std::env::var("SIGIL_SERVER_URL") {
+        return normalize_server_url(value);
+    }
+    let config_path = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|path| path.join(".config/sigil-flash/config.toml"));
+    if let Some(path) = config_path {
+        if let Ok(contents) = std::fs::read_to_string(path) {
+            for line in contents.lines() {
+                if let Some(value) = line.trim().strip_prefix("server_url") {
+                    if let Some((_, value)) = value.split_once('=') {
+                        return normalize_server_url(value.trim().trim_matches('"').to_string());
+                    }
+                }
+            }
+        }
+    }
+    Err(AppError::Validation(
+        "Falta server_url: define SIGIL_SERVER_URL o ~/.config/sigil-flash/config.toml".into(),
+    ))
+}
+
+fn normalize_server_url(value: String) -> AppResult<String> {
+    let value = value.trim_end_matches('/').to_string();
+    if value.starts_with("https://") || value.starts_with("http://") {
+        Ok(value)
+    } else {
+        Err(AppError::Validation("server_url debe usar http:// o https://".into()))
+    }
+}
+
+async fn keyring_password() -> AppResult<String> {
+    let output = tokio::process::Command::new("secret-tool")
+        .args(["lookup", "service", "sigil-flash", "username", "fabrica"])
+        .output()
+        .await
+        .map_err(|error| AppError::Validation(format!("No se pudo ejecutar secret-tool: {error}. Instala libsecret-tools")))?;
+    if !output.status.success() {
+        return Err(AppError::Validation(
+            "No hay credencial de fabricación en GNOME Keyring para service=sigil-flash username=fabrica".into(),
+        ));
+    }
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if value.is_empty() {
+        return Err(AppError::Validation("La credencial de fabricación está vacía".into()));
+    }
+    Ok(value)
+}
+
+async fn obtain_enrollment_key() -> AppResult<String> {
+    #[derive(serde::Deserialize)]
+    struct Login { token: String }
+    #[derive(serde::Deserialize)]
+    struct EnrollmentKey { enrollment_key: String }
+    #[derive(serde::Deserialize)]
+    struct EnrollmentResponse { keys: Vec<EnrollmentKey> }
+
+    let server_url = manufacturing_server_url()?;
+    let password = keyring_password().await?;
+    let client = reqwest::Client::builder().timeout(Duration::from_secs(20)).build()
+        .map_err(|error| AppError::Flash(format!("No se pudo crear cliente HTTPS: {error}")))?;
+    let login_body = serde_json::to_string(&serde_json::json!({"username": "fabrica", "password": password}))
+        .map_err(|error| AppError::Internal(format!("No se pudo serializar login: {error}")))?;
+    let login = client.post(format!("{server_url}/api/login"))
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .body(login_body)
+        .send().await.map_err(|error| AppError::Flash(format!("Login de fabricación falló: {error}")))?;
+    if !login.status().is_success() {
+        return Err(AppError::Validation(format!("Login de fabricación rechazado: HTTP {}", login.status())));
+    }
+    let token = serde_json::from_str::<Login>(&login.text().await
+        .map_err(|_| AppError::Validation("No se pudo leer respuesta de login".into()))?)
+        .map_err(|_| AppError::Validation("Login de fabricación no devolvió un token válido".into()))?.token;
+    let response = client.post(format!("{server_url}/api/admin/enrollment-keys"))
+        .bearer_auth(&token)
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .body("{}")
+        .send().await.map_err(|error| AppError::Flash(format!("Solicitud de enrollment key falló: {error}")))?;
+    if !response.status().is_success() {
+        return Err(AppError::Validation(format!("Servidor rechazó enrollment key: HTTP {}", response.status())));
+    }
+    let document = serde_json::from_str::<EnrollmentResponse>(&response.text().await
+        .map_err(|_| AppError::Validation("No se pudo leer respuesta de enrollment key".into()))?)
+        .map_err(|_| AppError::Validation("Respuesta de enrollment key inválida".into()))?;
+    let key = document.keys.into_iter().next().map(|entry| entry.enrollment_key)
+        .ok_or_else(|| AppError::Validation("Servidor no devolvió enrollment_key".into()))?;
+    validate_device_api_key(Some(&key))?;
+    Ok(key)
 }
 
 fn validate_device_api_key(api_key: Option<&str>) -> AppResult<()> {
@@ -2283,6 +2375,9 @@ mod tests {
             ssh_enabled: true,
             rpi_model: Some("Raspberry Pi 4 (64-bit)".to_string()),
             serial_number: Some("SIGIL-TEST-0001".to_string()),
+            device_id: None,
+            sigil_model: Some("Sigil-Streamer".to_string()),
+            sigil_model_version: Some("v1".to_string()),
             panel_pin: Some("80427159".to_string()),
             api_key: Some("synthetic-device-api-key".to_string()),
         }
@@ -2357,7 +2452,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn manufacturing_config_loads_api_key_from_local_artifact() {
+    fn local_enrollment_key_can_be_read_for_recovery() {
         use std::os::unix::fs::PermissionsExt;
 
         let root = isolated_lock_dir("manufacturing-config-api-key");
@@ -2365,14 +2460,9 @@ mod tests {
         std::fs::write(&path, "synthetic-enrollment-key\n").expect("write enrollment key fixture");
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
             .expect("set private mode");
-        let mut config = manufacturing_config();
-        config.api_key = None;
-
-        let prepared = manufacturing_config_with_api_key(&config, &path).expect("prepare config");
-
         assert_eq!(
-            prepared.api_key.as_deref(),
-            Some("synthetic-enrollment-key")
+            read_local_device_api_key(&path).expect("read recovery enrollment key"),
+            "synthetic-enrollment-key"
         );
         let _ = std::fs::remove_dir_all(root);
     }

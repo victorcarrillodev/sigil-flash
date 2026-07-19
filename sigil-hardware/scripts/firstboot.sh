@@ -118,17 +118,26 @@ provision_device_credential() {
         log "WARN" "Enrollment key missing at ${ENROLLMENT_KEY_FILE} — waiting for manufacturing injection"
         return 1
     fi
-    local device_id response token
+    local device_id response request_body token
     device_id=$(get_device_id)
     response=$(mktemp /tmp/sigil-provision-response.XXXXXX)
-    chmod 600 "$response"
+    request_body=$(mktemp /tmp/sigil-provision-request.XXXXXX)
+    chmod 600 "$response" "$request_body"
+    if ! python3 - "$device_id" "$ENROLLMENT_KEY" > "$request_body" <<'PYEOF'
+import json, sys
+print(json.dumps({"device_id": sys.argv[1], "enrollment_key": sys.argv[2]}))
+PYEOF
+    then
+        rm -f -- "$response" "$request_body"
+        log "WARN" "Could not prepare enrollment provisioning request"
+        return 1
+    fi
     if ! curl -sS -m 15 -o "$response" \
         -X POST \
-        -H "x-api-key: ${ENROLLMENT_KEY}" \
         -H "Content-Type: application/json" \
-        -d "{\"device_id\":\"${device_id}\"}" \
+        --data-binary "@${request_body}" \
         "${SERVER_URL%/}/api/devices/bootstrap"; then
-        rm -f "$response"
+        rm -f -- "$response" "$request_body"
         log "WARN" "Enrollment provisioning request failed"
         return 1
     fi
@@ -146,11 +155,11 @@ if not value.isascii() or any(character.isspace() for character in value):
 print(value)
 PYEOF
     ); then
-        rm -f "$response"
+        rm -f -- "$response" "$request_body"
         log "WARN" "Enrollment provisioning response did not contain a valid token"
         return 1
     fi
-    rm -f "$response"
+    rm -f -- "$response" "$request_body"
     local temporary
     temporary="${API_KEY_FILE}.tmp.$$"
     umask 077

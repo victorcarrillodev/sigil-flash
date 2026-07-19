@@ -50,6 +50,8 @@ pub struct DeviceConfig {
     pub rpi_model: Option<String>,
     #[serde(rename = "serialNumber")]
     pub serial_number: Option<String>,
+    #[serde(rename = "deviceId", default)]
+    pub device_id: Option<String>,
     #[serde(rename = "sigilModel", default)]
     pub sigil_model: Option<String>,
     #[serde(rename = "sigilModelVersion", default)]
