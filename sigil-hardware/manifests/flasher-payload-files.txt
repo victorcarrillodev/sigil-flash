@@ -46,6 +46,7 @@ services/audio-manager.service
 services/audio-player.service
 services/bluetooth-panel.service
 services/bt-connect.service
+services/sigil-pulseaudio.service
 services/radio-fetcher.service
 services/radio-stream.service
 services/sigil-firstboot.service

@@ -7,6 +7,7 @@
       "sigil-wifi-control",
       "bluetooth-panel",
       "bt-connect",
+      "sigil-pulseaudio",
       "radio-fetcher",
       "audio-manager",
       "audio-player",

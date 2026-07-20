@@ -1,7 +1,7 @@
 [Unit]
 Description=Sigil Audio Manager — orchestrates radio-fetcher and audio-player
-After=network-online.target pulseaudio.service bt-connect.service
-Wants=network-online.target pulseaudio.service bt-connect.service
+After=network-online.target sigil-pulseaudio.service bt-connect.service
+Wants=network-online.target sigil-pulseaudio.service bt-connect.service
 StartLimitIntervalSec=0
 
 [Service]

@@ -1,0 +1,26 @@
+[Unit]
+Description=SIGIL PulseAudio readiness for Bluetooth audio
+After=sigil-firstboot.service bluetooth.service bluetooth.target sound.target
+Wants=bluetooth.service
+Before=bt-connect.service audio-manager.service audio-player.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=sigil
+Group=sigil
+PermissionsStartOnly=true
+Environment=HOME=/home/sigil
+Environment=XDG_RUNTIME_DIR=/run/user/1001
+Environment=PULSE_RUNTIME_PATH=/run/user/1001/pulse
+Environment=PULSE_SERVER=unix:/run/user/1001/pulse/native
+ExecStartPre=/usr/bin/install -d -o sigil -g sigil -m 0700 /run/user/1001
+ExecStartPre=/usr/bin/install -d -o sigil -g sigil -m 0700 /home/sigil/.config/pulse
+ExecStart=/usr/bin/pulseaudio --daemonize=no --log-target=journal
+Restart=always
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

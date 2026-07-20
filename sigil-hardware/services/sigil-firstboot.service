@@ -2,7 +2,7 @@
 Description=Sigil first boot identity and secret provisioning
 After=local-fs.target network-online.target
 Wants=network-online.target
-Before=sigil-wifi-control.service bluetooth-panel.service bt-connect.service radio-fetcher.service audio-manager.service audio-player.service wifi-fallback.service
+Before=sigil-pulseaudio.service sigil-wifi-control.service bluetooth-panel.service bt-connect.service radio-fetcher.service audio-manager.service audio-player.service wifi-fallback.service
 ConditionPathExists=!/var/lib/sigil/firstboot_completed.json
 
 [Service]
