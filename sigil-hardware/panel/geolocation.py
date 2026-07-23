@@ -11,6 +11,7 @@ import grp
 import pwd
 import socket
 import stat
+import statistics
 import sys
 import tempfile
 import time
@@ -18,7 +19,17 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-from wifi import WifiScanBusy, scan_wifi_aps
+from wifi import (
+    WIFI_SCAN_SOCKET_TIMEOUT_SECONDS,
+    WifiControlUnavailable,
+    WifiScanBusy,
+    WifiScanTimeout,
+    _bssid_rejection_reason,
+    _frequency_to_channel,
+    _is_locally_administered_bssid,
+    _normalize_bssid,
+    scan_wifi_aps,
+)
 from device_identity import resolve_device_id
 
 logger = logging.getLogger(__name__)
@@ -29,6 +40,16 @@ STATE_DIR = "/var/lib/sigil"
 STATE_FILE = os.path.join(STATE_DIR, "geolocation_state.json")
 LOCK_FILE = "/var/run/sigil/geolocate.lock"
 SCHEMA_VERSION = "1.0"
+
+MAX_SCAN_SAMPLES = 3
+SCAN_SAMPLE_DELAY_SECONDS = 0.75
+SCAN_TOTAL_BUDGET_SECONDS = 15.0
+SCAN_AGGREGATION_RESERVE_SECONDS = 0.5
+MIN_QUALITY_BSSIDS = 4
+MIN_STRONG_BSSIDS = 3
+STRONG_RSSI_DBM = -85
+MIN_RSSI_DBM = -92
+DEFAULT_SHORT_COOLDOWN_SECONDS = 60
 
 
 def _load_config(path: str) -> dict:
@@ -65,6 +86,7 @@ def _read_state() -> dict:
             "last_result": "",
             "last_http_status": 0,
             "last_ap_count": 0,
+            "last_retryable": False,
         }
 
 
@@ -125,6 +147,7 @@ def _write_state(state: dict) -> None:
         "last_result",
         "last_http_status",
         "last_ap_count",
+        "last_retryable",
     )
     document = {"_schema_version": SCHEMA_VERSION}
     document.update({key: state[key] for key in allowed_fields if key in state})
@@ -146,34 +169,231 @@ def _acquire_lock() -> bool:
         return False
 
 
+def _most_common(values: list[int]) -> int | None:
+    if not values:
+        return None
+    counts: dict[int, int] = {}
+    for value in values:
+        counts[value] = counts.get(value, 0) + 1
+    return max(counts, key=lambda value: (counts[value], -values.index(value)))
+
+
+def _normalize_sample(sample: list[dict]) -> list[dict]:
+    """Defensively normalize and deduplicate one scan without retaining SSIDs."""
+    normalized: dict[str, dict] = {}
+    for candidate in sample:
+        bssid = _normalize_bssid(str(candidate.get("bssid", "")))
+        if _bssid_rejection_reason(bssid):
+            continue
+        try:
+            signal_dbm = int(candidate["signal_dbm"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if signal_dbm >= 0 or signal_dbm < MIN_RSSI_DBM:
+            continue
+
+        frequency_mhz = candidate.get("frequency_mhz")
+        try:
+            frequency_mhz = int(frequency_mhz) if frequency_mhz is not None else None
+        except (TypeError, ValueError):
+            frequency_mhz = None
+
+        channel = candidate.get("channel")
+        try:
+            channel = int(channel) if channel is not None else None
+        except (TypeError, ValueError):
+            channel = None
+        if channel is None and frequency_mhz is not None:
+            channel = _frequency_to_channel(frequency_mhz)
+
+        observation = {
+            "bssid": bssid,
+            "signal_dbm": signal_dbm,
+            "locally_administered": _is_locally_administered_bssid(bssid),
+        }
+        if channel is not None:
+            observation["channel"] = channel
+        if frequency_mhz is not None:
+            observation["frequency_mhz"] = frequency_mhz
+
+        previous = normalized.get(bssid)
+        if previous is None or signal_dbm > previous["signal_dbm"]:
+            normalized[bssid] = observation
+
+    return list(normalized.values())
+
+
+def _aggregate_samples(samples: list[list[dict]], max_aps: int = 30) -> list[dict]:
+    """Aggregate scans by BSSID using median RSSI and observation stability."""
+    observations: dict[str, dict] = {}
+    for sample in samples:
+        for ap in _normalize_sample(sample):
+            record = observations.setdefault(ap["bssid"], {
+                "signals": [],
+                "channels": [],
+                "frequencies": [],
+                "locally_administered": ap["locally_administered"],
+            })
+            record["signals"].append(ap["signal_dbm"])
+            if "channel" in ap:
+                record["channels"].append(ap["channel"])
+            if "frequency_mhz" in ap:
+                record["frequencies"].append(ap["frequency_mhz"])
+
+    aggregated: list[dict] = []
+    for bssid, record in observations.items():
+        frequency_mhz = _most_common(record["frequencies"])
+        channel = _most_common(record["channels"])
+        if channel is None and frequency_mhz is not None:
+            channel = _frequency_to_channel(frequency_mhz)
+        entry = {
+            "bssid": bssid,
+            "signal_dbm": int(round(statistics.median(record["signals"]))),
+            "observation_count": len(record["signals"]),
+            "locally_administered": record["locally_administered"],
+        }
+        if channel is not None:
+            entry["channel"] = channel
+        if frequency_mhz is not None:
+            entry["frequency_mhz"] = frequency_mhz
+        aggregated.append(entry)
+
+    # Locally administered BSSIDs remain available when the scan does not have
+    # enough stable global infrastructure.  Once four global BSSIDs have been
+    # seen in multiple samples, local BSSIDs are unnecessary lower-confidence
+    # inputs and are excluded before the strict stability/RSSI ordering.
+    stable_global = [
+        ap for ap in aggregated
+        if not ap["locally_administered"] and ap["observation_count"] >= 2
+    ]
+    if len(stable_global) >= MIN_QUALITY_BSSIDS:
+        aggregated = [ap for ap in aggregated if not ap["locally_administered"]]
+
+    aggregated.sort(
+        key=lambda ap: (-ap["observation_count"], -ap["signal_dbm"])
+    )
+    return aggregated[:min(30, max(1, max_aps))]
+
+
+def _scan_quality_sufficient(aps: list[dict], min_aps: int) -> bool:
+    required_count = max(MIN_QUALITY_BSSIDS, min_aps)
+    strong_count = sum(ap["signal_dbm"] >= STRONG_RSSI_DBM for ap in aps)
+    return len(aps) >= required_count and strong_count >= MIN_STRONG_BSSIDS
+
+
+def _adaptive_wifi_scan(min_aps: int, max_aps: int) -> tuple[list[dict], dict]:
+    """Collect at most three samples inside one hard 15-second scan budget."""
+    started = time.monotonic()
+    deadline = started + SCAN_TOTAL_BUDGET_SECONDS
+    samples: list[list[dict]] = []
+    attempts = 0
+    retry_reason = "insufficient_scan_quality"
+
+    while attempts < MAX_SCAN_SAMPLES:
+        if attempts:
+            required = (
+                SCAN_SAMPLE_DELAY_SECONDS
+                + WIFI_SCAN_SOCKET_TIMEOUT_SECONDS
+                + SCAN_AGGREGATION_RESERVE_SECONDS
+            )
+            if deadline - time.monotonic() < required:
+                retry_reason = "scan_budget_exhausted"
+                break
+            time.sleep(SCAN_SAMPLE_DELAY_SECONDS)
+
+        if deadline - time.monotonic() < (
+            WIFI_SCAN_SOCKET_TIMEOUT_SECONDS + SCAN_AGGREGATION_RESERVE_SECONDS
+        ):
+            retry_reason = "scan_budget_exhausted"
+            break
+
+        attempts += 1
+        try:
+            sample = scan_wifi_aps()
+        except WifiScanBusy:
+            retry_reason = "wifi_scan_busy"
+            break
+        except WifiScanTimeout:
+            retry_reason = "scan_timeout"
+            break
+        except WifiControlUnavailable:
+            retry_reason = "wifi_control_unavailable"
+            break
+
+        samples.append(sample)
+        aggregated = _aggregate_samples(samples, max_aps=30)
+        if _scan_quality_sufficient(aggregated, min_aps):
+            retry_reason = ""
+            break
+
+    aps = _aggregate_samples(samples, max_aps=max_aps)
+    elapsed = time.monotonic() - started
+    signals = [ap["signal_dbm"] for ap in aps]
+    logger.info(
+        "WiFi geolocation sampling: samples=%d valid_aps=%d "
+        "signal_min=%s signal_max=%s retry_reason=%s elapsed_ms=%d",
+        attempts,
+        len(aps),
+        min(signals) if signals else "none",
+        max(signals) if signals else "none",
+        retry_reason or "none",
+        int(elapsed * 1000),
+    )
+    return aps, {
+        "samples": attempts,
+        "elapsed": elapsed,
+        "retry_reason": retry_reason,
+        "sufficient": _scan_quality_sufficient(aps, min_aps),
+    }
+
+
+def _payload_access_points(aps: list[dict]) -> list[dict]:
+    """Strip all internal confidence fields from the stable v1.0 payload."""
+    payload_aps = []
+    for ap in aps:
+        payload_ap = {
+            "bssid": ap["bssid"],
+            "signal_dbm": ap["signal_dbm"],
+        }
+        if "channel" in ap:
+            payload_ap["channel"] = ap["channel"]
+        payload_aps.append(payload_ap)
+    return payload_aps
+
+
+def _cooldown_seconds(state: dict, config: dict) -> int:
+    long_cooldown = int(config.get("SIGIL_GEOLOCATION_COOLDOWN_SECONDS", 3600))
+    short_cooldown = int(config.get(
+        "SIGIL_GEOLOCATION_SHORT_COOLDOWN_SECONDS",
+        DEFAULT_SHORT_COOLDOWN_SECONDS,
+    ))
+    short_cooldown = max(30, min(120, short_cooldown))
+    return short_cooldown if state.get("last_retryable", False) else long_cooldown
+
+
 def geolocate(server_url: str, api_key: str, device_id: str, config: dict) -> dict:
     min_aps = int(config.get("SIGIL_GEOLOCATION_MIN_APS", 2))
-    max_aps = int(config.get("SIGIL_GEOLOCATION_MAX_APS", 30))
+    max_aps = max(1, min(30, int(config.get("SIGIL_GEOLOCATION_MAX_APS", 30))))
     timeout_sec = int(config.get("SIGIL_GEOLOCATION_TIMEOUT_SECONDS", 10))
 
-    try:
-        aps = scan_wifi_aps()
-    except WifiScanBusy:
-        logger.info("WiFi scan deferred: radio scan or transition is busy")
+    aps, scan = _adaptive_wifi_scan(min_aps=min_aps, max_aps=max_aps)
+    if not scan["sufficient"]:
+        reason = scan["retry_reason"] or "insufficient_scan_quality"
+        if reason == "wifi_scan_busy":
+            logger.info("WiFi scan deferred: radio scan or transition is busy")
         return {
             "success": False,
-            "error": "wifi_scan_busy",
+            "error": reason,
             "retryable": True,
-            "ap_count": 0,
-        }
-
-    if len(aps) < min_aps:
-        return {
-            "success": False,
-            "error": f"not_enough_aps:{len(aps)}<{min_aps}",
             "ap_count": len(aps),
         }
-    aps = aps[:max_aps]
+
+    payload_aps = _payload_access_points(aps[:max_aps])
 
     payload = json.dumps({
         "_schema_version": SCHEMA_VERSION,
         "observed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "wifi_access_points": aps,
+        "wifi_access_points": payload_aps,
     }).encode("utf-8")
 
     url = f"{server_url.rstrip('/')}/api/devices/{device_id}/geolocate"
@@ -195,28 +415,31 @@ def geolocate(server_url: str, api_key: str, device_id: str, config: dict) -> di
                 "lat": data.get("lat", 0),
                 "lng": data.get("lng", 0),
                 "accuracy": data.get("accuracy", 0),
-                "ap_count": len(aps),
+                "ap_count": len(payload_aps),
                 "http_status": resp.status,
+                "retryable": False,
             }
 
         except urllib.error.HTTPError as e:
-            e.read()
             logger.error("HTTP %d from geolocation endpoint", e.code)
             last_error = f"http_{e.code}"
             last_status = e.code
             if 400 <= e.code < 500:
                 break
-            time.sleep(2 ** attempt)
+            if attempt < 2:
+                time.sleep(2 ** attempt)
 
         except urllib.error.URLError as e:
-            logger.error("URL error: %s", e.reason)
-            last_error = f"network_error:{e.reason}"
-            time.sleep(2 ** attempt)
+            logger.error("Network unavailable: %s", type(e.reason).__name__)
+            last_error = "network_unavailable"
+            if attempt < 2:
+                time.sleep(2 ** attempt)
 
         except socket.timeout:
             logger.error("Timeout (%ds)", timeout_sec)
             last_error = "timeout"
-            time.sleep(2 ** attempt)
+            if attempt < 2:
+                time.sleep(2 ** attempt)
 
         except Exception as e:
             logger.error("Unexpected error: %s", e)
@@ -226,8 +449,9 @@ def geolocate(server_url: str, api_key: str, device_id: str, config: dict) -> di
     return {
         "success": False,
         "error": last_error,
-        "ap_count": len(aps),
+        "ap_count": len(payload_aps),
         "http_status": last_status,
+        "retryable": last_error in {"network_unavailable", "timeout"},
     }
 
 
@@ -256,7 +480,7 @@ def main():
     state = _read_state()
     state["device_id"] = device_id
 
-    cooldown = int(config.get("SIGIL_GEOLOCATION_COOLDOWN_SECONDS", 3600))
+    cooldown = _cooldown_seconds(state, config)
     now = int(time.time())
     last_attempt = state.get("last_attempt_time", 0)
     if now - last_attempt < cooldown:
@@ -267,6 +491,7 @@ def main():
 
     state["last_attempt_time"] = now
     state["last_ap_count"] = result.get("ap_count", 0)
+    state["last_retryable"] = bool(result.get("retryable", False))
 
     if result.get("success"):
         state["last_success_time"] = now
@@ -280,8 +505,8 @@ def main():
 
     if result.get("success"):
         logger.info(
-            "OK: %.6f, %.6f (accuracy=%dm, APs=%d)",
-            result["lat"], result["lng"], result["accuracy"], result["ap_count"],
+            "Geolocation succeeded: accuracy=%dm APs=%d",
+            result["accuracy"], result["ap_count"],
         )
     else:
         logger.warning(

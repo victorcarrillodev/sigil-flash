@@ -301,6 +301,19 @@ else
     log_ok "pulseaudio: module-switch-on-connect añadido a /etc/pulse/default.pa"
 fi
 
+# SIGIL owns PulseAudio through sigil-pulseaudio.service.  The lingering
+# systemd user manager would otherwise activate the distribution's user
+# pulseaudio.socket as a second daemon on the same runtime directory.  Two
+# daemons race to register BlueZ profiles, leaving a connected speaker without
+# a bluez_card/A2DP sink.
+PULSE_USER_UNIT_DIR="${SIGIL_HOME}/.config/systemd/user"
+install -d -o "${SIGIL_USER}" -g "${SIGIL_USER}" -m 0700 "${PULSE_USER_UNIT_DIR}"
+for pulse_unit in pulseaudio.service pulseaudio.socket; do
+    ln -sfn /dev/null "${PULSE_USER_UNIT_DIR}/${pulse_unit}"
+    chown -h "${SIGIL_USER}:${SIGIL_USER}" "${PULSE_USER_UNIT_DIR}/${pulse_unit}"
+done
+log_ok "pulseaudio: servicio de sesión enmascarado; SIGIL conserva el único daemon"
+
 # 7d. tmpfiles.d — /run/sigil directory
 if [ -f "${REPO_DIR}/conf/sigil-tmpfiles.conf" ]; then
     cp "${REPO_DIR}/conf/sigil-tmpfiles.conf" /etc/tmpfiles.d/sigil.conf

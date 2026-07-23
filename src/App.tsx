@@ -135,12 +135,13 @@ export default function App() {
 
   const handleFlashClick = () => {
     if (!image || !device || isFlashing || flashRequestActive.current) return;
+    const normalizedPanelPin = pinPanel.trim();
     const validationError = validateManufacturingInputs({
       rpiModel,
       sshEnabled,
       username,
       password,
-      panelPin: pinPanel,
+      panelPin: normalizedPanelPin,
       hostname,
       serialNumber,
     });
@@ -162,6 +163,7 @@ export default function App() {
     addLog(`Iniciando flasheo: ${image.name} → ${device.path}`, "info");
     addLog("Solicitando permisos de administrador...", "warning");
     try {
+      const normalizedPanelPin = pinPanel.trim();
       const config = {
         hostname,
         username,
@@ -173,7 +175,7 @@ export default function App() {
         serialNumber: serialNumber || null,
         sigilModel: sigilModel || null,
         sigilModelVersion: sigilModelVersion || null,
-        panelPin: pinPanel || null,
+        panelPin: normalizedPanelPin || null,
       };
       await invoke("start_flash", {
         imagePath: image.path,

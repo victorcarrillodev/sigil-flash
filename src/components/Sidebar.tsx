@@ -217,8 +217,9 @@ export default function Sidebar({
             <input type="password" className="form-input" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Introduce la contraseña" />
           </div>
           <div className="form-group">
-            <label className="form-label">PIN DEL PANEL</label>
-            <input type="password" className="form-input" value={pinPanel} onChange={(e) => setPinPanel(e.target.value)} placeholder="Introduce el PIN del panel" />
+            <label className="form-label" htmlFor="panel-pin">PIN DEL PANEL</label>
+            <input id="panel-pin" type="password" className="form-input" value={pinPanel} onChange={(e) => setPinPanel(e.target.value.replace(/[^0-9]/g, "").slice(0, 12))} inputMode="numeric" autoComplete="new-password" maxLength={12} aria-describedby="panel-pin-help" placeholder="6–12 dígitos" />
+            <span id="panel-pin-help" style={{ fontSize: "11px", color: "var(--text-muted)" }}>Solo números; los espacios al pegar se eliminan.</span>
           </div>
           <div className="form-group">
             <label className="form-label">CONTRASEÑA DE LOGS</label>

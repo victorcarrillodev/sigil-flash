@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Focused tests for SIGIL WiFi geolocation integration."""
 import io
+import importlib.util
 import json
 import os
 import glob
@@ -23,9 +24,10 @@ import wifi as wifi_mod
 _original_scan = wifi_mod.scan_wifi_aps
 
 DEFAULT_APS = [
-    {"bssid": "AA:BB:CC:DD:EE:01", "signal_dbm": -45, "channel": 6},
-    {"bssid": "AA:BB:CC:DD:EE:02", "signal_dbm": -60, "channel": 11},
-    {"bssid": "AA:BB:CC:DD:EE:03", "signal_dbm": -75, "channel": 1},
+    {"bssid": "10:BB:CC:DD:EE:01", "signal_dbm": -45, "channel": 6},
+    {"bssid": "20:BB:CC:DD:EE:02", "signal_dbm": -60, "channel": 11},
+    {"bssid": "30:BB:CC:DD:EE:03", "signal_dbm": -75, "channel": 1},
+    {"bssid": "40:BB:CC:DD:EE:04", "signal_dbm": -80, "channel": 3},
 ]
 
 
@@ -38,6 +40,16 @@ def _fake_scan(*args, **kwargs):
 import geolocation as geo
 _original_geo_scan = geo.scan_wifi_aps
 import urllib.error
+
+_CONTROL_PATH = os.path.join(
+    os.path.dirname(__file__), "..", "scripts", "sigil-wifi-control.py"
+)
+_CONTROL_SPEC = importlib.util.spec_from_file_location(
+    "sigil_wifi_control_geolocation_test", _CONTROL_PATH
+)
+assert _CONTROL_SPEC is not None and _CONTROL_SPEC.loader is not None
+wifi_control = importlib.util.module_from_spec(_CONTROL_SPEC)
+_CONTROL_SPEC.loader.exec_module(wifi_control)
 
 
 def setUpModule():
@@ -131,33 +143,19 @@ class TestDeviceID(unittest.TestCase):
 
 class TestBSSIDNormalization(unittest.TestCase):
     def test_already_normalized(self):
-        self.assertEqual(wifi_mod._normalize_bssid("AA:BB:CC:DD:EE:FF"), "AA:BB:CC:DD:EE:FF")
+        self.assertEqual(wifi_mod._normalize_bssid("AA:BB:CC:DD:EE:FF"), "aa:bb:cc:dd:ee:ff")
 
     def test_lowercase(self):
-        self.assertEqual(wifi_mod._normalize_bssid("aa:bb:cc:dd:ee:ff"), "AA:BB:CC:DD:EE:FF")
+        self.assertEqual(wifi_mod._normalize_bssid("aa:bb:cc:dd:ee:ff"), "aa:bb:cc:dd:ee:ff")
 
     def test_dash_separated(self):
-        self.assertEqual(wifi_mod._normalize_bssid("aa-bb-cc-dd-ee-ff"), "AA:BB:CC:DD:EE:FF")
+        self.assertEqual(wifi_mod._normalize_bssid("aa-bb-cc-dd-ee-ff"), "aa:bb:cc:dd:ee:ff")
 
     def test_mixed_format(self):
-        self.assertEqual(wifi_mod._normalize_bssid("AA:bb-CC:dd-EE:ff"), "AA:BB:CC:DD:EE:FF")
+        self.assertEqual(wifi_mod._normalize_bssid("AA:bb-CC:dd-EE:ff"), "aa:bb:cc:dd:ee:ff")
 
 
 class TestAPDedupAndSorting(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls._lock_dir = tempfile.mkdtemp(prefix="sigil-geolocation-scan-")
-        cls._transition_lock = wifi_mod.WIFI_TRANSITION_LOCK
-        cls._scan_lock = wifi_mod.WIFI_SCAN_LOCK
-        wifi_mod.WIFI_TRANSITION_LOCK = os.path.join(cls._lock_dir, "transition.lock")
-        wifi_mod.WIFI_SCAN_LOCK = os.path.join(cls._lock_dir, "scan.lock")
-
-    @classmethod
-    def tearDownClass(cls):
-        wifi_mod.WIFI_TRANSITION_LOCK = cls._transition_lock
-        wifi_mod.WIFI_SCAN_LOCK = cls._scan_lock
-        shutil.rmtree(cls._lock_dir)
-
     def _make_scan_output(self, cells):
         lines = []
         for i, (bssid, signal, channel) in enumerate(cells):
@@ -168,28 +166,26 @@ class TestAPDedupAndSorting(unittest.TestCase):
             lines.append(f"          ESSID:\"NET_{i}\"")
         return "\n".join(lines)
 
-    @patch("subprocess.run")
-    def test_dedup_keeps_strongest(self, mock_run):
+    def test_dedup_keeps_strongest(self):
         cells = [
             ("AA:BB:CC:DD:EE:01", -50, 1),
             ("AA:BB:CC:DD:EE:01", -40, 1),
             ("AA:BB:CC:DD:EE:02", -60, 6),
         ]
-        mock_run.return_value = MagicMock(stdout=self._make_scan_output(cells), returncode=0)
-        result = _original_scan()
+        with patch.object(wifi_mod, "_scan_via_socket", return_value=self._make_scan_output(cells)):
+            result = _original_scan()
         self.assertEqual(len(result), 2, f"Got {len(result)} APs: {result}")
-        ee01 = [a for a in result if a["bssid"] == "AA:BB:CC:DD:EE:01"][0]
+        ee01 = [a for a in result if a["bssid"] == "aa:bb:cc:dd:ee:01"][0]
         self.assertEqual(ee01["signal_dbm"], -40)
 
-    @patch("subprocess.run")
-    def test_sorted_by_signal_descending(self, mock_run):
+    def test_sorted_by_signal_descending(self):
         cells = [
             ("AA:BB:CC:DD:EE:03", -75, 1),
             ("AA:BB:CC:DD:EE:01", -45, 6),
             ("AA:BB:CC:DD:EE:02", -60, 11),
         ]
-        mock_run.return_value = MagicMock(stdout=self._make_scan_output(cells), returncode=0)
-        result = _original_scan()
+        with patch.object(wifi_mod, "_scan_via_socket", return_value=self._make_scan_output(cells)):
+            result = _original_scan()
         signals = [a["signal_dbm"] for a in result]
         self.assertEqual(signals, sorted(signals, reverse=True))
 
@@ -200,9 +196,14 @@ class TestAPLimits(unittest.TestCase):
 
     def test_under_min_aps_returns_error(self):
         _fake_scan._aps = [{"bssid": "AA:BB:CC:DD:EE:01", "signal_dbm": -50}]
-        result = geo.geolocate("http://server", "key", "dev", {"SIGIL_GEOLOCATION_MIN_APS": "2"})
+        with patch.object(geo, "SCAN_SAMPLE_DELAY_SECONDS", 0):
+            result = geo.geolocate(
+                "http://server", "key", "dev",
+                {"SIGIL_GEOLOCATION_MIN_APS": "2"},
+            )
         self.assertFalse(result["success"])
-        self.assertIn("not_enough_aps", result["error"])
+        self.assertEqual(result["error"], "insufficient_scan_quality")
+        self.assertTrue(result["retryable"])
 
     def test_busy_scan_is_deferred_without_network_request(self):
         with patch.object(geo, "scan_wifi_aps", side_effect=wifi_mod.WifiScanBusy("busy")):
@@ -239,10 +240,12 @@ class TestEndpointAndPayload(unittest.TestCase):
         _reset_aps()
 
     def test_payload_structure(self):
-        _fake_scan._aps = [
-            {"bssid": "AA:BB:CC:DD:EE:01", "signal_dbm": -45, "channel": 6},
-            {"bssid": "AA:BB:CC:DD:EE:02", "signal_dbm": -60, "channel": 11},
-        ]
+        _fake_scan._aps = [dict(ap) for ap in DEFAULT_APS]
+        _fake_scan._aps[0].update({
+            "frequency_mhz": 2437,
+            "ssid": "must-not-leave-device",
+            "observation_count": 99,
+        })
         sent = {}
 
         def cap(req, **_kw):
@@ -271,14 +274,16 @@ class TestEndpointAndPayload(unittest.TestCase):
         ap = body["wifi_access_points"][0]
         self.assertIn("bssid", ap)
         self.assertIn("signal_dbm", ap)
+        self.assertIn("channel", ap)
         self.assertNotIn("macAddress", ap)
         self.assertNotIn("signalStrength", ap)
+        self.assertNotIn("ssid", ap)
+        self.assertNotIn("frequency_mhz", ap)
+        self.assertNotIn("observation_count", ap)
+        self.assertNotIn("locally_administered", ap)
 
     def test_url_no_trailing_slash(self):
-        _fake_scan._aps = [
-            {"bssid": "AA:BB:CC:DD:EE:01", "signal_dbm": -50},
-            {"bssid": "AA:BB:CC:DD:EE:02", "signal_dbm": -60},
-        ]
+        _fake_scan._aps = [dict(ap) for ap in DEFAULT_APS]
         sent = {}
 
         def cap(req, **_kw):
@@ -315,18 +320,45 @@ class TestAuthSecurity(unittest.TestCase):
         geo._load_config("/dummy")
         self.assertEqual(list(sys.argv), args_before)
 
+    def test_success_log_does_not_expose_coordinates(self):
+        with patch.object(geo, "geolocate", return_value={
+            "success": True,
+            "lat": 12.345678,
+            "lng": -76.543210,
+            "accuracy": 25,
+            "ap_count": 4,
+            "http_status": 200,
+            "retryable": False,
+        }), patch.object(geo, "_acquire_lock", return_value=True), \
+             patch.object(geo, "_load_config", return_value={
+                 "SERVER_URL": "https://server.invalid",
+             }), patch.object(geo.Path, "read_text", return_value="key"), \
+             patch.object(geo, "_get_device_id", return_value="device"), \
+             patch.object(geo, "_read_state", return_value={
+                 "last_attempt_time": 0,
+                 "last_retryable": False,
+             }), patch.object(geo, "_write_state"), \
+             patch.object(geo.time, "time", return_value=7200), \
+             self.assertLogs(geo.logger, level="INFO") as captured:
+            geo.main()
+        output = "\n".join(captured.output)
+        self.assertNotIn("12.345678", output)
+        self.assertNotIn("-76.54321", output)
+
 
 class TestTimeoutAndRetries(unittest.TestCase):
     def setUp(self):
         _reset_aps()
 
     def test_timeout_returns_error(self):
-        with patch("urllib.request.urlopen", side_effect=socket.timeout("timed out")):
+        with patch("urllib.request.urlopen", side_effect=socket.timeout("timed out")), \
+             patch.object(geo.time, "sleep"):
             result = geo.geolocate(
                 "http://server", "key", "dev1",
                 {"SIGIL_GEOLOCATION_TIMEOUT_SECONDS": "1"},
             )
         self.assertFalse(result["success"])
+        self.assertTrue(result["retryable"])
 
     def test_no_retry_on_4xx(self):
         call_count = 0
@@ -359,6 +391,281 @@ class TestTimeoutAndRetries(unittest.TestCase):
 
         self.assertTrue(result["success"])
         self.assertEqual(call_count, 2)
+
+
+class TestAdaptiveScanning(unittest.TestCase):
+    def setUp(self):
+        _reset_aps()
+
+    def test_good_first_sample_does_not_rescan(self):
+        scanner = MagicMock(return_value=[dict(ap) for ap in DEFAULT_APS])
+        with patch.object(geo, "scan_wifi_aps", scanner), \
+             patch("urllib.request.urlopen", return_value=_make_mock_urlopen()):
+            result = geo.geolocate("http://server", "key", "dev", {})
+        self.assertTrue(result["success"])
+        self.assertEqual(scanner.call_count, 1)
+
+    def test_poor_first_sample_stops_when_second_is_sufficient(self):
+        poor = [dict(ap) for ap in DEFAULT_APS[:2]]
+        good = [dict(ap) for ap in DEFAULT_APS]
+        scanner = MagicMock(side_effect=[poor, good])
+        with patch.object(geo, "scan_wifi_aps", scanner), \
+             patch.object(geo.time, "sleep"), \
+             patch("urllib.request.urlopen", return_value=_make_mock_urlopen()):
+            result = geo.geolocate("http://server", "key", "dev", {})
+        self.assertTrue(result["success"])
+        self.assertEqual(scanner.call_count, 2)
+
+    def test_never_more_than_three_samples(self):
+        poor = [dict(ap) for ap in DEFAULT_APS[:2]]
+        scanner = MagicMock(return_value=poor)
+        with patch.object(geo, "scan_wifi_aps", scanner), \
+             patch.object(geo.time, "sleep"), \
+             patch("urllib.request.urlopen") as request:
+            result = geo.geolocate("http://server", "key", "dev", {})
+        self.assertFalse(result["success"])
+        self.assertTrue(result["retryable"])
+        self.assertEqual(scanner.call_count, 3)
+        request.assert_not_called()
+
+    def test_third_sample_can_complete_a_poor_scan(self):
+        poor = [dict(ap) for ap in DEFAULT_APS[:2]]
+        good = [dict(ap) for ap in DEFAULT_APS]
+        scanner = MagicMock(side_effect=[poor, poor, good])
+        with patch.object(geo, "scan_wifi_aps", scanner), \
+             patch.object(geo.time, "sleep"), \
+             patch("urllib.request.urlopen", return_value=_make_mock_urlopen()):
+            result = geo.geolocate("http://server", "key", "dev", {})
+        self.assertTrue(result["success"])
+        self.assertEqual(scanner.call_count, 3)
+
+    def test_median_rssi_aggregation(self):
+        samples = [
+            [{"bssid": "10:22:33:44:55:66", "signal_dbm": -40}],
+            [{"bssid": "10:22:33:44:55:66", "signal_dbm": -80}],
+            [{"bssid": "10:22:33:44:55:66", "signal_dbm": -60}],
+        ]
+        result = geo._aggregate_samples(samples)
+        self.assertEqual(result[0]["signal_dbm"], -60)
+        self.assertEqual(result[0]["observation_count"], 3)
+
+    def test_observation_count_sorts_before_signal(self):
+        repeated = {"bssid": "10:22:33:44:55:01", "signal_dbm": -80}
+        strong_once = {"bssid": "20:22:33:44:55:02", "signal_dbm": -35}
+        result = geo._aggregate_samples([[repeated, strong_once], [repeated]])
+        self.assertEqual(result[0]["bssid"], "10:22:33:44:55:01")
+
+    def test_duplicate_normalization_counts_once_per_sample(self):
+        result = geo._aggregate_samples([[
+            {"bssid": "10:22:33:44:55:66", "signal_dbm": -70},
+            {"bssid": "10-22-33-44-55-66", "signal_dbm": -50},
+        ]])
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["bssid"], "10:22:33:44:55:66")
+        self.assertEqual(result[0]["signal_dbm"], -50)
+        self.assertEqual(result[0]["observation_count"], 1)
+
+    def test_local_bssid_retained_until_enough_stable_global_bssids(self):
+        local = {"bssid": "12:22:33:44:55:99", "signal_dbm": -40}
+        one_global = {"bssid": "10:22:33:44:55:01", "signal_dbm": -60}
+        retained = geo._aggregate_samples([
+            [one_global, local],
+            [one_global, local],
+        ])
+        self.assertIn(local["bssid"], [ap["bssid"] for ap in retained])
+
+        globals_ = [
+            {"bssid": f"{prefix}:22:33:44:55:01", "signal_dbm": -60}
+            for prefix in ("10", "20", "30", "40")
+        ]
+        deprioritized = geo._aggregate_samples([
+            globals_ + [local],
+            globals_ + [local],
+        ])
+        self.assertNotIn(local["bssid"], [ap["bssid"] for ap in deprioritized])
+
+
+class TestWifiGeolocationParsing(unittest.TestCase):
+    @staticmethod
+    def _cell(index, bssid, signal=-50, channel=None, frequency=None, ssid="net"):
+        lines = [f"Cell {index:02d} - Address: {bssid}"]
+        if channel is not None:
+            lines.append(f"          Channel:{channel}")
+        if frequency is not None:
+            lines.append(f"          Frequency:{frequency}")
+        lines.append(f"          Quality=50/70  Signal level={signal} dBm")
+        lines.append(f'          ESSID:"{ssid}"')
+        return "\n".join(lines)
+
+    def _parse(self, raw):
+        with patch.object(wifi_mod, "_scan_via_socket", return_value=raw):
+            return _original_scan()
+
+    def test_invalid_zero_broadcast_and_multicast_are_rejected(self):
+        raw = "\n".join([
+            self._cell(1, "not-a-mac"),
+            self._cell(2, "00:00:00:00:00:00"),
+            self._cell(3, "FF:FF:FF:FF:FF:FF"),
+            self._cell(4, "11:22:33:44:55:66"),
+            self._cell(5, "10:22:33:44:55:66"),
+        ])
+        self.assertEqual(
+            [ap["bssid"] for ap in self._parse(raw)],
+            ["10:22:33:44:55:66"],
+        )
+
+    def test_weak_and_nonnegative_signals_are_rejected(self):
+        raw = "\n".join([
+            self._cell(1, "10:22:33:44:55:01", signal=-93),
+            self._cell(2, "20:22:33:44:55:02", signal=0),
+            self._cell(3, "30:22:33:44:55:03", signal=12),
+            self._cell(4, "40:22:33:44:55:04", signal=-92),
+        ])
+        result = self._parse(raw)
+        self.assertEqual([ap["bssid"] for ap in result], ["40:22:33:44:55:04"])
+
+    def test_hidden_ssid_bssid_remains_valid(self):
+        result = self._parse(
+            self._cell(1, "10:22:33:44:55:66", signal=-50, ssid="")
+        )
+        self.assertEqual(len(result), 1)
+
+    def test_frequency_to_channel_conversion(self):
+        self.assertEqual(wifi_mod._frequency_to_channel(2412), 1)
+        self.assertEqual(wifi_mod._frequency_to_channel(2484), 14)
+        self.assertEqual(wifi_mod._frequency_to_channel(5180), 36)
+        self.assertEqual(wifi_mod._frequency_to_channel(5745), 149)
+
+    def test_frequency_is_preserved_and_channel_is_derived(self):
+        result = self._parse(
+            self._cell(1, "10:22:33:44:55:66", frequency="5.180 GHz")
+        )
+        self.assertEqual(result[0]["frequency_mhz"], 5180)
+        self.assertEqual(result[0]["channel"], 36)
+
+    def test_existing_channel_parsing_remains_compatible(self):
+        result = self._parse(
+            self._cell(1, "10:22:33:44:55:66", channel=11)
+        )
+        self.assertEqual(result[0]["channel"], 11)
+
+    def test_quality_fallback_remains_available(self):
+        raw = "\n".join([
+            "Cell 01 - Address: 10:22:33:44:55:66",
+            "          Channel:6",
+            "          Quality=35/70",
+            '          ESSID:"hidden-or-visible"',
+        ])
+        result = self._parse(raw)
+        self.assertEqual(result[0]["signal_dbm"], -65)
+
+
+class TestScanTimeoutPolicy(unittest.TestCase):
+    def test_daemon_and_client_timeout_are_coherent(self):
+        self.assertEqual(wifi_control.SCAN_TIMEOUT, wifi_mod.WIFI_SCAN_TIMEOUT_SECONDS)
+        self.assertGreater(
+            wifi_mod.WIFI_SCAN_SOCKET_TIMEOUT_SECONDS,
+            wifi_control.SCAN_TIMEOUT,
+        )
+        worst_case = (
+            geo.MAX_SCAN_SAMPLES * wifi_mod.WIFI_SCAN_SOCKET_TIMEOUT_SECONDS
+            + (geo.MAX_SCAN_SAMPLES - 1) * geo.SCAN_SAMPLE_DELAY_SECONDS
+            + geo.SCAN_AGGREGATION_RESERVE_SECONDS
+        )
+        self.assertLessEqual(worst_case, geo.SCAN_TOTAL_BUDGET_SECONDS)
+
+    def test_daemon_releases_lock_after_scan_timeout(self):
+        timeout = subprocess.TimeoutExpired(
+            cmd=["iwlist", "wlan0", "scan"],
+            timeout=wifi_control.SCAN_TIMEOUT,
+        )
+        with patch.object(wifi_control, "_acquire_lock", return_value=77), \
+             patch.object(wifi_control, "_release_lock") as release, \
+             patch.object(wifi_control.subprocess, "run", side_effect=timeout):
+            result = wifi_control._handle_scan()
+        self.assertEqual(result["error"], "scan_timeout")
+        release.assert_called_once_with(77)
+
+    def test_normal_daemon_scan_is_unchanged(self):
+        completed = MagicMock(returncode=0, stdout="scan-data")
+        with patch.object(wifi_control, "_acquire_lock", return_value=78), \
+             patch.object(wifi_control, "_release_lock") as release, \
+             patch.object(wifi_control.subprocess, "run", return_value=completed) as run:
+            result = wifi_control._handle_scan()
+        self.assertTrue(result["accepted"])
+        self.assertEqual(result["scan_data"], "scan-data")
+        self.assertEqual(run.call_args.kwargs["timeout"], wifi_control.SCAN_TIMEOUT)
+        release.assert_called_once_with(78)
+
+    def test_scan_timeout_is_transient_and_not_retried_immediately(self):
+        scanner = MagicMock(side_effect=wifi_mod.WifiScanTimeout("timed out"))
+        with patch.object(geo, "scan_wifi_aps", scanner), \
+             patch("urllib.request.urlopen") as request:
+            result = geo.geolocate("http://server", "key", "dev", {})
+        self.assertFalse(result["success"])
+        self.assertTrue(result["retryable"])
+        self.assertEqual(result["error"], "scan_timeout")
+        self.assertEqual(scanner.call_count, 1)
+        request.assert_not_called()
+
+    def test_control_socket_failure_is_transient(self):
+        scanner = MagicMock(
+            side_effect=wifi_mod.WifiControlUnavailable("socket unavailable")
+        )
+        with patch.object(geo, "scan_wifi_aps", scanner), \
+             patch("urllib.request.urlopen") as request:
+            result = geo.geolocate("http://server", "key", "dev", {})
+        self.assertTrue(result["retryable"])
+        self.assertEqual(result["error"], "wifi_control_unavailable")
+        self.assertEqual(
+            geo._cooldown_seconds({"last_retryable": result["retryable"]}, {}),
+            60,
+        )
+        request.assert_not_called()
+
+    def test_worst_case_adaptive_scan_stays_within_budget(self):
+        clock = [0.0]
+        poor = [dict(ap) for ap in DEFAULT_APS[:2]]
+
+        def monotonic():
+            return clock[0]
+
+        def sleep(seconds):
+            clock[0] += seconds
+
+        def slow_scan():
+            clock[0] += wifi_mod.WIFI_SCAN_SOCKET_TIMEOUT_SECONDS
+            return poor
+
+        with patch.object(geo.time, "monotonic", side_effect=monotonic), \
+             patch.object(geo.time, "sleep", side_effect=sleep), \
+             patch.object(geo, "scan_wifi_aps", side_effect=slow_scan) as scanner:
+            _aps, metadata = geo._adaptive_wifi_scan(min_aps=2, max_aps=30)
+
+        self.assertEqual(scanner.call_count, 3)
+        self.assertLessEqual(metadata["elapsed"], geo.SCAN_TOTAL_BUDGET_SECONDS)
+
+
+class TestCooldownPolicy(unittest.TestCase):
+    def test_short_cooldown_is_bounded_for_transient_failures(self):
+        self.assertEqual(geo._cooldown_seconds({"last_retryable": True}, {}), 60)
+        self.assertEqual(geo._cooldown_seconds(
+            {"last_retryable": True},
+            {"SIGIL_GEOLOCATION_SHORT_COOLDOWN_SECONDS": "5"},
+        ), 30)
+        self.assertEqual(geo._cooldown_seconds(
+            {"last_retryable": True},
+            {"SIGIL_GEOLOCATION_SHORT_COOLDOWN_SECONDS": "999"},
+        ), 120)
+
+    def test_long_cooldown_after_valid_server_request(self):
+        _reset_aps()
+        with patch("urllib.request.urlopen", return_value=_make_mock_urlopen()):
+            result = geo.geolocate("http://server", "key", "dev", {})
+        self.assertTrue(result["success"])
+        self.assertFalse(result["retryable"])
+        state = {"last_retryable": result["retryable"]}
+        self.assertEqual(geo._cooldown_seconds(state, {}), 3600)
 
 
 class TestCooldownViaMain(unittest.TestCase):
@@ -499,6 +806,11 @@ class TestStateFileIO(unittest.TestCase):
             "bssid": "AA:BB:CC:DD:EE:01",
             "signal_dbm": -42,
             "wifi_access_points": [{"bssid": "AA:BB:CC:DD:EE:02"}],
+            "ssid": "private-network",
+            "api_key": "private-api-key",
+            "device_token": "private-device-token",
+            "lat": 1.23,
+            "lng": 4.56,
         }
         geo._write_state(state)
         with open(geo.STATE_FILE) as f:
@@ -506,6 +818,11 @@ class TestStateFileIO(unittest.TestCase):
         self.assertNotIn("bssid", keys)
         self.assertNotIn("signal_dbm", keys)
         self.assertNotIn("wifi_access_points", keys)
+        self.assertNotIn("private-network", keys)
+        self.assertNotIn("private-api-key", keys)
+        self.assertNotIn("private-device-token", keys)
+        self.assertNotIn("lat", keys)
+        self.assertNotIn("lng", keys)
 
     def test_new_state_uses_canonical_metadata(self):
         current_user = pwd.getpwuid(os.getuid())

@@ -733,7 +733,7 @@ fn is_valid_hostname(hostname: &str) -> bool {
 }
 
 fn validate_panel_pin(pin: Option<&str>) -> AppResult<()> {
-    let pin = pin.ok_or_else(|| {
+    let pin = pin.map(str::trim).filter(|pin| !pin.is_empty()).ok_or_else(|| {
         AppError::Validation("El PIN del panel es obligatorio para fabricación".into())
     })?;
     if !(6..=12).contains(&pin.len()) || !pin.bytes().all(|byte| byte.is_ascii_digit()) {
@@ -750,6 +750,14 @@ fn validate_panel_pin(pin: Option<&str>) -> AppResult<()> {
         ));
     }
     Ok(())
+}
+
+fn normalized_panel_pin(pin: Option<&str>) -> AppResult<&str> {
+    let pin = pin.map(str::trim).filter(|pin| !pin.is_empty()).ok_or_else(|| {
+        AppError::Validation("El PIN del panel es obligatorio para fabricación".into())
+    })?;
+    validate_panel_pin(Some(pin))?;
+    Ok(pin)
 }
 
 #[cfg(unix)]
@@ -1378,9 +1386,7 @@ fn run_target_command(
 }
 
 fn provision_panel_credential(root: &Path, config: &DeviceConfig) -> AppResult<()> {
-    let pin = config.panel_pin.as_deref().ok_or_else(|| {
-        AppError::Validation("El PIN del panel es obligatorio para fabricación".into())
-    })?;
+    let pin = normalized_panel_pin(config.panel_pin.as_deref())?;
     let manufacturing_dir = root.join("etc/sigil/manufacturing");
     std::fs::create_dir_all(&manufacturing_dir)?;
     #[cfg(unix)]
@@ -2404,6 +2410,19 @@ mod tests {
         let error = validate_device_config(&config).expect_err("missing PIN must fail");
 
         assert!(error.to_string().contains("PIN del panel"));
+    }
+
+    #[test]
+    fn panel_pin_validation_trims_accidental_outer_whitespace() {
+        assert!(validate_panel_pin(Some(" 80427159 \t")).is_ok());
+    }
+
+    #[test]
+    fn normalized_panel_pin_preserves_only_the_numeric_secret() {
+        assert_eq!(
+            normalized_panel_pin(Some(" 80427159 ")).expect("valid PIN"),
+            "80427159"
+        );
     }
 
     #[test]

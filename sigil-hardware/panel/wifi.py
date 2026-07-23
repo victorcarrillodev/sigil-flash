@@ -22,9 +22,19 @@ WIFI_CONTROL_SOCKET = os.environ.get(
 WIFI_CONTROL_STATE = os.environ.get(
     'SIGIL_WIFI_CONTROL_STATE', '/run/sigil/wifi-control-state.json'
 )
-WIFI_SCAN_TIMEOUT_SECONDS = int(
-    os.environ.get('SIGIL_WIFI_SCAN_TIMEOUT_SECONDS', '12')
+# Shared with sigil-wifi-control.py.  The daemon stops iwlist at this limit;
+# the panel keeps a small local-socket margin so it never abandons a scan while
+# the daemon can still hold TRANSITION_LOCK.
+WIFI_SCAN_TIMEOUT_SECONDS = float(
+    os.environ.get('SIGIL_WIFI_SCAN_TIMEOUT_SECONDS', '4.0')
 )
+WIFI_SCAN_SOCKET_MARGIN_SECONDS = 0.25
+WIFI_SCAN_SOCKET_TIMEOUT_SECONDS = (
+    WIFI_SCAN_TIMEOUT_SECONDS + WIFI_SCAN_SOCKET_MARGIN_SECONDS
+)
+
+MIN_GEOLOCATION_RSSI_DBM = -92
+_BSSID_PATTERN = re.compile(r'^(?:[0-9a-f]{2}:){5}[0-9a-f]{2}$')
 
 
 class WifiCredentialError(ValueError):
@@ -33,6 +43,14 @@ class WifiCredentialError(ValueError):
 
 class WifiScanBusy(RuntimeError):
     """An active scan or WiFi ownership transition already has the radio."""
+
+
+class WifiScanTimeout(RuntimeError):
+    """The privileged scan exceeded its bounded execution time."""
+
+
+class WifiControlUnavailable(RuntimeError):
+    """The canonical WiFi control socket is temporarily unavailable."""
 
 
 def _log_wifi_event(event_id: str, phase: str, result: str,
@@ -91,6 +109,10 @@ def _scan_via_socket() -> str:
         msg = resp.get('message', '')
         if err == 'busy' or (msg and 'busy' in msg.lower()):
             raise WifiScanBusy(msg or 'WiFi escaneo ocupado')
+        if err == 'scan_timeout':
+            raise WifiScanTimeout(msg or 'WiFi scan timed out')
+        if err == 'wifi_control_unavailable':
+            raise WifiControlUnavailable(msg or 'WiFi control unavailable')
         raise RuntimeError(msg or f'WiFi scan failed: {err}')
     scan_raw = resp.get('scan_data', '')
     if not scan_raw:
@@ -105,13 +127,26 @@ def _send_wifi_command(cmd: str, **kwargs) -> dict:
     } else 'unknown'
     _log_wifi_event('PANEL_WIFI_REQUEST', 'panel_socket_request', 'started',
                     command=safe_command)
+    command_timeout = (
+        WIFI_SCAN_SOCKET_TIMEOUT_SECONDS if cmd == 'scan' else 10.0
+    )
+    deadline = time.monotonic() + command_timeout
+
+    def set_remaining_timeout(channel: socket.socket) -> None:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise socket.timeout('WiFi control command timed out')
+        channel.settimeout(remaining)
+
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as channel:
-            channel.settimeout(10)
+            set_remaining_timeout(channel)
             channel.connect(WIFI_CONTROL_SOCKET)
             payload = {'command': cmd}
             payload.update(kwargs)
+            set_remaining_timeout(channel)
             channel.sendall(json.dumps(payload).encode('utf-8') + b'\n')
+            set_remaining_timeout(channel)
             data = channel.recv(65536)
         response = json.loads(data.decode('utf-8'))
         _log_wifi_event(
@@ -122,6 +157,17 @@ def _send_wifi_command(cmd: str, **kwargs) -> dict:
             final_state=response.get('state'),
         )
         return response
+    except socket.timeout as error:
+        error_id = 'scan_timeout' if cmd == 'scan' else 'wifi_control_unavailable'
+        _log_wifi_event(
+            'WIFI_CONTROL_TIMEOUT', 'panel_socket_request', 'failure',
+            error_id=error_id.upper(), command=safe_command,
+            exception=type(error).__name__,
+        )
+        return {
+            'error': error_id, 'accepted': False,
+            'message': 'El control WiFi excedió el tiempo permitido',
+        }
     except socket.error as error:
         _log_wifi_event(
             'WIFI_CONTROL_UNAVAILABLE', 'panel_socket_request', 'failure',
@@ -323,26 +369,86 @@ def get_current_wifi() -> str | None:
 
 
 def _normalize_bssid(mac: str) -> str:
-    mac = mac.upper().replace('-', ':')
-    parts = mac.split(':')
-    if len(parts) == 6:
-        return ':'.join(parts)
-    return mac
+    """Return a canonical lowercase, colon-separated BSSID candidate."""
+    return mac.strip().lower().replace('-', ':')
+
+
+def _bssid_rejection_reason(mac: str) -> str | None:
+    if not _BSSID_PATTERN.fullmatch(mac):
+        return 'malformed'
+    raw = bytes(int(part, 16) for part in mac.split(':'))
+    if raw == b'\x00' * 6:
+        return 'zero'
+    if raw == b'\xff' * 6:
+        return 'broadcast'
+    if raw[0] & 0x01:
+        return 'multicast'
+    return None
+
+
+def _is_locally_administered_bssid(mac: str) -> bool:
+    return bool(int(mac.split(':', 1)[0], 16) & 0x02)
+
+
+def _quality_ratio_to_dbm(numerator: int, denominator: int) -> int | None:
+    """Approximate dBm from iwlist Quality when actual dBm is unavailable.
+
+    Wireless drivers use different quality scales, so this compatibility
+    fallback is intentionally secondary to a reported Signal level in dBm.
+    """
+    if denominator <= 0:
+        return None
+    ratio = max(0.0, min(1.0, numerator / denominator))
+    return int(-100 + (ratio * 70))
+
+
+def _frequency_to_channel(frequency_mhz: int) -> int | None:
+    """Convert common 2.4 GHz and 5 GHz center frequencies to channels."""
+    if frequency_mhz == 2484:
+        return 14
+    if 2412 <= frequency_mhz <= 2472 and (frequency_mhz - 2407) % 5 == 0:
+        return (frequency_mhz - 2407) // 5
+    if 5000 <= frequency_mhz <= 5900 and (frequency_mhz - 5000) % 5 == 0:
+        channel = (frequency_mhz - 5000) // 5
+        return channel if 1 <= channel <= 196 else None
+    return None
+
+
+def _parse_frequency_mhz(line: str) -> int | None:
+    match = re.search(
+        r'Frequency[:=]\s*([0-9]+(?:\.[0-9]+)?)\s*(GHz|MHz)',
+        line,
+        re.IGNORECASE,
+    )
+    if not match:
+        return None
+    value = float(match.group(1))
+    if match.group(2).lower() == 'ghz':
+        value *= 1000
+    return int(round(value))
 
 
 def scan_wifi_aps() -> list[dict]:
     """
     Escanea redes WiFi y devuelve lista de access points
     para geolocalización.
-    Formato: [{'bssid': 'AA:BB:CC:DD:EE:FF', 'signal_dbm': -55, 'channel': 6}, ...]
-    BSSIDs normalizados a mayúsculas con separador ':'. Sin SSIDs.
+    Formato: [{'bssid': 'aa:bb:cc:dd:ee:ff', 'signal_dbm': -55, 'channel': 6}, ...]
+    BSSIDs normalizados a minúsculas con separador ':'. Sin SSIDs.
     Duplicados eliminados (se conserva el de mejor señal).
     Ordenado por señal descendente.
     """
     try:
         scan_output = _scan_via_socket()
 
-        seen = {}
+        seen: dict[str, dict] = {}
+        rejected = {
+            'malformed': 0,
+            'zero': 0,
+            'broadcast': 0,
+            'multicast': 0,
+            'invalid_signal': 0,
+            'weak_signal': 0,
+        }
 
         for block in scan_output.split('Cell '):
             if not block.strip():
@@ -351,8 +457,9 @@ def scan_wifi_aps() -> list[dict]:
             mac = ''
             rssi = None
             channel = None
-            quality_num = 0
-            quality_den = 1
+            frequency_mhz = None
+            quality_num = None
+            quality_den = None
 
             for line in block.splitlines():
                 line = line.strip()
@@ -368,42 +475,76 @@ def scan_wifi_aps() -> list[dict]:
                     continue
 
                 if 'Frequency:' in line:
+                    frequency_mhz = _parse_frequency_mhz(line)
                     fch = re.search(r'Channel\s*(\d+)', line)
                     if fch and channel is None:
                         channel = int(fch.group(1))
-                    continue
 
                 if line.startswith('Quality='):
                     qm = re.search(r'Quality=(\d+)/(\d+)', line)
                     if qm:
                         quality_num = int(qm.group(1))
-                        quality_den = int(qm.group(2)) or 1
-                    sm = re.search(r'Signal level=(-?\d+)\s*dBm', line)
-                    if sm:
-                        rssi = int(sm.group(1))
+                        quality_den = int(qm.group(2))
+
+                # Some drivers place Signal level on a separate line.
+                sm = re.search(r'Signal level[=:]\s*(-?\d+)\s*dBm', line)
+                if sm:
+                    rssi = int(sm.group(1))
 
             if not mac:
                 continue
 
             mac = _normalize_bssid(mac)
-
-            if rssi is None and quality_den > 0:
-                pct = quality_num / quality_den
-                rssi = int(-100 + (pct * 70))
-
-            if rssi is None or rssi >= 0:
+            rejection_reason = _bssid_rejection_reason(mac)
+            if rejection_reason:
+                rejected[rejection_reason] += 1
                 continue
 
+            if rssi is None and quality_num is not None and quality_den is not None:
+                rssi = _quality_ratio_to_dbm(quality_num, quality_den)
+
+            if rssi is None or rssi >= 0:
+                rejected['invalid_signal'] += 1
+                continue
+            if rssi < MIN_GEOLOCATION_RSSI_DBM:
+                rejected['weak_signal'] += 1
+                continue
+
+            if channel is None and frequency_mhz is not None:
+                channel = _frequency_to_channel(frequency_mhz)
+
             if mac not in seen or rssi > seen[mac]['signal_dbm']:
-                entry = {'bssid': mac, 'signal_dbm': rssi}
+                previous = seen.get(mac, {})
+                entry = {
+                    'bssid': mac,
+                    'signal_dbm': rssi,
+                    'locally_administered': _is_locally_administered_bssid(mac),
+                }
                 if channel is not None:
                     entry['channel'] = channel
+                elif 'channel' in previous:
+                    entry['channel'] = previous['channel']
+                if frequency_mhz is not None:
+                    entry['frequency_mhz'] = frequency_mhz
+                elif 'frequency_mhz' in previous:
+                    entry['frequency_mhz'] = previous['frequency_mhz']
                 seen[mac] = entry
 
-        aps = sorted(seen.values(), key=lambda x: x['signal_dbm'], reverse=True)
+        aps = sorted(
+            seen.values(),
+            key=lambda item: (
+                item['locally_administered'],
+                -item['signal_dbm'],
+            ),
+        )
+        logger.info(
+            'WiFi geolocation scan parsed: valid=%d rejected=%s',
+            len(aps),
+            ','.join(f'{key}:{value}' for key, value in rejected.items()),
+        )
         return aps
 
-    except WifiScanBusy:
+    except (WifiScanBusy, WifiScanTimeout, WifiControlUnavailable):
         raise
     except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
         logger.error(

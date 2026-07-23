@@ -72,6 +72,9 @@ check "firstboot main path contains no package download or device registration" 
 check "image preparation defers live systemd operations to firstboot" \
     sh -c "grep -q 'Preparación de imagen: user lingering se aplicará en firstboot' '$ROOT/install.sh' && grep -q 'Preparación de imagen: daemon-reload se aplicará en firstboot' '$ROOT/install.sh' && grep -q '^ensure_user_lingering()' '$FIRSTBOOT'"
 
+check "installer reserves PulseAudio ownership for SIGIL" \
+    sh -c "grep -q 'pulseaudio.socket' '$ROOT/install.sh' && grep -q 'pulseaudio.service' '$ROOT/install.sh' && grep -q 'ln -sfn /dev/null' '$ROOT/install.sh'"
+
 check "real manufacturing bundle is available for installer integration" \
     test -n "$BUNDLE"
 

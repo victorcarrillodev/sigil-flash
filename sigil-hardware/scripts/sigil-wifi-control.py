@@ -63,7 +63,10 @@ CHECK_INTERVAL = float(
     os.environ.get('SIGIL_WIFI_CONNECT_CHECK_INTERVAL', '3')
 )
 PROBE_TIMEOUT = int(os.environ.get('SIGIL_WIFI_PROBE_TIMEOUT', '4'))
-SCAN_TIMEOUT = int(os.environ.get('SIGIL_WIFI_SCAN_TIMEOUT_SECONDS', '15'))
+# Shared with panel/wifi.py.  Four seconds bounds an individual 2.4 GHz scan
+# while leaving room for three attempts, two 0.75 s pauses, Unix-socket
+# overhead, and aggregation inside the 15 s adaptive geolocation budget.
+SCAN_TIMEOUT = float(os.environ.get('SIGIL_WIFI_SCAN_TIMEOUT_SECONDS', '4.0'))
 
 logger = logging.getLogger('sigil-wifi-control')
 
