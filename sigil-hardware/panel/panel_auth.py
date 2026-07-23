@@ -26,6 +26,7 @@ except ImportError:
 
 DEFAULT_INPUT = "/etc/sigil/manufacturing/sigil_secrets.json"
 DEFAULT_OUTPUT = "/etc/sigil/secrets/panel-pin.hash"
+DEFAULT_LENGTH_OUTPUT = "/etc/sigil/secrets/panel-pin.length"
 MAX_SECRET_BYTES = 1024
 MAX_HASH_BYTES = 1024
 
@@ -226,6 +227,90 @@ def _atomic_write_hash(path: str, encoded_hash: str, owner_uid: int, owner_gid: 
         raise
 
 
+def _atomic_write_pin_length(path: str, pin_length: int, owner_uid: int, owner_gid: int) -> None:
+    """Persist only the PIN length; the PIN itself remains unavailable after provisioning."""
+    if not 6 <= pin_length <= 12:
+        raise PanelCredentialError("panel PIN length must be between 6 and 12")
+    destination = Path(path)
+    parent = str(destination.parent)
+    parent_stat = os.lstat(parent)
+    if stat.S_ISLNK(parent_stat.st_mode) or not stat.S_ISDIR(parent_stat.st_mode):
+        raise PanelCredentialError("panel secret directory must be a non-symlink directory")
+    if (
+        stat.S_IMODE(parent_stat.st_mode) != 0o750
+        or parent_stat.st_uid != owner_uid
+        or parent_stat.st_gid != owner_gid
+    ):
+        raise PanelCredentialError("panel secret directory ownership or mode is invalid")
+
+    try:
+        existing = os.lstat(path)
+    except FileNotFoundError:
+        existing = None
+    if existing is not None and (stat.S_ISLNK(existing.st_mode) or not stat.S_ISREG(existing.st_mode)):
+        raise PanelCredentialError("panel PIN length destination is unsafe")
+
+    temporary = os.path.join(parent, f".{destination.name}.{os.getpid()}.{secrets.token_hex(8)}.tmp")
+    descriptor = os.open(
+        temporary,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+        0o600,
+    )
+    try:
+        payload = f"{pin_length}\n".encode("ascii")
+        os.write(descriptor, payload)
+        os.fchmod(descriptor, 0o640)
+        os.fchown(descriptor, owner_uid, owner_gid)
+        os.fsync(descriptor)
+    except Exception:
+        os.close(descriptor)
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+        raise
+    else:
+        os.close(descriptor)
+    try:
+        os.replace(temporary, path)
+        _sync_directory(parent)
+    except Exception:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def read_panel_pin_length(
+    path: str, expected_uid: int = 0, expected_gid: int | None = None
+) -> int | None:
+    """Return a provisioned PIN length only when its protected metadata is valid."""
+    if expected_gid is None:
+        try:
+            expected_gid = grp.getgrnam("sigil").gr_gid
+        except KeyError:
+            return None
+    try:
+        raw, opened = _read_regular_nofollow(path, 16, "panel PIN length")
+    except (FileNotFoundError, OSError, PanelCredentialError):
+        return None
+    if (
+        stat.S_IMODE(opened.st_mode) != 0o640
+        or opened.st_uid != expected_uid
+        or opened.st_gid != expected_gid
+    ):
+        return None
+    try:
+        value = raw.decode("ascii").strip()
+    except UnicodeDecodeError:
+        return None
+    if not value.isdigit():
+        return None
+    pin_length = int(value)
+    return pin_length if 6 <= pin_length <= 12 else None
+
+
 def _erase_consumed_secret(path: str, expected: os.stat_result) -> None:
     flags = os.O_WRONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     descriptor = os.open(path, flags)
@@ -250,9 +335,12 @@ def consume_manufacturing_secret(
     output_path: str = DEFAULT_OUTPUT,
     owner_uid: int = 0,
     owner_gid: int | None = None,
+    length_output_path: str | None = None,
 ) -> str:
     if owner_gid is None:
         owner_gid = grp.getgrnam("sigil").gr_gid
+    if length_output_path is None:
+        length_output_path = str(Path(output_path).with_name("panel-pin.length"))
     try:
         pin, source_stat = load_manufacturing_secret(input_path, expected_uid=owner_uid)
     except FileNotFoundError:
@@ -271,6 +359,12 @@ def consume_manufacturing_secret(
         if not verify_panel_pin_hash(output_path, pin, owner_uid, owner_gid):
             raise PanelCredentialError("written panel PIN hash could not be verified")
 
+    existing_length = read_panel_pin_length(length_output_path, owner_uid, owner_gid)
+    if existing_length is not None and existing_length != len(pin):
+        raise PanelCredentialError("existing panel PIN length does not match manufacturing input")
+    if existing_length is None:
+        _atomic_write_pin_length(length_output_path, len(pin), owner_uid, owner_gid)
+
     _erase_consumed_secret(input_path, source_stat)
     return "configured"
 
@@ -279,9 +373,12 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Consume a protected panel PIN secret")
     parser.add_argument("--input", default=DEFAULT_INPUT, help="protected secret JSON path")
     parser.add_argument("--output", default=DEFAULT_OUTPUT, help="encoded hash destination")
+    parser.add_argument("--length-output", default=DEFAULT_LENGTH_OUTPUT, help="non-secret PIN length destination")
     args = parser.parse_args()
     try:
-        result = consume_manufacturing_secret(args.input, args.output)
+        result = consume_manufacturing_secret(
+            args.input, args.output, length_output_path=args.length_output
+        )
     except (OSError, PanelCredentialError) as error:
         print(f"panel credential provisioning failed: {error}", file=os.sys.stderr)
         return 1

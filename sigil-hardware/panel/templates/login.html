@@ -45,7 +45,7 @@
 
         <div class="form-group">
           <label class="form-label" for="panel-pin">
-            Ingresa tu PIN
+            Ingresa tu PIN de {{ pin_length }} dígitos
           </label>
           <div class="pin-container" id="pin-container">
             <input type="password"
@@ -53,12 +53,12 @@
                    name="panel_pin"
                    class="pin-input"
                    inputmode="numeric"
-                   pattern="[0-9]{6,12}"
-                   minlength="6"
-                   maxlength="12"
+                   pattern="{{ '[0-9]{' ~ pin_length ~ '}' }}"
+                   minlength="{{ pin_length }}"
+                   maxlength="{{ pin_length }}"
                    autocomplete="current-password"
                    autofocus
-                   placeholder="●●●●●●"
+                   placeholder="{{ '●' * pin_length }}"
                    spellcheck="false">
             <div class="pin-dots" id="pin-dots"></div>
           </div>
@@ -88,10 +88,10 @@
     const form = document.querySelector('.login-form');
     const submitBtn = document.getElementById('submit-btn');
     const errorEl = document.getElementById('login-error');
+    const max = {{ pin_length|tojson }};
 
     if (pinInput && pinDots) {
       function updateDots(length) {
-        const max = 12;
         let html = '';
         for (let i = 0; i < max; i++) {
           const filled = i < length;
@@ -102,7 +102,7 @@
       }
 
       pinInput.addEventListener('input', function() {
-        this.value = this.value.replace(/\D/g, '').slice(0, 12);
+        this.value = this.value.replace(/\D/g, '').slice(0, max);
         if (errorEl) errorEl.style.display = 'none';
         updateDots(this.value.length);
       });

@@ -145,7 +145,7 @@ case "$command" in
             printf '    Class: 0x00200414\n'
         fi
         ;;
-    scan|power|unblock|block|trust|untrust|pair|connect|disconnect|remove)
+    scan|power|unblock|block|trust|untrust|pair|connect|disconnect|remove|pairable|discoverable)
         mutation_begin
         mac=$argument
         case "$command" in
@@ -335,12 +335,13 @@ test_bluez_remove_failure_reported() {
         && [ "$(cat "$SIGIL_BT_PREFERRED_FILE")" = "$OLD_MAC" ]
 }
 
-test_prestart_delay_not_panel_failure() {
+test_reconnect_starts_without_blind_boot_delay() {
     setup
-    grep -q '^ExecStartPre=/bin/sleep 12$' "${ROOT}/services/bt-connect.service" \
+    ! grep -q '^ExecStartPre=/bin/sleep' "${ROOT}/services/bt-connect.service" \
         && ! has_pattern 'systemctl.*(start|stop|restart).*bt-connect' \
             "${ROOT}/panel/app.py" "${ROOT}/panel/bluetooth.py" \
-        && grep -q '^BT_OWNER_TIMEOUT_SECONDS = 100$' "${ROOT}/panel/bluetooth.py"
+        && grep -q 'with_bluetooth_lock auto_cycle_locked || true' "$OWNER" \
+        && grep -q 'wait_a2dp_ready' "$OWNER"
 }
 
 test_no_duplicate_systemctl_jobs() {
@@ -423,7 +424,7 @@ run_test "successful connection persists only after completion" test_success_upd
 run_test "stale marker is eliminated in favor of flock" test_stale_marker_eliminated_by_flock
 run_test "automatic reconnect respects canonical flock" test_auto_reconnect_uses_same_lock
 run_test "BlueZ removal failure is reported" test_bluez_remove_failure_reported
-run_test "12-second pre-start cannot create panel failure" test_prestart_delay_not_panel_failure
+run_test "reconnect starts without blind boot delay" test_reconnect_starts_without_blind_boot_delay
 run_test "no duplicate systemctl jobs occur" test_no_duplicate_systemctl_jobs
 run_test "A2DP routing receives selected target" test_a2dp_routes_selected_target
 run_test "non-audio metadata is rejected before trust" test_non_audio_device_rejected_before_trust

@@ -33,6 +33,7 @@ class CredentialProvisioningTests(unittest.TestCase):
         self.output_dir = self.root / "secrets"
         self.output_dir.mkdir(mode=0o750)
         self.output = self.output_dir / "panel-pin.hash"
+        self.length_output = self.output_dir / "panel-pin.length"
 
     def tearDown(self):
         self.temporary.cleanup()
@@ -68,6 +69,13 @@ class CredentialProvisioningTests(unittest.TestCase):
             )
         )
         self.assertEqual(stat.S_IMODE(self.output.stat().st_mode), 0o640)
+        self.assertEqual(
+            panel_auth.read_panel_pin_length(
+                str(self.length_output), os.getuid(), os.getgid()
+            ),
+            len(SYNTHETIC_PIN),
+        )
+        self.assertEqual(stat.S_IMODE(self.length_output.stat().st_mode), 0o640)
 
     def test_schema_unknown_fields_and_trivial_pins_are_rejected(self):
         for document in (
@@ -134,6 +142,9 @@ def load_panel_app(hash_path: Path):
     module.panel_hash_is_provisioned = lambda path: panel_auth.panel_hash_is_provisioned(
         path, os.getuid(), os.getgid()
     )
+    module.read_panel_pin_length = lambda path: panel_auth.read_panel_pin_length(
+        path, os.getuid(), os.getgid()
+    )
     module._AUTH_FAILURES.clear()
     return module
 
@@ -153,10 +164,12 @@ class FlaskAuthenticationTests(unittest.TestCase):
         panel_auth.consume_manufacturing_secret(
             str(secret), str(self.hash_path), os.getuid(), os.getgid()
         )
+        os.environ["SIGIL_PANEL_PIN_LENGTH"] = str(root / "panel-pin.length")
         self.module = load_panel_app(self.hash_path)
         self.client = self.module.app.test_client()
 
     def tearDown(self):
+        os.environ.pop("SIGIL_PANEL_PIN_LENGTH", None)
         self.temporary.cleanup()
 
     def csrf_from_login(self) -> str:
@@ -165,6 +178,16 @@ class FlaskAuthenticationTests(unittest.TestCase):
         match = re.search(rb'name="csrf_token" value="([^"]+)"', page.data)
         self.assertIsNotNone(match)
         return match.group(1).decode("ascii")
+
+    def test_login_uses_the_provisioned_pin_length_for_dots_and_input_limit(self):
+        page = self.client.get("/login")
+        self.assertIn(b"PIN de 8 d", page.data)
+        self.assertIn(b'maxlength="8"', page.data)
+        self.assertIn(b"const max = 8;", page.data)
+        self.assertLess(
+            page.data.index(b"const max = 8;"),
+            page.data.index(b"if (pinInput && pinDots)"),
+        )
 
     def authenticate(self):
         token = self.csrf_from_login()
@@ -176,6 +199,11 @@ class FlaskAuthenticationTests(unittest.TestCase):
         return response
 
     def test_routes_reject_unauthenticated_access_and_captive_redirects(self):
+        self.module._startup_state = lambda: {
+            "BASE_SERVICES_READY": True, "PANEL_READY": True,
+            "AUDIO_OUTPUT_WAITING": True, "A2DP_READY": False,
+            "MEDIA_READY": True, "PLAYBACK_ACTIVE": False,
+        }
         paths = [
             "/api/system-status", "/scan/known", "/bt/status", "/wifi/scan",
             "/wifi/status", "/music/status", "/api/csrf-token",
@@ -187,6 +215,8 @@ class FlaskAuthenticationTests(unittest.TestCase):
         for path in ("/pair", "/wifi/connect", "/music/next"):
             self.assertEqual(self.client.post(path).status_code, 401, path)
         self.assertEqual(self.client.get("/").status_code, 302)
+        self.assertEqual(self.client.get("/startup").status_code, 302)
+        self.assertEqual(self.client.get("/api/startup-status").status_code, 200)
         captive = self.client.get("/generate_204")
         self.assertEqual(captive.status_code, 302)
         self.assertEqual(captive.headers["Location"], "http://192.168.4.1/login")
@@ -219,6 +249,50 @@ class FlaskAuthenticationTests(unittest.TestCase):
         logged_out = self.client.post("/logout", data={"csrf_token": csrf})
         self.assertEqual(logged_out.status_code, 302)
         self.assertEqual(self.client.get("/api/system-status").status_code, 401)
+
+    def test_startup_hides_only_when_panel_services_are_ready(self):
+        self.module._startup_state = lambda: {
+            "BASE_SERVICES_READY": False, "PANEL_READY": False,
+            "AUDIO_OUTPUT_WAITING": False, "A2DP_READY": False,
+            "MEDIA_READY": False, "PLAYBACK_ACTIVE": False,
+        }
+        no_speaker_waiting = self.client.get("/startup")
+        self.assertEqual(no_speaker_waiting.status_code, 200)
+        state = self.client.get("/api/startup-status").get_json()["states"]
+        self.assertFalse(state["BASE_SERVICES_READY"])
+        self.assertFalse(state["PANEL_READY"])
+
+        self.module._startup_state = lambda: {
+            "BASE_SERVICES_READY": True, "PANEL_READY": True,
+            "AUDIO_OUTPUT_WAITING": True, "A2DP_READY": False,
+            "MEDIA_READY": True, "PLAYBACK_ACTIVE": False,
+        }
+        self.assertEqual(self.client.get("/startup").status_code, 302)
+        states = self.client.get("/api/startup-status").get_json()["states"]
+        self.assertTrue(states["PANEL_READY"])
+        self.assertTrue(states["AUDIO_OUTPUT_WAITING"])
+        self.assertFalse(states["A2DP_READY"])
+        self.assertTrue(states["MEDIA_READY"])
+        self.assertFalse(states["PLAYBACK_ACTIVE"])
+
+    def test_first_install_without_preferred_speaker_is_panel_ready_not_playing(self):
+        self.module._services_active = lambda _services: True
+        self.module.get_preferred_device = lambda: None
+        self.module._read_bounded_json = lambda _path: None
+        original_exists = self.module.os.path.exists
+        self.module.os.path.exists = lambda _path: False
+        try:
+            states = self.module._startup_state()
+        finally:
+            self.module.os.path.exists = original_exists
+        self.assertTrue(states["FIRST_INSTALL"])
+        self.assertTrue(states["NO_PREFERRED_SPEAKER"])
+        self.assertTrue(states["BASE_SERVICES_READY"])
+        self.assertTrue(states["PANEL_READY"])
+        self.assertTrue(states["AUDIO_OUTPUT_WAITING"])
+        self.assertFalse(states["A2DP_READY"])
+        self.assertTrue(states["MEDIA_READY"])
+        self.assertFalse(states["PLAYBACK_ACTIVE"])
 
     def test_https_configuration_marks_session_cookie_secure(self):
         self.module.app.config["SESSION_COOKIE_SECURE"] = True

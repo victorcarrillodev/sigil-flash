@@ -18,7 +18,10 @@ RESULT_MAC=""
 COMMAND_MODE=0
 BT_LAST_RC=0
 AUTO_RETRY_INITIAL="${SIGIL_BT_RETRY_INITIAL:-15}"
-AUTO_RETRY_MAX="${SIGIL_BT_RETRY_MAX:-300}"
+# A saved speaker can be temporarily off, but a five-minute retry interval makes
+# a recovered speaker feel broken.  Keep trying in the background at least once
+# per minute while the panel gives the customer a bounded waiting screen.
+AUTO_RETRY_MAX="${SIGIL_BT_RETRY_MAX:-60}"
 AUTO_HEALTH_INTERVAL="${SIGIL_BT_HEALTH_INTERVAL:-15}"
 
 if [ "${1:-}" = "request" ]; then
@@ -140,7 +143,10 @@ with_bluetooth_lock() {
 run_bt() {
     local seconds="$1" rc
     shift
-    BT_LAST_OUTPUT=$(timeout "$seconds" "$BLUETOOTHCTL" "$@" 2>&1)
+    # BlueZ commands occasionally ignore SIGTERM while D-Bus is recovering.
+    # Escalate two seconds later so a stuck client cannot hold the canonical
+    # transition lock forever and prevent the next automatic reconnect.
+    BT_LAST_OUTPUT=$(timeout --kill-after=2s "$seconds" "$BLUETOOTHCTL" "$@" 2>&1)
     rc=$?
     BT_LAST_RC=$rc
     if [ "$rc" -ne 0 ]; then
@@ -163,6 +169,25 @@ is_connected() {
     local info
     info=$(device_info "$1") || return 1
     grep -qiE '^[[:space:]]*Connected:[[:space:]]*yes$' <<< "$info"
+}
+
+services_resolved() {
+    local info
+    info=$(device_info "$1") || return 1
+    # Some BlueZ versions do not print ServicesResolved in bluetoothctl info;
+    # the announced Audio Sink UUID is its compatible proof of completed
+    # service discovery for an audio device.
+    grep -qiE '^[[:space:]]*ServicesResolved:[[:space:]]*yes$' <<< "$info" \
+        || grep -qiE 'UUID:.*(Audio Sink|Advanced Audio|0000110[bBdD]-)' <<< "$info"
+}
+
+wait_services_resolved() {
+    local mac="$1" attempt
+    for attempt in 1 2 3 4 5 6 7 8 9 10; do
+        services_resolved "$mac" && return 0
+        sleep 1
+    done
+    return 1
 }
 
 is_paired() {
@@ -231,6 +256,10 @@ connect_target() {
         run_bt 15 connect "$mac" || command_ok=0
         if [ "$attempt" -eq 1 ]; then sleep 4; else sleep 5; fi
         if is_connected "$mac"; then
+            if ! wait_services_resolved "$mac"; then
+                log "Servicios Bluetooth aún no resueltos para $mac"
+                continue
+            fi
             [ "$command_ok" -eq 1 ] || log "Conexión confirmada pese al retorno de bluetoothctl"
             return 0
         fi
@@ -347,7 +376,18 @@ request_pair_locked() {
         RESULT_MESSAGE="No se pudo encender Bluetooth"
         return 1
     }
+    # The local adapter is discoverable/pairable only for the pairing request;
+    # it is always closed again before continuing with trust/connect/A2DP.
+    if ! run_bt 5 pairable on || ! run_bt 5 discoverable on; then
+        run_bt 5 discoverable off || true
+        run_bt 5 pairable off || true
+        RESULT_CODE="pairing_visibility_failed"
+        RESULT_MESSAGE="No se pudo preparar Bluetooth para el emparejamiento"
+        return 1
+    fi
     if ! run_bt 20 pair "$mac" && ! is_paired "$mac"; then
+        run_bt 5 discoverable off || true
+        run_bt 5 pairable off || true
         RESULT_CODE="pair_failed"
         if [ "$BT_LAST_RC" -eq 124 ]; then
             RESULT_MESSAGE="La bocina no respondió antes del límite; confirma que siga en modo de emparejamiento"
@@ -356,6 +396,8 @@ request_pair_locked() {
         fi
         return 1
     fi
+    run_bt 5 discoverable off || log "No se pudo desactivar descubrimiento tras emparejar"
+    run_bt 5 pairable off || log "No se pudo desactivar emparejamiento tras emparejar"
     if ! is_paired "$mac"; then
         RESULT_CODE="pair_failed"
         RESULT_MESSAGE="BlueZ no confirmó el emparejamiento"
@@ -555,6 +597,10 @@ run_daemon() {
     local retry_delay="$AUTO_RETRY_INITIAL"
     log "bt-connect iniciado"
     with_bluetooth_lock prepare_adapter_locked || return 1
+    # A preferred speaker is connected immediately after BlueZ is ready.
+    # The panel and audio workers start in parallel; endpoint discovery below
+    # only gates A2DP activation, never panel availability.
+    with_bluetooth_lock auto_cycle_locked || true
     wait_a2dp_ready
     with_bluetooth_lock auto_cycle_locked || true
     if [ "${SIGIL_BT_RUN_ONCE:-0}" = "1" ]; then

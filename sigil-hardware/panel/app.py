@@ -14,6 +14,7 @@ import logging
 import ipaddress
 import secrets
 import stat
+import subprocess
 import threading
 import time
 import urllib.request
@@ -40,7 +41,7 @@ from wifi import (
     scan_wifi_networks,
     validate_wifi_credentials,
 )
-from panel_auth import panel_hash_is_provisioned, verify_panel_pin_hash
+from panel_auth import panel_hash_is_provisioned, read_panel_pin_length, verify_panel_pin_hash
 
 
 # ── Carga segura de secrets desde env file ────────────────────────────────
@@ -110,12 +111,25 @@ _MAX_RUNTIME_STATE_BYTES = 64 * 1024
 _PANEL_PIN_HASH_FILE = os.environ.get(
     "SIGIL_PANEL_PIN_HASH", "/etc/sigil/secrets/panel-pin.hash"
 )
+_PANEL_PIN_LENGTH_FILE = os.environ.get(
+    "SIGIL_PANEL_PIN_LENGTH", "/etc/sigil/secrets/panel-pin.length"
+)
 _SESSION_MAX_IDLE_SECONDS = 30 * 60
 _AUTH_ATTEMPT_WINDOW_SECONDS = 15 * 60
 _AUTH_MAX_DELAY_SECONDS = 60
 _AUTH_MAX_CLIENTS = 256
 _AUTH_FAILURES: dict[str, dict[str, float | int]] = {}
 _AUTH_FAILURES_LOCK = threading.Lock()
+_BASE_STARTUP_SERVICES = (
+    "bluetooth.service",
+    "bt-connect.service",
+)
+_PANEL_STARTUP_SERVICES = (
+    "bluetooth-panel.service",
+    "radio-fetcher.service",
+    "audio-manager.service",
+    "audio-player.service",
+)
 _MUTATING_ENDPOINTS = {
     "pair",
     "api_connect",
@@ -248,14 +262,14 @@ def enforce_panel_security():
     if not _request_host_is_allowed():
         return jsonify({"success": False, "message": "Solicitud no permitida"}), 400
 
-    if endpoint in {"static", "login", "logout"}:
+    if endpoint in {"static", "login", "logout", "startup", "startup_status"}:
         return None
 
     authenticated_at = session.get("authenticated_at")
     now = int(time.time())
     if not session.get("panel_authenticated") or not isinstance(authenticated_at, int):
         if request.path == "/":
-            return redirect(url_for("login", next=request.path))
+            return redirect(url_for("startup"))
         return jsonify({"success": False, "message": "Autenticación requerida"}), 401
     if now - authenticated_at > _SESSION_MAX_IDLE_SECONDS:
         session.clear()
@@ -323,6 +337,79 @@ def _panel_hash_available() -> bool:
     return panel_hash_is_provisioned(_PANEL_PIN_HASH_FILE)
 
 
+def _panel_pin_length() -> int:
+    # Older images have only the Argon2id hash, from which PIN length cannot be
+    # recovered. Keep their existing 12-digit UI until they are reprovisioned.
+    return read_panel_pin_length(_PANEL_PIN_LENGTH_FILE) or 12
+
+
+def _preferred_a2dp_is_ready() -> bool:
+    """Require a usable Bluetooth route, not merely a BlueZ connection."""
+    preferred = get_preferred_device()
+    if not preferred or not is_device_connected(preferred):
+        return False
+    playback_state = _read_bounded_json(_PLAYBACK_STATE_FILE)
+    output = playback_state.get("output") if playback_state else None
+    if not isinstance(output, dict):
+        return False
+    if output.get("available") is not True or output.get("type") != "bluetooth":
+        return False
+    device = output.get("device")
+    return device in (None, "", preferred)
+
+
+def _services_active(services: tuple[str, ...]) -> bool:
+    """Check a fixed allowlist of local system services with a hard timeout."""
+    try:
+        result = subprocess.run(
+            ["systemctl", "is-active", "--quiet", *services],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=2,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
+
+
+def _startup_state() -> dict[str, bool]:
+    """Return independent boot, audio-route, media and playback readiness states."""
+    base_services_ready = _services_active(_BASE_STARTUP_SERVICES)
+    panel_workers_ready = _services_active(_PANEL_STARTUP_SERVICES)
+    panel_ready = base_services_ready and panel_workers_ready
+    playback_state = _read_bounded_json(_PLAYBACK_STATE_FILE)
+    output = playback_state.get("output") if playback_state else None
+    output_available = isinstance(output, dict) and output.get("available") is True
+    preferred = get_preferred_device()
+    no_preferred_speaker = not preferred
+    # The file is created only after an explicit successful connection. An
+    # absent file distinguishes a first installation from a later deselection.
+    preferred_file = getattr(config, "PREFERRED_BT_FILE", "/home/sigil/preferred_bt.txt")
+    first_install = no_preferred_speaker and not os.path.exists(preferred_file)
+    a2dp_ready = _preferred_a2dp_is_ready()
+    media_ready = _services_active(("radio-fetcher.service",))
+    playback_active = bool(
+        panel_ready
+        and output_available
+        and playback_state
+        and playback_state.get("playing") is True
+    )
+    return {
+        "BASE_SERVICES_READY": base_services_ready,
+        "PANEL_READY": panel_ready,
+        "FIRST_INSTALL": first_install,
+        "NO_PREFERRED_SPEAKER": no_preferred_speaker,
+        "AUDIO_OUTPUT_WAITING": panel_ready and not output_available,
+        "A2DP_READY": a2dp_ready,
+        # A running fetcher has started its job; a download completion is not
+        # required before exposing the pairing/login panel.
+        "MEDIA_READY": media_ready,
+        "PLAYBACK_ACTIVE": playback_active,
+    }
+
+
 @app.route("/login", methods=["GET", "POST"])
 def login():
     if request.method == "GET":
@@ -330,6 +417,7 @@ def login():
             "login.html",
             csrf_token=_csrf_token(),
             setup_locked=not _panel_hash_available(),
+            pin_length=_panel_pin_length(),
             error="",
         )
 
@@ -338,6 +426,7 @@ def login():
             "login.html",
             csrf_token=_csrf_token(),
             setup_locked=not _panel_hash_available(),
+            pin_length=_panel_pin_length(),
             error="No se pudo iniciar sesión.",
         ), 403
 
@@ -346,6 +435,7 @@ def login():
             "login.html",
             csrf_token=_csrf_token(),
             setup_locked=True,
+            pin_length=_panel_pin_length(),
             error="El acceso local aún no está configurado.",
         ), 503
 
@@ -356,6 +446,7 @@ def login():
             "login.html",
             csrf_token=_csrf_token(),
             setup_locked=False,
+            pin_length=_panel_pin_length(),
             error="No se pudo iniciar sesión. Inténtalo de nuevo más tarde.",
         )
         return response, 429, {"Retry-After": str(delay)}
@@ -368,6 +459,7 @@ def login():
             "login.html",
             csrf_token=_csrf_token(),
             setup_locked=False,
+            pin_length=_panel_pin_length(),
             error="No se pudo iniciar sesión. Verifica las credenciales.",
         )
         return response, 401, {"Retry-After": str(delay)}
@@ -438,6 +530,20 @@ def system_status():
     return jsonify({
         "uptime_seconds": int(uptime_seconds),
     })
+
+
+@app.route("/startup")
+def startup():
+    """Calm, public first-session wait screen for the saved Bluetooth speaker."""
+    if _startup_state()["PANEL_READY"]:
+        return redirect(url_for("login"))
+    return render_template("startup.html")
+
+
+@app.route("/api/startup-status")
+def startup_status():
+    """Expose only readiness, never device identity or audio metadata."""
+    return jsonify({"states": _startup_state()})
 
 
 # ── Rutas principales ──────────────────────────────────────────────────────────

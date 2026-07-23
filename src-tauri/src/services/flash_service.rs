@@ -1410,6 +1410,8 @@ fn provision_panel_credential(root: &Path, config: &DeviceConfig) -> AppResult<(
             "/etc/sigil/manufacturing/sigil_secrets.json",
             "--output",
             "/etc/sigil/secrets/panel-pin.hash",
+            "--length-output",
+            "/etc/sigil/secrets/panel-pin.length",
         ],
         None,
     );
@@ -1427,7 +1429,10 @@ fn provision_panel_credential(root: &Path, config: &DeviceConfig) -> AppResult<(
             "No se pudo generar el hash Argon2id del panel: {detail}"
         )));
     }
-    if input_path.exists() || !root.join("etc/sigil/secrets/panel-pin.hash").is_file() {
+    if input_path.exists()
+        || !root.join("etc/sigil/secrets/panel-pin.hash").is_file()
+        || !root.join("etc/sigil/secrets/panel-pin.length").is_file()
+    {
         erase_plaintext_file(&input_path);
         return Err(AppError::Flash(
             "La credencial del panel no quedó consumida de forma segura".into(),

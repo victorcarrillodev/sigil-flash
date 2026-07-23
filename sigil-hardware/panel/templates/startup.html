@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#0e0e0e">
+  <title>SIGIL — Preparando tu espacio</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/startup.css') }}">
+</head>
+<body>
+  <video class="startup-video" autoplay muted loop playsinline preload="metadata"
+         poster="{{ url_for('static', filename='img/logo.png') }}">
+    <source src="{{ url_for('static', filename='video/login-bg.mp4') }}" type="video/mp4">
+  </video>
+  <div class="startup-scrim"></div>
+  <main class="startup-main" aria-live="polite">
+    <img src="{{ url_for('static', filename='img/logo.png') }}" alt="SIGIL" class="startup-logo">
+    <section class="startup-copy" aria-labelledby="startup-title">
+      <p class="startup-eyebrow">PREPARANDO TU EXPERIENCIA</p>
+      <h1 id="startup-title">SIGIL está despertando</h1>
+      <p id="startup-message" class="startup-message">Estamos iniciando los sistemas y preparando todo para ti.</p>
+      <div class="startup-progress" role="progressbar" aria-label="Preparando conexión de audio" aria-valuemin="0" aria-valuemax="100">
+        <span id="startup-progress-value"></span>
+      </div>
+      <p id="startup-detail" class="startup-detail">Tu panel aparecerá cuando esté listo para conectar una bocina.</p>
+      <a id="startup-continue" class="startup-continue" href="{{ url_for('login') }}" hidden>Continuar al panel</a>
+    </section>
+  </main>
+  <footer>SIGIL SYSTEMS · TODO ESTÁ TOMANDO FORMA</footer>
+  <script>
+  (() => {
+    const messages = [
+      'Estamos iniciando los sistemas y preparando todo para ti.',
+      'Dejando Bluetooth y audio listos para tu bocina.',
+      'Tu espacio está casi listo. Gracias por esperar un momento.',
+      'Afinando los últimos detalles para una experiencia sin interrupciones.',
+      'La música y el panel se están sincronizando con calma.'
+    ];
+    const message = document.getElementById('startup-message');
+    const detail = document.getElementById('startup-detail');
+    const progress = document.getElementById('startup-progress-value');
+    const progressBar = document.querySelector('.startup-progress');
+    const continueLink = document.getElementById('startup-continue');
+    const startedAt = Date.now();
+    let messageIndex = 0;
+
+    function updateCopy() {
+      message.classList.add('is-changing');
+      window.setTimeout(() => {
+        messageIndex = (messageIndex + 1) % messages.length;
+        message.textContent = messages[messageIndex];
+        message.classList.remove('is-changing');
+      }, 180);
+    }
+
+    async function checkReadiness() {
+      const elapsed = Date.now() - startedAt;
+      progress.style.width = `${Math.min(88, 12 + elapsed / 1100)}%`;
+      progressBar.setAttribute('aria-valuenow', String(Math.round(Math.min(88, 12 + elapsed / 1100))));
+      try {
+        const response = await fetch('{{ url_for('startup_status') }}', { cache: 'no-store' });
+        const state = await response.json();
+        if (state.states && state.states.PANEL_READY) {
+          progress.style.width = '100%';
+          detail.textContent = 'Todo listo. Abriendo el acceso…';
+          window.setTimeout(() => window.location.replace('{{ url_for('login') }}'), 420);
+          return;
+        }
+      } catch (_) {
+        detail.textContent = 'Seguimos preparando la conexión…';
+      }
+      if (elapsed >= 90000) {
+        detail.textContent = 'La conexión sigue en segundo plano. Puedes entrar al panel ahora.';
+        continueLink.hidden = false;
+      }
+      window.setTimeout(checkReadiness, 2000);
+    }
+
+    window.setInterval(updateCopy, 4200);
+    checkReadiness();
+  })();
+  </script>
+</body>
+</html>

@@ -1,9 +1,9 @@
 [Unit]
 Description=Sigil Bluetooth Auto Connect
-# bt-connect DEBE esperar a que PulseAudio esté completamente listo para
-# registrar los endpoints A2DP en BlueZ.
-# Sin esto: "br-connection-profile-unavailable" / "Protocol not available"
-After=bluetooth.service bluetooth.target sigil-pulseaudio.service sound.target
+# Start reconnect as soon as BlueZ is ready.  PulseAudio starts in parallel;
+# bt-connect waits for its A2DP endpoint only after attempting the preferred
+# speaker connection.
+After=bluetooth.service bluetooth.target
 Wants=bluetooth.service sigil-pulseaudio.service
 # Reiniciar indefinidamente si falla (la Pi puede no tener Bluetooth listo de inmediato)
 StartLimitIntervalSec=0
@@ -12,8 +12,6 @@ StartLimitIntervalSec=0
 Type=simple
 User=sigil
 Group=sigil
-# PulseAudio is started by sigil-pulseaudio.service; the script then waits for
-# the actual A2DP endpoints instead of using a blind boot delay.
 ExecStart=/usr/local/bin/bt-connect.sh
 Restart=on-failure
 RestartSec=15
