@@ -280,8 +280,7 @@ activate_a2dp() {
 }
 
 disconnect_previous_preferred() {
-    local keep_mac="$1" previous=""
-    previous=$(read_preferred 2>/dev/null || true)
+    local keep_mac="$1" previous="${2:-}"
     [ -n "$previous" ] || return 0
     [ "$previous" != "$keep_mac" ] || return 0
     is_connected "$previous" || return 0
@@ -292,9 +291,8 @@ disconnect_previous_preferred() {
 }
 
 rollback_new_target() {
-    local mac="$1" old_preferred=""
-    old_preferred=$(read_preferred 2>/dev/null || true)
-    if [ "$old_preferred" != "$mac" ] && is_connected "$mac"; then
+    local mac="$1" previous_preferred="${2:-}"
+    if [ "$previous_preferred" != "$mac" ] && is_connected "$mac"; then
         run_bt 8 disconnect "$mac" || true
     fi
 }
@@ -339,7 +337,7 @@ prepare_target() {
 }
 
 complete_target_connection() {
-    local mac="$1"
+    local mac="$1" previous_preferred="${2:-}"
     if ! connect_target "$mac"; then
         RESULT_CODE="connect_failed"
         RESULT_MESSAGE="No se pudo conectar. Verifica que la bocina esté encendida y cerca."
@@ -347,21 +345,14 @@ complete_target_connection() {
     fi
 
     if ! activate_a2dp "$mac"; then
-        rollback_new_target "$mac"
         RESULT_CODE="a2dp_failed"
-        RESULT_MESSAGE="La bocina conectó, pero la ruta A2DP no quedó disponible"
+        RESULT_MESSAGE="La bocina quedó guardada; la ruta A2DP aún no está disponible y se reintentará"
         return 1
     fi
-    if ! disconnect_previous_preferred "$mac"; then
-        rollback_new_target "$mac"
+    if ! disconnect_previous_preferred "$mac" "$previous_preferred"; then
+        rollback_new_target "$mac" "$previous_preferred"
         RESULT_CODE="exclusive_failed"
         RESULT_MESSAGE="No se pudo desconectar la bocina preferida anterior"
-        return 1
-    fi
-    if ! write_preferred "$mac"; then
-        rollback_new_target "$mac"
-        RESULT_CODE="state_write_failed"
-        RESULT_MESSAGE="No se pudo guardar la bocina preferida"
         return 1
     fi
     RESULT_MAC="$mac"
@@ -369,7 +360,7 @@ complete_target_connection() {
 }
 
 request_pair_locked() {
-    local mac="$1" audio_status
+    local mac="$1" audio_status previous_preferred=""
     run_bt 5 scan off || log "No se pudo detener el escaneo; se continúa bajo flock"
     run_bt 5 power on || {
         RESULT_CODE="power_failed"
@@ -412,17 +403,29 @@ request_pair_locked() {
         return 1
     fi
     prepare_target "$mac" || return 1
-    complete_target_connection "$mac" || return 1
+    previous_preferred=$(read_preferred 2>/dev/null || true)
+    if ! write_preferred "$mac"; then
+        RESULT_CODE="state_write_failed"
+        RESULT_MESSAGE="No se pudo guardar la bocina preferida"
+        return 1
+    fi
+    complete_target_connection "$mac" "$previous_preferred" || return 1
     RESULT_CODE="paired"
     RESULT_MESSAGE="Bocina emparejada y conectada exitosamente"
     return 0
 }
 
 request_connect_locked() {
-    local mac="$1"
+    local mac="$1" previous_preferred=""
     run_bt 5 scan off || log "No se pudo detener el escaneo; se continúa bajo flock"
     prepare_target "$mac" || return 1
-    complete_target_connection "$mac" || return 1
+    previous_preferred=$(read_preferred 2>/dev/null || true)
+    if ! write_preferred "$mac"; then
+        RESULT_CODE="state_write_failed"
+        RESULT_MESSAGE="No se pudo guardar la bocina preferida"
+        return 1
+    fi
+    complete_target_connection "$mac" "$previous_preferred" || return 1
     RESULT_CODE="connected"
     RESULT_MESSAGE="Conectado exitosamente"
     return 0
@@ -438,13 +441,8 @@ request_disconnect_locked() {
             return 1
         fi
     fi
-    if ! clear_preferred; then
-        RESULT_CODE="state_write_failed"
-        RESULT_MESSAGE="No se pudo deseleccionar la bocina"
-        return 1
-    fi
     RESULT_CODE="disconnected"
-    RESULT_MESSAGE="Bocina desconectada y deseleccionada"
+    RESULT_MESSAGE="Bocina desconectada; permanece como preferida para la reconexión automática"
     return 0
 }
 

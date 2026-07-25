@@ -17,6 +17,8 @@ set -euo pipefail
 
 STATE_DIR="${SIGIL_STATE_DIR:-/var/lib/sigil}"
 SSH_STATUS_FILE="${STATE_DIR}/ssh_status.json"
+PLAYBACK_STATE_FILE="${SIGIL_PLAYBACK_STATE_FILE:-${STATE_DIR}/playback_state.json}"
+AUDIO_MODE_FILE="${SIGIL_AUDIO_MODE_FILE:-${STATE_DIR}/audio_mode.json}"
 RUN_SIGIL_DIR="${SIGIL_RUN_DIR:-/run/sigil}"
 CACHE_WIPE="${SIGIL_CACHE_WIPE:-/usr/local/bin/sigil-cache-wipe.sh}"
 RADIO_FETCHER="${SIGIL_RADIO_FETCHER:-/usr/local/bin/radio-fetcher.sh}"
@@ -233,6 +235,78 @@ stop_managed_services() {
     if pgrep -x mpg123 &>/dev/null; then
         pkill -9 mpg123 2>/dev/null || true
     fi
+}
+
+mark_audio_stopped_for_ssh() {
+    # SSH maintenance intentionally stops audio. Persist that fact so panel
+    # telemetry does not continue reporting RADIO/playing=true from the last
+    # track. Preserve playlist, cursor, output, and cache metadata for resume.
+    python3 - "$PLAYBACK_STATE_FILE" "$AUDIO_MODE_FILE" <<'PYEOF'
+import json
+import os
+import sys
+import tempfile
+from datetime import datetime, timezone
+
+playback_path, audio_mode_path = sys.argv[1:]
+now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+def load(path):
+    try:
+        with open(path, encoding="utf-8") as handle:
+            value = json.load(handle)
+        return value if isinstance(value, dict) else None
+    except (FileNotFoundError, OSError, ValueError):
+        return None
+
+def atomic_write(path, document):
+    if document is None:
+        return
+    directory = os.path.dirname(path) or "."
+    try:
+        original = os.stat(path)
+    except OSError:
+        original = None
+    fd, temporary = tempfile.mkstemp(dir=directory, prefix=".ssh-audio-state.", suffix=".tmp")
+    try:
+        if original is not None:
+            os.fchmod(fd, original.st_mode & 0o7777)
+            try:
+                os.fchown(fd, original.st_uid, original.st_gid)
+            except PermissionError:
+                pass
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(document, handle, indent=2, ensure_ascii=False)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        directory_fd = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    except BaseException:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+        raise
+
+playback = load(playback_path)
+if playback is not None:
+    playback["mode"] = "IDLE"
+    playback["playing"] = False
+    atomic_write(playback_path, playback)
+
+audio_mode = load(audio_mode_path)
+if audio_mode is not None:
+    audio_mode["mode"] = "IDLE"
+    audio_mode["reason"] = "ssh_maintenance"
+    audio_mode["since"] = now
+    audio_mode["last_error"] = None
+    atomic_write(audio_mode_path, audio_mode)
+PYEOF
 }
 
 create_runtime_marker() {
@@ -1200,6 +1274,10 @@ enter_maintenance() {
         write_ssh_status "1" "false" "false" "" "" "false" "false" \
             "service-stop" "true" "1" "restore_failed" || true
         return 1
+    fi
+
+    if ! mark_audio_stopped_for_ssh; then
+        log "WARN" "Could not publish IDLE/ssh_maintenance audio state"
     fi
 
     # 3. Wipe cache — keep marker even if wipe fails

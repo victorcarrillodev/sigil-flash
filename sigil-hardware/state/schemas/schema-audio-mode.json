@@ -23,6 +23,7 @@
       "enum": [
         "RADIO",
         "LOCAL",
+        "IDLE",
         "TRANSITION_TO_LOCAL",
         "TRANSITION_TO_RADIO",
         "BLOCKED_NO_CACHE",
@@ -51,6 +52,7 @@
         "playlist_updated",
         "recovery_timer_expired",
         "startup",
+        "ssh_maintenance",
         "error"
       ]
     },

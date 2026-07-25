@@ -46,6 +46,8 @@ setup_case() {
     RUN_SIGIL_DIR="$TEST_ROOT/run"
     STATE_DIR="$TEST_ROOT/state"
     SSH_STATUS_FILE="$STATE_DIR/ssh_status.json"
+    PLAYBACK_STATE_FILE="$STATE_DIR/playback_state.json"
+    AUDIO_MODE_FILE="$STATE_DIR/audio_mode.json"
     SSH_ACTIVE_MARKER="$RUN_SIGIL_DIR/ssh-active"
     LOGOUT_FETCH_MARKER="$RUN_SIGIL_DIR/logout-fetch-active"
     SERVICE_SNAPSHOT_FILE="$RUN_SIGIL_DIR/ssh-service-snapshot.json"
@@ -68,6 +70,13 @@ setup_case() {
     export TEST_SS_OUTPUT="$TEST_ROOT/ss-output"
     : > "$TEST_EVENT_LOG"
     : > "$TEST_SS_OUTPUT"
+
+    cat > "$PLAYBACK_STATE_FILE" <<'EOF'
+{"_schema_version":"1.0","mode":"RADIO","playing":true,"local":{"current_track_index":1,"current_track_id":"track-1"}}
+EOF
+    cat > "$AUDIO_MODE_FILE" <<'EOF'
+{"_schema_version":"1.0","mode":"RADIO","desired_mode":"RADIO","reason":"server_available","since":"2026-01-01T00:00:00Z","internet_available":true,"cache_status":"COMPLETE","active_playlist_version":"hash","last_transition_at":"2026-01-01T00:00:00Z","transition_count":2,"last_error":null}
+EOF
 
     cat > "$TEST_ROOT/bin/systemctl" <<'EOF'
 #!/bin/bash
@@ -298,6 +307,27 @@ PYEOF
     [ ! -e "$LOGOUT_FETCH_MARKER" ]
 }
 
+test_ssh_stop_publishes_idle_audio_state() {
+    setup_case
+    prepare_mixed_service_state
+    enter_maintenance >/dev/null 2>&1 || return 1
+    python3 - "$PLAYBACK_STATE_FILE" "$AUDIO_MODE_FILE" <<'PYEOF'
+import json
+import sys
+
+playback = json.load(open(sys.argv[1], encoding="utf-8"))
+audio = json.load(open(sys.argv[2], encoding="utf-8"))
+if playback.get("mode") != "IDLE" or playback.get("playing") is not False:
+    raise SystemExit(1)
+if playback.get("local", {}).get("current_track_index") != 1:
+    raise SystemExit(1)
+if audio.get("mode") != "IDLE" or audio.get("reason") != "ssh_maintenance":
+    raise SystemExit(1)
+if audio.get("cache_status") != "COMPLETE" or audio.get("desired_mode") != "RADIO":
+    raise SystemExit(1)
+PYEOF
+}
+
 test_logout_wipe_failure_fails_closed() {
     setup_case
     prepare_mixed_service_state
@@ -525,6 +555,7 @@ run_test "two inbound sessions are counted" test_two_inbound_sessions_counted
 run_test "zero inbound sessions returns zero" test_zero_inbound_sessions
 run_test "numeric port 22 fallback works" test_numeric_port_fallback
 run_test "successful cycle restores exact service state" test_successful_cycle_restores_exact_state
+run_test "SSH stop publishes truthful idle audio state" test_ssh_stop_publishes_idle_audio_state
 run_test "logout wipe failure fails closed" test_logout_wipe_failure_fails_closed
 run_test "login wipe failure remains persisted across count updates" test_login_wipe_failure_status_survives_count_update
 run_test "fetch failure does not restore audio-player" test_fetch_failure_does_not_restore_player

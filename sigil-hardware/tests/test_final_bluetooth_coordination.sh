@@ -264,14 +264,15 @@ test_preferred_symlink_never_followed() {
     local target="${TEST_DIR}/outside-state"
     printf '%s\n' "$OLD_MAC" > "$target"
     ln -s "$target" "$SIGIL_BT_PREFERRED_FILE"
-    owner_request disconnect
+    add_paired "$NEW_MAC"
+    owner_request connect "$NEW_MAC"
     [ "$OWNER_RC" -ne 0 ] \
         && [ "$(json_field "$OWNER_OUTPUT" code)" = state_write_failed ] \
         && [ -L "$SIGIL_BT_PREFERRED_FILE" ] \
         && [ "$(cat "$target")" = "$OLD_MAC" ]
 }
 
-test_failed_target_preserves_old_preferred() {
+test_failed_target_becomes_preferred_for_retry() {
     setup
     set_preferred "$OLD_MAC"
     add_paired "$OLD_MAC"; add_paired "$NEW_MAC"
@@ -279,21 +280,47 @@ test_failed_target_preserves_old_preferred() {
     owner_request connect "$NEW_MAC"
     [ "$OWNER_RC" -ne 0 ] \
         && [ "$(json_field "$OWNER_OUTPUT" success)" = False ] \
-        && [ "$(cat "$SIGIL_BT_PREFERRED_FILE")" = "$OLD_MAC" ]
+        && [ "$(cat "$SIGIL_BT_PREFERRED_FILE")" = "$NEW_MAC" ]
 }
 
-test_success_updates_only_after_completion() {
+test_preferred_persists_before_a2dp_completion() {
     setup
     set_preferred "$OLD_MAC"
     add_paired "$NEW_MAC"
     export MOCK_CONNECT_DELAY=0.35
     "$OWNER" request connect "$NEW_MAC" > "${TEST_DIR}/result.json" 2>/dev/null &
     local owner_pid=$!
-    /bin/sleep 0.12
-    local during
-    during=$(cat "$SIGIL_BT_PREFERRED_FILE")
+    local attempt during=""
+    for attempt in 1 2 3 4 5 6 7 8 9 10; do
+        during=$(cat "$SIGIL_BT_PREFERRED_FILE")
+        [ "$during" = "$NEW_MAC" ] && break
+        /bin/sleep 0.04
+    done
+    kill -0 "$owner_pid" 2>/dev/null
     wait "$owner_pid"
-    [ "$during" = "$OLD_MAC" ] && [ "$(cat "$SIGIL_BT_PREFERRED_FILE")" = "$NEW_MAC" ]
+    [ "$during" = "$NEW_MAC" ] && [ "$(cat "$SIGIL_BT_PREFERRED_FILE")" = "$NEW_MAC" ]
+}
+
+test_a2dp_failure_keeps_preferred_for_retry() {
+    setup
+    add_paired "$NEW_MAC"
+    export MOCK_FAIL_A2DP_MAC="$NEW_MAC"
+    owner_request connect "$NEW_MAC"
+    [ "$OWNER_RC" -ne 0 ] \
+        && [ "$(json_field "$OWNER_OUTPUT" code)" = a2dp_failed ] \
+        && [ "$(cat "$SIGIL_BT_PREFERRED_FILE")" = "$NEW_MAC" ] \
+        && grep -qxF "$NEW_MAC" "${TEST_DIR}/state/paired" \
+        && grep -qxF "$NEW_MAC" "${TEST_DIR}/state/trusted"
+}
+
+test_disconnect_keeps_preferred_for_reconnect() {
+    setup
+    set_preferred "$OLD_MAC"
+    add_paired "$OLD_MAC"; add_trusted "$OLD_MAC"; add_connected "$OLD_MAC"
+    owner_request disconnect
+    [ "$OWNER_RC" -eq 0 ] \
+        && [ "$(cat "$SIGIL_BT_PREFERRED_FILE")" = "$OLD_MAC" ] \
+        && ! grep -qxF "$OLD_MAC" "${TEST_DIR}/state/connected"
 }
 
 test_stale_marker_eliminated_by_flock() {
@@ -419,8 +446,10 @@ run_test "pair and automatic reconnect cannot overlap" test_pair_and_auto_reconn
 run_test "connect and remove cannot overlap" test_connect_and_remove_serialized
 run_test "preferred MAC is normalized and atomically written" test_preferred_normalized_atomic_private
 run_test "preferred state never follows symlinks" test_preferred_symlink_never_followed
-run_test "failed connection preserves old preferred" test_failed_target_preserves_old_preferred
-run_test "successful connection persists only after completion" test_success_updates_only_after_completion
+run_test "failed connection becomes preferred for retry" test_failed_target_becomes_preferred_for_retry
+run_test "preferred persists before A2DP completion" test_preferred_persists_before_a2dp_completion
+run_test "A2DP failure keeps preferred for retry" test_a2dp_failure_keeps_preferred_for_retry
+run_test "explicit disconnect keeps preferred for reconnect" test_disconnect_keeps_preferred_for_reconnect
 run_test "stale marker is eliminated in favor of flock" test_stale_marker_eliminated_by_flock
 run_test "automatic reconnect respects canonical flock" test_auto_reconnect_uses_same_lock
 run_test "BlueZ removal failure is reported" test_bluez_remove_failure_reported
