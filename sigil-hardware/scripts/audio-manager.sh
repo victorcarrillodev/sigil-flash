@@ -387,6 +387,17 @@ read_cache_status() {
     expires_at=$(read_json_field "$CACHE_META_FILE" "active_cache.expires_at")
 
     if [ -z "$tracks_count" ] || [ "$tracks_count" = "" ] || [ "$tracks_count" = "0" ]; then
+        if [ -f "$PLAYLIST_ACTIVE_FILE" ] && python3 - "$PLAYLIST_ACTIVE_FILE" <<'PYEOF' 2>/dev/null
+import json, sys
+with open(sys.argv[1]) as f:
+    playlist = json.load(f)
+raise SystemExit(0 if playlist.get("stop_playback") is True and playlist.get("tracks") == [] else 1)
+PYEOF
+        then
+            CACHE_STATUS="INTENTIONAL_EMPTY"
+            log "INFO" "Cache status: INTENTIONAL_EMPTY (server requested silence)"
+            return
+        fi
         CACHE_STATUS="EMPTY"
         log "DEBUG" "Cache status: EMPTY (tracks_count=${tracks_count:-0})"
         return
@@ -748,6 +759,15 @@ evaluate_state() {
         new_mode="BLOCKED_LEGACY"
         new_reason="legacy_active"
         log "DEBUG" "Eval: BLOCKED_LEGACY"
+        apply_mode "$new_mode" "$CURRENT_DESIRED" "$new_reason"
+        return
+    fi
+
+    if [ "$CACHE_STATUS" = "INTENTIONAL_EMPTY" ]; then
+        LAST_ERROR=""
+        new_mode="IDLE"
+        new_reason="server_stop_playback"
+        log "INFO" "Eval: IDLE (server requested intentional silence)"
         apply_mode "$new_mode" "$CURRENT_DESIRED" "$new_reason"
         return
     fi

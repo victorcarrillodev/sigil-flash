@@ -56,7 +56,7 @@ while [ "$#" -gt 0 ]; do
     esac
     shift
 done
-printf '%s\n' '{"ok":true}'
+printf '%s\n' "${CURL_RESPONSE:-{\"ok\":true}}"
 EOF
 chmod +x "$TMP/bin/curl"
 
@@ -119,6 +119,38 @@ then
     ok "registration state does not duplicate identity values"
 else
     not_ok "registration state does not duplicate identity values"
+fi
+
+printf '%s\n' '{"_schema_version":"1.0","registered":false,"registered_at":null}' > "$REGISTRATION_FILE"
+export CURL_RESPONSE='{"ok":false}'
+init_curl_auth
+registration_rc=0
+register_device >/dev/null 2>&1 || registration_rc=$?
+cleanup_curl_auth
+unset CURL_RESPONSE
+
+if [ "$registration_rc" -ne 0 ]; then
+    ok "failed registration remains retryable"
+else
+    not_ok "failed registration remains retryable"
+fi
+
+if python3 - "$REGISTRATION_FILE" <<'PYEOF'
+import json, sys
+document = json.load(open(sys.argv[1], encoding="utf-8"))
+raise SystemExit(0 if document.get("registered") is False else 1)
+PYEOF
+then
+    ok "failed registration does not mark registration complete"
+else
+    not_ok "failed registration does not mark registration complete"
+fi
+
+if grep -Fq 'if ! register_device; then' "$ROOT/scripts/firstboot.sh" \
+    && grep -Fq 'firstboot completion marker was not written' "$ROOT/scripts/firstboot.sh"; then
+    ok "firstboot completion is gated by registration success"
+else
+    not_ok "firstboot completion is gated by registration success"
 fi
 
 echo "Results: ${PASS} passed, ${FAIL} failed"

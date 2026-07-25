@@ -649,15 +649,21 @@ try:
 except:
     sys.exit(1)
 if isinstance(data, list):
-    if len(data) > 0:
-        t = data[0]
-        if 'url' not in t:
-            sys.exit(1)
+    if not data:
+        sys.exit(1)
+    t = data[0]
+    if 'url' not in t:
+        sys.exit(1)
 elif isinstance(data, dict):
     if 'tracks' not in data and '_schema_version' not in data:
         sys.exit(1)
     tracks = data.get('tracks', [])
-    if len(tracks) > 0:
+    if not isinstance(tracks, list):
+        sys.exit(1)
+    if len(tracks) == 0:
+        if data.get('stop_playback') is not True:
+            sys.exit(1)
+    else:
         t = tracks[0]
         if 'url' not in t and 'filename' not in t:
             sys.exit(1)
@@ -917,14 +923,6 @@ validate_active() {
     local tracks_dir="${MUSIC_ACTIVE}/tracks"
     local playlist_file="${MUSIC_ACTIVE}/playlist.json"
 
-    # Must have tracks_count > 0 in cache_meta
-    local active_count
-    if ! active_count=$(read_json_field "$CACHE_META_FILE" "active_cache.tracks_count") ||
-       ! [[ "$active_count" =~ ^[1-9][0-9]*$ ]]; then
-        log "WARN" "validate_active: active_cache.tracks_count is 0"
-        return 1
-    fi
-
     # Must have playlist.active.json
     if [ ! -f "$playlist_file" ]; then
         log "WARN" "validate_active: playlist.json not found at ${playlist_file}"
@@ -934,6 +932,36 @@ validate_active() {
     # Must have tracks directory
     if [ ! -d "$tracks_dir" ]; then
         log "WARN" "validate_active: tracks dir not found at ${tracks_dir}"
+        return 1
+    fi
+
+    local active_count
+    if ! active_count=$(read_json_field "$CACHE_META_FILE" "active_cache.tracks_count") ||
+       ! [[ "$active_count" =~ ^[0-9]+$ ]]; then
+        log "WARN" "validate_active: active_cache.tracks_count is invalid"
+        return 1
+    fi
+
+    # Zero tracks is valid only for the explicit server silence contract.
+    if [ "$active_count" -eq 0 ]; then
+        if python3 - "$playlist_file" "$tracks_dir" <<'PYEOF'
+import json, os, sys
+
+with open(sys.argv[1]) as f:
+    playlist = json.load(f)
+tracks = playlist.get("tracks")
+track_files = [
+    entry for entry in os.listdir(sys.argv[2])
+    if os.path.isfile(os.path.join(sys.argv[2], entry))
+]
+if playlist.get("stop_playback") is not True or tracks != [] or track_files:
+    sys.exit(1)
+PYEOF
+        then
+            log "DEBUG" "validate_active: intentional empty playlist is active"
+            return 0
+        fi
+        log "WARN" "validate_active: zero tracks without a valid stop_playback contract"
         return 1
     fi
 
@@ -1347,14 +1375,7 @@ except:
     log "INFO" "Remote playlist: ${remote_playlist_id} (${track_count} tracks)"
 
     if [ "$track_count" -eq 0 ]; then
-        log "WARN" "Remote playlist has 0 tracks — skipping sync"
-        local failed
-        failed=$(read_json_field "$CACHE_META_FILE" "statistics.failed_syncs")
-        failed=$((failed + 1))
-        update_cache_meta "statistics.failed_syncs" "$failed"
-        flock -u 201
-        flock -u 200
-        return 1
+        log "INFO" "Server requested intentional silence — activating empty playlist"
     fi
 
     log "INFO" "Remote playlist: ${remote_playlist_id} (${track_count} tracks)"

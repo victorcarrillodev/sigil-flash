@@ -627,16 +627,16 @@ PYEOF
 register_device() {
     if ! command -v curl &>/dev/null; then
         log "WARN" "curl not available — cannot register device"
-        return 0
+        return 1
     fi
 
     if [ -z "$SERVER_URL" ]; then
-        log "WARN" "SERVER_URL not configured — skipping registration"
-        return 0
+        log "WARN" "SERVER_URL not configured — registration remains pending"
+        return 1
     fi
     if [ -z "$API_KEY" ]; then
-        log "WARN" "Device API key not provisioned at ${API_KEY_FILE} — skipping registration"
-        return 0
+        log "WARN" "Device API key not provisioned at ${API_KEY_FILE} — registration remains pending"
+        return 1
     fi
 
     # Check if already registered without duplicating identity metadata.
@@ -696,9 +696,11 @@ with os.fdopen(fd, 'w') as f:
 os.replace(tmp_path, file_path)
 PYEOF
         log "INFO" "registration.json updated with registration status"
+        return 0
     else
         log "WARN" "Device registration failed or server unreachable"
         log "WARN" "Will retry on next firstboot run"
+        return 1
     fi
 }
 
@@ -1062,7 +1064,10 @@ log "INFO" "=== firstboot starting ==="
 apply_manufacturing_identity
 provision_panel_credential
 load_config
-provision_device_credential
+if ! provision_device_credential; then
+    log "WARN" "Device bootstrap remains pending — firstboot will retry"
+    return 1
+fi
 load_config
 
 log "INFO" "Device ID: $(get_device_id)"
@@ -1085,7 +1090,11 @@ create_registration_state
 
 # Step 1b: register only after the permanent credential exists.
 init_curl_auth
-register_device
+if ! register_device; then
+    cleanup_curl_auth
+    log "WARN" "Device registration remains pending — firstboot completion marker was not written"
+    return 1
+fi
 cleanup_curl_auth
 
 # Step 2: State files

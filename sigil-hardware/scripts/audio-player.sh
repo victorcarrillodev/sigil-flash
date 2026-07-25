@@ -782,6 +782,39 @@ kill_playback() {
     fi
 }
 
+playlist_requests_stop() {
+    [ -f "$PLAYLIST_ACTIVE_FILE" ] || return 1
+    python3 - "$PLAYLIST_ACTIVE_FILE" <<'PYEOF' 2>/dev/null
+import json, sys
+with open(sys.argv[1]) as f:
+    playlist = json.load(f)
+raise SystemExit(0 if playlist.get("stop_playback") is True and playlist.get("tracks") == [] else 1)
+PYEOF
+}
+
+wait_for_owned_playback() {
+    local player_pid="$MPG123_PID"
+    local watcher_pid
+
+    (
+        while kill -0 "$player_pid" 2>/dev/null; do
+            if playlist_requests_stop; then
+                kill "$player_pid" 2>/dev/null || true
+                exit 0
+            fi
+            sleep 1
+        done
+    ) &
+    watcher_pid=$!
+
+    local exit_code=0
+    wait "$player_pid" 2>/dev/null || exit_code=$?
+    kill "$watcher_pid" 2>/dev/null || true
+    wait "$watcher_pid" 2>/dev/null || true
+    MPG123_PID=""
+    return "$exit_code"
+}
+
 # ── Track matching on playlist change ──────────────────────────────────────
 
 find_best_track_match() {
@@ -856,6 +889,12 @@ print(len(tracks) - 1)
 
 radio_playback_cycle() {
     log "INFO" "=== RADIO playback cycle ==="
+
+    if playlist_requests_stop; then
+        log "INFO" "Server requested silence — RADIO playback is idle"
+        sleep 2
+        return 0
+    fi
 
     # Ensure sink is available
     if ! sink_available; then
@@ -1006,8 +1045,14 @@ print(h)
 
         # Wait for this track to finish
         local exit_code=0
-        wait "$MPG123_PID" 2>/dev/null || exit_code=$?
-        MPG123_PID=""
+        wait_for_owned_playback || exit_code=$?
+
+        if playlist_requests_stop; then
+            log "INFO" "Server requested silence during RADIO playback"
+            exec 3<&-
+            rm -f "$tracks_temp"
+            return 0
+        fi
 
         if $STOP_REQUESTED; then
             log "INFO" "Stop requested during track"
@@ -1066,6 +1111,12 @@ print(h)
 
 local_playback_cycle() {
     log "INFO" "=== LOCAL playback cycle ==="
+
+    if playlist_requests_stop; then
+        log "INFO" "Server requested silence — LOCAL playback is idle"
+        sleep 2
+        return 0
+    fi
 
     # Ensure sink is available
     if ! sink_available; then
@@ -1198,8 +1249,13 @@ print(h)
         MPG123_PID=$!
 
         local exit_code=0
-        wait "$MPG123_PID" 2>/dev/null || exit_code=$?
-        MPG123_PID=""
+        wait_for_owned_playback || exit_code=$?
+
+        if playlist_requests_stop; then
+            log "INFO" "Server requested silence during LOCAL playback"
+            rm -f "$tracks_temp"
+            return 0
+        fi
 
         if $STOP_REQUESTED; then
             rm -f "$tracks_temp"
