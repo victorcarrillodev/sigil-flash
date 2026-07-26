@@ -90,8 +90,8 @@ for package in contract["packages"]:
     if package["required"] or package["profile"] in requested_profiles:
         names.append(name)
         versions[name] = package["version"]
-if len(required_names) != 23:
-    raise SystemExit(f"expected 23 required packages, found {len(required_names)}")
+if len(required_names) != 25:
+    raise SystemExit(f"expected 25 required packages, found {len(required_names)}")
 
 manifest_path = repository / "package-manifest.json"
 try:

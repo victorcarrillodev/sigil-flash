@@ -19,6 +19,7 @@ const INRELEASE_FILE: &str = "InRelease";
 const SNAPSHOT_DIRECTORY: &str = "sources-snapshot";
 const REPOSITORY_KEY: &str = "sources-snapshot/keyrings/sigil-offline-repository.gpg";
 const MAX_METADATA_BYTES: u64 = 16 * 1024 * 1024;
+const REQUIRED_PACKAGE_COUNT: usize = 25;
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -366,9 +367,9 @@ fn validate_contract(contract: &PackageContract) -> Result<(), String> {
         }
         required_count += usize::from(requirement.required);
     }
-    if required_count != 23 {
+    if required_count != REQUIRED_PACKAGE_COUNT {
         return Err(format!(
-            "canonical contract must contain 23 required packages, found {required_count}"
+            "canonical contract must contain {REQUIRED_PACKAGE_COUNT} required packages, found {required_count}"
         ));
     }
     if !contract.packages.iter().any(|package| {
@@ -975,7 +976,7 @@ mod tests {
                 .iter()
                 .filter(|package| package.required && package.profile == "runtime")
                 .count(),
-            23
+            REQUIRED_PACKAGE_COUNT
         );
         assert!(contract.packages.iter().any(|package| {
             package.name == "openssh-server"

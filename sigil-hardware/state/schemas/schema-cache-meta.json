@@ -41,7 +41,8 @@
         "download_started_at": { "type": ["string", "null"], "format": "date-time" },
         "progress_percent": { "type": "integer", "minimum": 0, "maximum": 100 },
         "tracks_downloaded": { "type": "integer", "minimum": 0 },
-        "tracks_total": { "type": "integer", "minimum": 0 }
+        "tracks_total": { "type": "integer", "minimum": 0 },
+        "failed_tracks": { "type": "array", "items": { "type": "string" } }
       },
       "additionalProperties": false
     },

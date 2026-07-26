@@ -48,6 +48,7 @@ setup_case() {
     SSH_STATUS_FILE="$STATE_DIR/ssh_status.json"
     PLAYBACK_STATE_FILE="$STATE_DIR/playback_state.json"
     AUDIO_MODE_FILE="$STATE_DIR/audio_mode.json"
+    MAINTENANCE_STATE_FILE="$STATE_DIR/maintenance_state.json"
     SSH_ACTIVE_MARKER="$RUN_SIGIL_DIR/ssh-active"
     LOGOUT_FETCH_MARKER="$RUN_SIGIL_DIR/logout-fetch-active"
     SERVICE_SNAPSHOT_FILE="$RUN_SIGIL_DIR/ssh-service-snapshot.json"
@@ -115,6 +116,9 @@ case "$command" in
         printf 'stop:%s\n' "$service" >> "$TEST_EVENT_LOG"
         rm -f "${TEST_SERVICE_DIR}/${key}.active"
         rm -f "${TEST_SERVICE_DIR}/${key}.failed"
+        if [ "${MOCK_STOP_TO_FAILED:-0}" = "1" ]; then
+            touch "${TEST_SERVICE_DIR}/${key}.failed"
+        fi
         ;;
     start)
         printf 'start:%s\n' "$service" >> "$TEST_EVENT_LOG"
@@ -190,7 +194,7 @@ EOF
 
     PATH="$TEST_ROOT/bin:$ORIGINAL_PATH"
     export PATH SIGIL_RUN_DIR="$RUN_SIGIL_DIR"
-    export MOCK_WIPE_RC=0 MOCK_FETCH_RC=0 MOCK_VALIDATE_RC=0 MOCK_SSH_SERVICE_FAIL=0
+    export MOCK_WIPE_RC=0 MOCK_FETCH_RC=0 MOCK_VALIDATE_RC=0 MOCK_SSH_SERVICE_FAIL=0 MOCK_STOP_TO_FAILED=0
 }
 
 set_service_state() {
@@ -279,6 +283,7 @@ expected = {
     "audio-player.service": {"load": "loaded", "active": "active", "enabled": "disabled"},
     "radio-stream.service": {"load": "loaded", "active": "inactive", "enabled": "disabled"},
 }
+
 raise SystemExit(0 if document.get("services") == expected else 1)
 PYEOF
     [ -f "$SSH_ACTIVE_MARKER" ] || return 1
@@ -297,8 +302,8 @@ PYEOF
     [ -f "$TEST_SERVICE_DIR/audio-manager.enabled" ] || return 1
     [ ! -f "$TEST_SERVICE_DIR/audio-player.enabled" ] || return 1
     [ ! -f "$TEST_SERVICE_DIR/radio-stream.enabled" ] || return 1
-    [ "$(grep -c '^explicit-fetch$' "$TEST_EVENT_LOG")" -eq 1 ] || return 1
-    [ "$(grep -c '^validate-active$' "$TEST_EVENT_LOG")" -eq 1 ] || return 1
+    [ "$(grep -c '^explicit-fetch$' "$TEST_EVENT_LOG")" -eq 0 ] || return 1
+    [ "$(grep -c '^validate-active$' "$TEST_EVENT_LOG")" -eq 0 ] || return 1
     grep -q '^reset-failed:audio-player.service$' "$TEST_EVENT_LOG" || return 1
     grep -q '^wipe:ssh-present:logout-true$' "$TEST_EVENT_LOG" || return 1
     ! grep -q '^UNEXPECTED-ENABLEMENT-MUTATION:' "$TEST_EVENT_LOG" || return 1
@@ -307,23 +312,45 @@ PYEOF
     [ ! -e "$LOGOUT_FETCH_MARKER" ]
 }
 
+test_sigterm_failed_stop_still_restores_original_services() {
+    setup_case
+    prepare_mixed_service_state
+    export MOCK_STOP_TO_FAILED=1
+
+    enter_maintenance >/dev/null 2>&1 || return 1
+    [ -f "$TEST_SERVICE_DIR/radio-fetcher.failed" ] || return 1
+    [ -f "$TEST_SERVICE_DIR/audio-manager.failed" ] || return 1
+    [ -f "$TEST_SERVICE_DIR/audio-player.failed" ] || return 1
+
+    exit_maintenance 0 >/dev/null 2>&1 || return 1
+    [ -f "$TEST_SERVICE_DIR/radio-fetcher.active" ] || return 1
+    [ -f "$TEST_SERVICE_DIR/audio-manager.active" ] || return 1
+    [ -f "$TEST_SERVICE_DIR/audio-player.active" ] || return 1
+    [ ! -f "$TEST_SERVICE_DIR/radio-fetcher.failed" ] || return 1
+    [ ! -f "$TEST_SERVICE_DIR/audio-manager.failed" ] || return 1
+    [ ! -f "$TEST_SERVICE_DIR/audio-player.failed" ]
+}
+
 test_ssh_stop_publishes_idle_audio_state() {
     setup_case
     prepare_mixed_service_state
     enter_maintenance >/dev/null 2>&1 || return 1
-    python3 - "$PLAYBACK_STATE_FILE" "$AUDIO_MODE_FILE" <<'PYEOF'
+    python3 - "$PLAYBACK_STATE_FILE" "$AUDIO_MODE_FILE" "$MAINTENANCE_STATE_FILE" <<'PYEOF'
 import json
 import sys
 
 playback = json.load(open(sys.argv[1], encoding="utf-8"))
 audio = json.load(open(sys.argv[2], encoding="utf-8"))
-if playback.get("mode") != "IDLE" or playback.get("playing") is not False:
+maintenance = json.load(open(sys.argv[3], encoding="utf-8"))
+if playback.get("mode") != "RADIO" or playback.get("playing") is not True:
     raise SystemExit(1)
 if playback.get("local", {}).get("current_track_index") != 1:
     raise SystemExit(1)
-if audio.get("mode") != "IDLE" or audio.get("reason") != "ssh_maintenance":
+if audio.get("mode") != "RADIO" or audio.get("reason") != "server_available":
     raise SystemExit(1)
 if audio.get("cache_status") != "COMPLETE" or audio.get("desired_mode") != "RADIO":
+    raise SystemExit(1)
+if maintenance.get("active") is not True or maintenance.get("reason") != "ssh_maintenance":
     raise SystemExit(1)
 PYEOF
 }
@@ -365,14 +392,13 @@ test_fetch_failure_does_not_restore_player() {
     prepare_mixed_service_state
     enter_maintenance >/dev/null 2>&1 || return 1
     export MOCK_FETCH_RC=23
-    exit_maintenance 0 >/dev/null 2>&1
-    [ "$?" -eq 23 ] || return 1
-    [ ! -f "$TEST_SERVICE_DIR/audio-player.active" ] || return 1
-    [ -f "$SERVICE_SNAPSHOT_FILE" ] || return 1
+    exit_maintenance 0 >/dev/null 2>&1 || return 1
+    [ -f "$TEST_SERVICE_DIR/audio-player.active" ] || return 1
+    [ ! -f "$SERVICE_SNAPSHOT_FILE" ] || return 1
     python3 - "$SSH_STATUS_FILE" <<'PYEOF'
 import json, sys
 state = json.load(open(sys.argv[1], encoding="utf-8"))["last_exit"]
-raise SystemExit(0 if state["fetch_exit_code"] == 23 and state["recovery_pending"] and state["recovery_state"] == "fetch_failed" else 1)
+raise SystemExit(0 if state["restore_ok"] and state["recovery_pending"] and state["recovery_state"] == "background_warmup" else 1)
 PYEOF
 }
 
@@ -381,14 +407,13 @@ test_invalid_cache_does_not_restore_player() {
     prepare_mixed_service_state
     enter_maintenance >/dev/null 2>&1 || return 1
     export MOCK_VALIDATE_RC=65
-    exit_maintenance 0 >/dev/null 2>&1
-    [ "$?" -eq 65 ] || return 1
-    [ ! -f "$TEST_SERVICE_DIR/audio-player.active" ] || return 1
-    [ -f "$SERVICE_SNAPSHOT_FILE" ] || return 1
+    exit_maintenance 0 >/dev/null 2>&1 || return 1
+    [ -f "$TEST_SERVICE_DIR/audio-player.active" ] || return 1
+    [ ! -f "$SERVICE_SNAPSHOT_FILE" ] || return 1
     python3 - "$SSH_STATUS_FILE" <<'PYEOF'
 import json, sys
 state = json.load(open(sys.argv[1], encoding="utf-8"))["last_exit"]
-raise SystemExit(0 if state["fetch_exit_code"] == 0 and state["cache_valid"] is False else 1)
+raise SystemExit(0 if state["restore_ok"] and state["recovery_state"] == "background_warmup" else 1)
 PYEOF
 }
 
@@ -478,8 +503,8 @@ test_new_ssh_cycle_retries_recovery_once() {
     export MOCK_WIPE_RC=0
     process_ssh_transition 1 0 >/dev/null 2>&1 || return 1
     process_ssh_transition 0 1 >/dev/null 2>&1 || return 1
-    [ "$(grep -c '^explicit-fetch$' "$TEST_EVENT_LOG")" -eq 1 ] || return 1
-    [ "$(read_ssh_recovery_state)" = "complete" ] || return 1
+    [ "$(grep -c '^explicit-fetch$' "$TEST_EVENT_LOG")" -eq 0 ] || return 1
+    [ "$(read_ssh_recovery_state)" = "background_warmup" ] || return 1
     [ ! -e "$SSH_ACTIVE_MARKER" ] && [ ! -e "$SERVICE_SNAPSHOT_FILE" ]
 }
 
@@ -555,11 +580,12 @@ run_test "two inbound sessions are counted" test_two_inbound_sessions_counted
 run_test "zero inbound sessions returns zero" test_zero_inbound_sessions
 run_test "numeric port 22 fallback works" test_numeric_port_fallback
 run_test "successful cycle restores exact service state" test_successful_cycle_restores_exact_state
-run_test "SSH stop publishes truthful idle audio state" test_ssh_stop_publishes_idle_audio_state
+run_test "SIGTERM-stopped services restore from the original active snapshot" test_sigterm_failed_stop_still_restores_original_services
+run_test "SSH stop publishes a single-owner maintenance overlay" test_ssh_stop_publishes_idle_audio_state
 run_test "logout wipe failure fails closed" test_logout_wipe_failure_fails_closed
 run_test "login wipe failure remains persisted across count updates" test_login_wipe_failure_status_survives_count_update
-run_test "fetch failure does not restore audio-player" test_fetch_failure_does_not_restore_player
-run_test "invalid cache does not restore audio-player" test_invalid_cache_does_not_restore_player
+run_test "background fetch failure does not block audio restoration" test_fetch_failure_does_not_restore_player
+run_test "cache validation is deferred without blocking audio restoration" test_invalid_cache_does_not_restore_player
 run_test "service restart failure preserves diagnostics" test_service_restart_failure_preserves_diagnostics
 run_test "reused unrelated PID is not trusted" test_reused_unrelated_pid_not_trusted
 run_test "live orphaned fetch preserves logout coordination" test_live_orphaned_fetch_preserves_coordination

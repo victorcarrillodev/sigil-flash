@@ -1,6 +1,6 @@
 [Unit]
 Description=Sigil WiFi Control — single-owner wlan0 mutation daemon
-After=network.target NetworkManager.service systemd-tmpfiles-setup.service sigil-firstboot.service
+After=network.target NetworkManager.service systemd-tmpfiles-setup.service sigil-local-bootstrap.service
 Wants=network.target NetworkManager.service
 Before=wifi-fallback.service bluetooth-panel.service
 StartLimitIntervalSec=60

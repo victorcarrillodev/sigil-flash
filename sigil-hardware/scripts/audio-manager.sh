@@ -43,6 +43,7 @@ AUDIO_MODE_FILE="/var/lib/sigil/audio_mode.json"
 PLAYBACK_STATE_FILE="${SIGIL_PLAYBACK_STATE_FILE:-/var/lib/sigil/playback_state.json}"
 CACHE_META_FILE="/var/lib/sigil/cache_meta.json"
 PLAYLIST_ACTIVE_FILE="/var/lib/sigil/playlist.active.json"
+MEDIA_SYNC_FILE="${SIGIL_MEDIA_SYNC_FILE:-/var/lib/sigil/media_sync_state.json}"
 
 # --- Config defaults (overridden by audio.conf) ---
 SERVER_URL=""
@@ -72,10 +73,16 @@ DRY_RUN=false
 ONCE=false
 
 # --- PulseAudio setup ---
-SIGIL_UID=$(id -u sigil 2>/dev/null || echo 1000)
-export XDG_RUNTIME_DIR="/run/user/${SIGIL_UID}"
-export PULSE_SERVER="unix:/run/user/${SIGIL_UID}/pulse/native"
-export PULSE_RUNTIME_PATH="/run/user/${SIGIL_UID}/pulse"
+PULSE_RUNTIME_ENV="${SIGIL_PULSE_RUNTIME_ENV:-/etc/sigil/pulse-runtime.env}"
+if [ -r "$PULSE_RUNTIME_ENV" ]; then
+    # shellcheck disable=SC1090
+    set -a
+    . "$PULSE_RUNTIME_ENV"
+    set +a
+fi
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/sigil-pulse}"
+export PULSE_RUNTIME_PATH="${PULSE_RUNTIME_PATH:-/run/sigil-pulse}"
+export PULSE_SERVER="${PULSE_SERVER:-unix:${PULSE_RUNTIME_PATH}/native}"
 
 # --- Runtime state ---
 CURRENT_MODE="RADIO"
@@ -106,6 +113,8 @@ RUNTIME_LIMIT_SECONDS=604800
 RUNTIME_REMAINING_SECONDS=604800
 LAST_RUNTIME_CHECK_UPTIME=0
 RUNTIME_EXPIRED_HANDLED=false
+MEDIA_SYNC_PHASE="UNKNOWN"
+MEDIA_TARGET_HASH=""
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -371,8 +380,8 @@ check_internet() {
 read_cache_status() {
     # Runtime-based expiration check (highest priority)
     if [ "$RUNTIME_SECONDS" -ge "$RUNTIME_LIMIT_SECONDS" ] && [ "$RUNTIME_LIMIT_SECONDS" -gt 0 ]; then
-        CACHE_STATUS="RUNTIME_EXPIRED"
-        log "DEBUG" "Cache status: RUNTIME_EXPIRED (${RUNTIME_SECONDS}s >= ${RUNTIME_LIMIT_SECONDS}s)"
+        CACHE_STATUS="EXPIRED"
+        log "DEBUG" "Cache status: EXPIRED by runtime (${RUNTIME_SECONDS}s >= ${RUNTIME_LIMIT_SECONDS}s); retained until replacement"
         return
     fi
 
@@ -416,6 +425,13 @@ PYEOF
 
     CACHE_STATUS="COMPLETE"
     log "DEBUG" "Cache status: COMPLETE (${tracks_count} tracks)"
+}
+
+read_media_sync_status() {
+    MEDIA_SYNC_PHASE=$(read_json_field "$MEDIA_SYNC_FILE" "phase" 2>/dev/null || true)
+    MEDIA_TARGET_HASH=$(read_json_field "$MEDIA_SYNC_FILE" "generation_id" 2>/dev/null || true)
+    MEDIA_SYNC_PHASE="${MEDIA_SYNC_PHASE:-UNKNOWN}"
+    MEDIA_TARGET_HASH="${MEDIA_TARGET_HASH:-}"
 }
 
 # ── Sink check ──────────────────────────────────────────────────────────────
@@ -656,54 +672,60 @@ os.replace(tmp, fp)
 PYEOF
     sigil_cache_meta_fix_permissions "$CACHE_META_FILE"
     flock -u 201
-    log "DEBUG" "Released cache-operation lock before wipe/fetch"
+    log "WARN" "Cache runtime expired (${RUNTIME_SECONDS}s); retaining validated generation until radio-fetcher promotes a replacement"
+}
 
-    log "WARN" "Cache runtime expired (${RUNTIME_SECONDS}s) — initiating expiration flow"
+evaluate_hybrid_state() {
+    CURRENT_DESIRED="LOCAL"
+    local new_mode="" new_reason="" active_hash=""
+    active_hash=$(read_json_field "$PLAYLIST_ACTIVE_FILE" "version_hash" 2>/dev/null || true)
 
-    # 1. Stop audio-player so it doesn't access stale cache during wipe
-    if systemctl is-active --quiet audio-player.service 2>/dev/null; then
-        log "INFO" "Stopping audio-player.service for cache wipe"
-        if $DRY_RUN; then
-            log "DRY" "Would stop audio-player.service"
-        else
-            systemctl stop audio-player.service 2>/dev/null || true
-        fi
+    if $LEGACY_ACTIVE; then
+        LAST_ERROR="Legacy radio-stream.sh is active — cannot take sink"
+        apply_mode "BLOCKED_LEGACY" "$CURRENT_DESIRED" "legacy_active"
+        return
+    fi
+    if [ "$CACHE_STATUS" = "INTENTIONAL_EMPTY" ]; then
+        LAST_ERROR=""
+        apply_mode "IDLE" "$CURRENT_DESIRED" "server_stop_playback"
+        return
+    fi
+    if ! $SINK_AVAILABLE; then
+        LAST_ERROR="no_audio_output: no connected A2DP or writable PCM5102A output"
+        apply_mode "BLOCKED_NO_SINK" "$CURRENT_DESIRED" "no_audio_output"
+        return
     fi
 
-    # 2. Wipe cache — sigil-cache-wipe.sh acquires its own CACHE_OP_LOCK
-    local wipe_ok=true
-    log "INFO" "Running sigil-cache-wipe.sh"
-    if $DRY_RUN; then
-        log "DRY" "Would run /usr/local/bin/sigil-cache-wipe.sh"
+    # A complete generation is always cache-first. Streaming is only selected
+    # for a different, authenticated target generation or when no cache exists.
+    if [ "$MEDIA_SYNC_PHASE" = "STREAM_WARMUP" ] \
+        && [ -n "$MEDIA_TARGET_HASH" ] \
+        && [ "$MEDIA_TARGET_HASH" != "$active_hash" ]; then
+        if $INTERNET_AVAILABLE; then
+            CURRENT_DESIRED="RADIO"
+            new_mode="RADIO"
+            new_reason="playlist_updated"
+        elif [ "$CACHE_STATUS" = "COMPLETE" ] || [ "$CACHE_STATUS" = "EXPIRED" ]; then
+            new_mode="LOCAL"
+            new_reason="server_unreachable"
+        else
+            new_mode="BLOCKED_NO_CACHE"
+            new_reason="cache_empty"
+        fi
+    elif [ "$CACHE_STATUS" = "COMPLETE" ] || [ "$CACHE_STATUS" = "EXPIRED" ]; then
+        new_mode="LOCAL"
+        new_reason="cache_ready"
+    elif $INTERNET_AVAILABLE && [ -f "/var/lib/sigil/playlist.staging.json" ]; then
+        CURRENT_DESIRED="RADIO"
+        new_mode="RADIO"
+        new_reason="server_available"
     else
-        if [ -x /usr/local/bin/sigil-cache-wipe.sh ]; then
-            /usr/local/bin/sigil-cache-wipe.sh || { log "ERROR" "Cache wipe returned non-zero"; wipe_ok=false; }
-        else
-            log "ERROR" "sigil-cache-wipe.sh not found or not executable"
-            wipe_ok=false
-        fi
+        new_mode="BLOCKED_NO_CACHE"
+        new_reason="cache_empty"
     fi
 
-    # 3. Try refetch if internet is available and wipe succeeded
-    if $wipe_ok && $INTERNET_AVAILABLE; then
-        log "INFO" "Internet available — running radio-fetcher --once to rebuild cache"
-        if $DRY_RUN; then
-            log "DRY" "Would run /usr/local/bin/radio-fetcher.sh --once"
-        else
-            /usr/local/bin/radio-fetcher.sh --once >> "$LOG" 2>&1
-            local fetch_exit=$?
-            if [ "$fetch_exit" -eq 0 ]; then
-                log "INFO" "radio-fetcher succeeded — runtime counter reset (handled by radio-fetcher)"
-            else
-                log "ERROR" "radio-fetcher failed (exit ${fetch_exit}) — cache empty, device stays BLOCKED_NO_CACHE"
-            fi
-        fi
-    elif ! $wipe_ok; then
-        log "ERROR" "Cache wipe failed — not running fetch (expiration NOT fully handled)"
-        RUNTIME_EXPIRED_HANDLED=false
-    else
-        log "WARN" "No internet — cache wiped, cannot refetch until online"
-    fi
+    LAST_ERROR=""
+    apply_mode "$new_mode" "$CURRENT_DESIRED" "$new_reason"
 }
 
 # ── Recovery interval ───────────────────────────────────────────────────────
@@ -743,6 +765,11 @@ check_recovery_eligible() {
 # ── State evaluation ────────────────────────────────────────────────────────
 
 evaluate_state() {
+    evaluate_hybrid_state
+    return
+
+    # Legacy radio/local policy retained below for rollback reference. The
+    # controlled hybrid policy above is the production state machine.
     # Determine desired mode from configuration
     if [ "$PLAYBACK_MODE" = "local-first" ]; then
         CURRENT_DESIRED="LOCAL"
@@ -991,6 +1018,7 @@ main() {
     update_runtime_counter
     handle_cache_expiration
     read_cache_status
+    read_media_sync_status
     read_playlist_version
 
     # Initial evaluation
@@ -1015,6 +1043,7 @@ main() {
         update_runtime_counter
         handle_cache_expiration
         read_cache_status
+        read_media_sync_status
         read_playlist_version
         evaluate_state
 

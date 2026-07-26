@@ -1,14 +1,21 @@
 {
-  "_schema_version": "1.0",
+  "_schema_version": "2.0",
+  "phase": "READY",
+  "reason": "a2dp_route_confirmed",
   "preferred_device": {
     "mac": "AA:BB:CC:DD:EE:FF",
     "name": "JBL Flip 5",
-    "paired_at": "2026-06-15T08:00:00Z",
-    "last_connected": "2026-07-09T12:00:00Z"
+    "paired": true,
+    "trusted": true
   },
+  "active_output_device": "AA:BB:CC:DD:EE:FF",
   "connection_status": {
     "connected": true,
-    "profile": "A2DP",
-    "since": "2026-07-09T10:30:00Z"
-  }
+    "services_resolved": true,
+    "profile": "a2dp_sink",
+    "sink": "bluez_sink.AA_BB_CC_DD_EE_FF.a2dp_sink"
+  },
+  "a2dp_ready": true,
+  "retry_after_seconds": 0,
+  "updated_at": "2026-07-09T12:00:00Z"
 }

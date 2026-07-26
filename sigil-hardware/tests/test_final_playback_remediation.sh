@@ -185,9 +185,9 @@ TRACK_URL="/audio/track2.mp3"
 sink_available() { return 0; }
 
 radio_playback_cycle
-first_cycle_tracks=$(grep -c 'Radio track ' "$LOG")
-if grep -q 'Radio track \[1/3\]: track2.mp3' "$LOG" \
-    && ! grep -q 'Radio track \[0/3\]' "$LOG"; then
+first_cycle_tracks=$(grep -c 'Hybrid track ' "$LOG")
+if grep -q 'Hybrid track \[1/3\]: track2.mp3' "$LOG" \
+    && ! grep -q 'Hybrid track \[0/3\]' "$LOG"; then
     pass "RADIO restart resumes the saved second track"
 else
     fail "RADIO restart resumes the saved second track"
@@ -197,8 +197,8 @@ assert_value "completed RADIO cycle wraps cursor to zero" "$TRACK_INDEX" "0"
 
 : > "$LOG"
 radio_playback_cycle
-second_cycle_tracks=$(grep -c 'Radio track ' "$LOG")
-if grep -q 'Radio track \[0/3\]: track1.mp3' "$LOG"; then
+second_cycle_tracks=$(grep -c 'Hybrid track ' "$LOG")
+if grep -q 'Hybrid track \[0/3\]: track1.mp3' "$LOG"; then
     pass "next RADIO cycle starts from the first track"
 else
     fail "next RADIO cycle starts from the first track"
@@ -209,7 +209,7 @@ TRACK_INDEX=99
 : > "$LOG"
 radio_playback_cycle
 if grep -q 'out of range; restarting at 0' "$LOG" \
-    && grep -q 'Radio track \[0/3\]: track1.mp3' "$LOG"; then
+    && grep -q 'Hybrid track \[0/3\]: track1.mp3' "$LOG"; then
     pass "out-of-range RADIO cursor safely restarts at zero"
 else
     fail "out-of-range RADIO cursor safely restarts at zero"
@@ -218,7 +218,7 @@ fi
 TRACK_INDEX="not-a-number"
 : > "$LOG"
 if radio_playback_cycle \
-    && grep -q 'Radio track \[0/3\]: track1.mp3' "$LOG"; then
+    && grep -q 'Hybrid track \[0/3\]: track1.mp3' "$LOG"; then
     pass "malformed RADIO cursor safely restarts at zero"
 else
     fail "malformed RADIO cursor safely restarts at zero"

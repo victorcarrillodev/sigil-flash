@@ -11,6 +11,7 @@
       "url": "/music/track001.mp3",
       "filename": "track001.mp3",
       "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "size_bytes": 1048576,
       "duration_seconds": 180,
       "title": "Canción 1"
     },
@@ -19,6 +20,7 @@
       "url": "/music/track002.mp3",
       "filename": "track002.mp3",
       "sha256": "a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a",
+      "size_bytes": 2097152,
       "duration_seconds": 200,
       "title": "Canción 2"
     }

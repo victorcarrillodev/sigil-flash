@@ -435,22 +435,22 @@ test_root_uses_sigil_pulse_session() {
     [ -s "${MOCK_STATE}/sudo_calls" ] || return 1
     [ -s "${MOCK_STATE}/pactl_invocations" ] || return 1
     [ -s "${MOCK_STATE}/paplay_invocations" ] || return 1
-    grep -q -- '-u sigil .*env .*HOME=/home/sigil .*XDG_RUNTIME_DIR=/run/user/1234' \
+    grep -q -- '-u sigil .*env .*HOME=/home/sigil .*XDG_RUNTIME_DIR=/run/sigil-pulse' \
         "${MOCK_STATE}/sudo_calls" || return 1
 
     awk -F'|' '
         $2 != "user=sigil" ||
-        $3 != "xdg=/run/user/1234" ||
-        $4 != "server=unix:/run/user/1234/pulse/native" ||
-        $5 != "runtime=/run/user/1234/pulse" ||
+        $3 != "xdg=/run/sigil-pulse" ||
+        $4 != "server=unix:/run/sigil-pulse/native" ||
+        $5 != "runtime=/run/sigil-pulse" ||
         $6 != "home=/home/sigil" { bad=1 }
         END { exit NR == 0 || bad }
     ' "${MOCK_STATE}/pactl_invocations" || return 1
     awk -F'|' '
         $2 != "user=sigil" ||
-        $3 != "xdg=/run/user/1234" ||
-        $4 != "server=unix:/run/user/1234/pulse/native" ||
-        $5 != "runtime=/run/user/1234/pulse" ||
+        $3 != "xdg=/run/sigil-pulse" ||
+        $4 != "server=unix:/run/sigil-pulse/native" ||
+        $5 != "runtime=/run/sigil-pulse" ||
         $6 != "home=/home/sigil" { bad=1 }
         END { exit NR == 0 || bad }
     ' "${MOCK_STATE}/paplay_invocations"

@@ -45,10 +45,16 @@ STREAM_PID=""
 CURRENT_SINK=""
 NO_OUTPUT_LOGGED=false
 
-SIGIL_UID=$(id -u sigil 2>/dev/null || echo "1000")
-export XDG_RUNTIME_DIR=/run/user/${SIGIL_UID}
-export PULSE_SERVER=unix:/run/user/${SIGIL_UID}/pulse/native
-export PULSE_RUNTIME_PATH=/run/user/${SIGIL_UID}/pulse
+PULSE_RUNTIME_ENV="${SIGIL_PULSE_RUNTIME_ENV:-/etc/sigil/pulse-runtime.env}"
+if [ -r "$PULSE_RUNTIME_ENV" ]; then
+    # shellcheck disable=SC1090
+    set -a
+    . "$PULSE_RUNTIME_ENV"
+    set +a
+fi
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/sigil-pulse}"
+export PULSE_RUNTIME_PATH="${PULSE_RUNTIME_PATH:-/run/sigil-pulse}"
+export PULSE_SERVER="${PULSE_SERVER:-unix:${PULSE_RUNTIME_PATH}/native}"
 
 AUDIO_ROUTE_HELPER="${SIGIL_AUDIO_ROUTE_HELPER:-/usr/local/bin/sigil-audio-route.sh}"
 if [ -r "$AUDIO_ROUTE_HELPER" ]; then

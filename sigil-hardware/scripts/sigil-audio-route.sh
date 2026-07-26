@@ -16,13 +16,18 @@ _audio_route_run_as_sigil() {
     shift
 
     if [ "$(id -u)" -eq 0 ]; then
-        local sigil_uid
-        sigil_uid=$(id -u sigil 2>/dev/null) || return 1
+        local pulse_runtime_env="${SIGIL_PULSE_RUNTIME_ENV:-/etc/sigil/pulse-runtime.env}"
+        local pulse_runtime="/run/sigil-pulse"
+        local pulse_server="unix:/run/sigil-pulse/native"
+        if [ -r "$pulse_runtime_env" ]; then
+            pulse_runtime=$(sed -n 's/^PULSE_RUNTIME_PATH=//p' "$pulse_runtime_env" | tail -n 1)
+            pulse_server=$(sed -n 's/^PULSE_SERVER=//p' "$pulse_runtime_env" | tail -n 1)
+        fi
         sudo -H -u sigil -- env \
             HOME=/home/sigil \
-            XDG_RUNTIME_DIR="/run/user/${sigil_uid}" \
-            PULSE_SERVER="unix:/run/user/${sigil_uid}/pulse/native" \
-            PULSE_RUNTIME_PATH="/run/user/${sigil_uid}/pulse" \
+            XDG_RUNTIME_DIR="$pulse_runtime" \
+            PULSE_SERVER="$pulse_server" \
+            PULSE_RUNTIME_PATH="$pulse_runtime" \
             "$executable" "$@"
     else
         "$executable" "$@"

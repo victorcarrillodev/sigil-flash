@@ -1,0 +1,13 @@
+[Unit]
+Description=SIGIL local state bootstrap (network independent)
+After=local-fs.target
+Before=sigil-pulseaudio.service sigil-wifi-control.service bluetooth-panel.service bt-connect.service radio-fetcher.service audio-manager.service audio-player.service wifi-fallback.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/firstboot.sh --local-only
+RemainAfterExit=yes
+TimeoutStartSec=60
+
+[Install]
+WantedBy=multi-user.target

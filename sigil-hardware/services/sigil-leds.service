@@ -1,11 +1,13 @@
 [Unit]
 Description=SIGIL Hardware LED Monitor
 After=network.target bluetooth.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 ExecStart=/usr/local/bin/sigil-leds.sh
-Restart=always
-RestartSec=3
+Restart=on-failure
+RestartSec=5
 User=root
 Group=root
 StandardOutput=journal

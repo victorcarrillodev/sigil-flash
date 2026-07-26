@@ -40,6 +40,8 @@ API_KEY_FILE="${SIGIL_API_KEY_FILE:-/etc/sigil/secrets/device-api-key}"
 IDENTITY_HELPER="${SIGIL_IDENTITY_HELPER:-/home/sigil/device_identity.py}"
 DEVICE_CONF="${SIGIL_DEVICE_CONF:-/etc/sigil/device.conf}"
 CACHE_META_FILE="${SIGIL_CACHE_META_FILE:-/var/lib/sigil/cache_meta.json}"
+MEDIA_SYNC_FILE="${SIGIL_MEDIA_SYNC_FILE:-/var/lib/sigil/media_sync_state.json}"
+PLAYBACK_STATE_FILE="${SIGIL_PLAYBACK_STATE_FILE:-/var/lib/sigil/playback_state.json}"
 PLAYLIST_ACTIVE_FILE="/var/lib/sigil/playlist.active.json"
 PLAYLIST_STAGING_FILE="/var/lib/sigil/playlist.staging.json"
 MUSIC_ACTIVE="${SIGIL_MUSIC_ACTIVE:-/home/sigil/music/active}"
@@ -55,6 +57,7 @@ CACHE_TTL_DAYS=7
 CONNECT_TIMEOUT_SECONDS=10
 PLAYLIST_FETCH_TIMEOUT_SECONDS=15
 DOWNLOAD_TIMEOUT_SECONDS=300
+DOWNLOAD_RATE_LIMIT="1M"
 LOG_LEVEL="INFO"
 
 # --- Authentication state (set by init_curl_auth) ---
@@ -258,7 +261,84 @@ write_json_file() {
         log "DRY" "Would write: $file"
         return 0
     fi
-    echo "$content" > "${file}.tmp" && mv "${file}.tmp" "$file"
+    python3 - "$file" "$content" <<'PYEOF'
+import json
+import os
+import sys
+import tempfile
+
+path, raw = sys.argv[1:]
+document = json.loads(raw)
+directory = os.path.dirname(path) or "."
+os.makedirs(directory, exist_ok=True)
+fd, temporary = tempfile.mkstemp(dir=directory, prefix=".sigil-json.", suffix=".tmp")
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(document, handle, indent=2, ensure_ascii=False)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, path)
+    directory_fd = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+except BaseException:
+    try:
+        os.unlink(temporary)
+    except FileNotFoundError:
+        pass
+    raise
+PYEOF
+}
+
+write_media_sync_state() {
+    local phase="$1" playlist_id="${2:-}" generation_id="${3:-}"
+    local validated="${4:-0}" total="${5:-0}" error_id="${6:-none}"
+    local cursor="${7:-0}"
+    if $DRY_RUN; then
+        log "DRY" "Would publish media sync phase=${phase}, validated=${validated}/${total}"
+        return 0
+    fi
+    python3 - "$MEDIA_SYNC_FILE" "$phase" "$playlist_id" "$generation_id" \
+        "$validated" "$total" "$error_id" "$cursor" <<'PYEOF'
+import json
+import os
+import sys
+import tempfile
+from datetime import datetime, timezone
+
+path, phase, playlist_id, generation_id, validated, total, error_id, cursor = sys.argv[1:]
+document = {
+    "_schema_version": "1.0",
+    "phase": phase,
+    "playlist_id": playlist_id or None,
+    "generation_id": generation_id or None,
+    "validated_tracks": max(0, int(validated)),
+    "total_tracks": max(0, int(total)),
+    "priority_cursor": max(0, int(cursor)),
+    "last_error": None if error_id in ("", "none") else error_id,
+    "updated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+}
+directory = os.path.dirname(path) or "."
+os.makedirs(directory, exist_ok=True)
+fd, temporary = tempfile.mkstemp(dir=directory, prefix=".media-sync.", suffix=".tmp")
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(document, handle, indent=2, ensure_ascii=False)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, path)
+except BaseException:
+    try:
+        os.unlink(temporary)
+    except FileNotFoundError:
+        pass
+    raise
+PYEOF
 }
 
 read_playlist_active_hash() {
@@ -291,6 +371,28 @@ with open(sys.argv[1]) as f:
 tracks = data.get('tracks', [])
 for t in tracks:
     print(json.dumps(t))
+PYEOF
+}
+
+build_priority_track_queue() {
+    local playlist_file="$1" cursor="$2" output_file="$3"
+    python3 - "$playlist_file" "$cursor" <<'PYEOF' > "$output_file"
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    document = json.load(handle)
+tracks = document.get("tracks", [])
+cursor = int(sys.argv[2]) if sys.argv[2].isdigit() else 0
+if tracks:
+    cursor %= len(tracks)
+    order = list(range(cursor + 1, len(tracks))) + list(range(0, cursor + 1))
+else:
+    order = []
+for index in order:
+    track = dict(tracks[index])
+    track["_playlist_index"] = index
+    print(json.dumps(track))
 PYEOF
 }
 
@@ -332,8 +434,8 @@ ensure_cache_meta() {
   "cache_policy": {
     "max_ttl_days": 7,
     "auto_renew": true,
-    "delete_on_expire": true,
-    "preserve_on_server_unavailable": false
+    "delete_on_expire": false,
+    "preserve_on_server_unavailable": true
   },
   "active_cache": {
     "playlist_id": null,
@@ -522,6 +624,7 @@ http_get_to_file() {
         --silent --show-error --location
         --connect-timeout "${CONNECT_TIMEOUT_SECONDS}"
         --max-time "${4}"
+        --limit-rate "${DOWNLOAD_RATE_LIMIT}"
         --output "$output_file"
         --write-out '%{http_code}'
     )
@@ -679,6 +782,8 @@ download_track() {
     local track_url="$1"
     local output_path="$2"
     local expected_hash="${3:-}"
+    local expected_size="${4:-0}"
+    local partial_path="${output_path}.partial"
 
     if $DRY_RUN; then
         log "DRY" "Would download track from server"
@@ -692,35 +797,168 @@ download_track() {
     local download_url="${SERVER_URL}${safe_url}"
 
     log "DEBUG" "Downloading track"
-    if ! http_get_to_file "audio_request" "$download_url" "$output_path" \
+    rm -f -- "$partial_path"
+    if ! http_get_to_file "audio_request" "$download_url" "$partial_path" \
         "${DOWNLOAD_TIMEOUT_SECONDS}"; then
         log "ERROR" "Audio request failed; classification logged"
         return 1
     fi
 
-    if [ ! -s "$output_path" ]; then
+    if [ ! -s "$partial_path" ]; then
         log "ERROR" "Downloaded file is empty"
-        rm -f "$output_path"
+        rm -f "$partial_path"
+        return 1
+    fi
+
+    local size
+    size=$(stat -c%s "$partial_path" 2>/dev/null || echo 0)
+    case "$expected_size" in ''|*[!0-9]*) expected_size=0 ;; esac
+    if [ "$expected_size" -gt 0 ] && [ "$size" -ne "$expected_size" ]; then
+        log "ERROR" "Size mismatch for $(basename "$output_path"): expected ${expected_size}, got ${size}"
+        rm -f "$partial_path"
         return 1
     fi
 
     # Verify hash if provided
     if [ -n "$expected_hash" ]; then
         local actual_hash
-        actual_hash=$(sha256sum "$output_path" | cut -d' ' -f1)
+        actual_hash=$(sha256sum "$partial_path" | cut -d' ' -f1)
         if [ "$actual_hash" != "$expected_hash" ]; then
             log "ERROR" "Hash mismatch for $(basename "$output_path"): expected $expected_hash, got $actual_hash"
-            rm -f "$output_path"
+            rm -f "$partial_path"
             return 1
         fi
         log "DEBUG" "Hash verified for $(basename "$output_path")"
     fi
 
-    local size
-    size=$(stat -c%s "$output_path" 2>/dev/null || echo 0)
+    sync -f "$partial_path" 2>/dev/null || true
+    mv -fT -- "$partial_path" "$output_path"
+    sync -f "$output_path" 2>/dev/null || true
     log "DEBUG" "Downloaded $(basename "$output_path") ($size bytes)"
     echo "$size"
     return 0
+}
+
+validate_track_file() {
+    local path="$1" expected_hash="${2:-}" expected_size="${3:-0}"
+    local require_manifest="${4:-0}"
+    [ -f "$path" ] && [ -s "$path" ] || return 1
+    local actual_size
+    actual_size=$(stat -c%s "$path" 2>/dev/null || echo 0)
+    case "$expected_size" in ''|*[!0-9]*) expected_size=0 ;; esac
+    if [ "$require_manifest" = "1" ] \
+        && { [ "$expected_size" -le 0 ] || [ -z "$expected_hash" ]; }; then
+        return 1
+    fi
+    [ "$expected_size" -le 0 ] || [ "$actual_size" -eq "$expected_size" ] || return 1
+    if [ -n "$expected_hash" ]; then
+        [ "$(sha256sum "$path" 2>/dev/null | cut -d' ' -f1)" = "$expected_hash" ] || return 1
+    fi
+    return 0
+}
+
+record_track_integrity() {
+    local playlist_file="$1" track_id="$2" filename="$3" track_path="$4"
+    $DRY_RUN && return 0
+    python3 - "$playlist_file" "$track_id" "$filename" "$track_path" <<'PYEOF'
+import hashlib
+import json
+import os
+import sys
+import tempfile
+
+playlist_path, track_id, filename, media_path = sys.argv[1:]
+with open(media_path, "rb") as handle:
+    digest = hashlib.sha256()
+    for block in iter(lambda: handle.read(1024 * 1024), b""):
+        digest.update(block)
+size = os.path.getsize(media_path)
+with open(playlist_path, encoding="utf-8") as handle:
+    document = json.load(handle)
+tracks = document.get("tracks", [])
+matched = False
+for track in tracks:
+    candidate = track.get("filename") or os.path.basename(track.get("url", ""))
+    if (track_id and track.get("id") == track_id) or candidate == filename:
+        track["filename"] = filename
+        track["size_bytes"] = size
+        track["sha256"] = digest.hexdigest()
+        matched = True
+        break
+if not matched:
+    raise SystemExit("track is not present in staging manifest")
+document["total_size_bytes"] = sum(
+    int(track.get("size_bytes") or 0) for track in tracks
+)
+directory = os.path.dirname(playlist_path) or "."
+fd, temporary = tempfile.mkstemp(dir=directory, prefix=".playlist-integrity.", suffix=".tmp")
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(document, handle, indent=2, ensure_ascii=False)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, playlist_path)
+except BaseException:
+    try:
+        os.unlink(temporary)
+    except FileNotFoundError:
+        pass
+    raise
+PYEOF
+}
+
+ensure_active_integrity_manifest() {
+    [ -f "$PLAYLIST_ACTIVE_FILE" ] || return 1
+    python3 - "$PLAYLIST_ACTIVE_FILE" "$MUSIC_ACTIVE/tracks" <<'PYEOF'
+import hashlib
+import json
+import os
+import sys
+import tempfile
+
+playlist_path, tracks_dir = sys.argv[1:]
+with open(playlist_path, encoding="utf-8") as handle:
+    document = json.load(handle)
+tracks = document.get("tracks", [])
+for track in tracks:
+    filename = track.get("filename") or os.path.basename(track.get("url", ""))
+    path = os.path.join(tracks_dir, filename)
+    if not os.path.isfile(path) or os.path.getsize(path) <= 0:
+        raise SystemExit(1)
+    size = os.path.getsize(path)
+    expected_size = int(track.get("size_bytes") or 0)
+    if expected_size > 0 and expected_size != size:
+        raise SystemExit(1)
+    digest = hashlib.sha256()
+    with open(path, "rb") as media:
+        for block in iter(lambda: media.read(1024 * 1024), b""):
+            digest.update(block)
+    actual_hash = digest.hexdigest()
+    expected_hash = str(track.get("sha256") or "").lower()
+    if expected_hash and expected_hash != actual_hash:
+        raise SystemExit(1)
+    track["filename"] = filename
+    track["size_bytes"] = size
+    track["sha256"] = actual_hash
+document["total_size_bytes"] = sum(int(track["size_bytes"]) for track in tracks)
+directory = os.path.dirname(playlist_path) or "."
+fd, temporary = tempfile.mkstemp(dir=directory, prefix=".active-integrity.", suffix=".tmp")
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(document, handle, indent=2, ensure_ascii=False)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, playlist_path)
+except BaseException:
+    try:
+        os.unlink(temporary)
+    except FileNotFoundError:
+        pass
+    raise
+PYEOF
+    cp "$PLAYLIST_ACTIVE_FILE" "${MUSIC_ACTIVE}/playlist.json"
 }
 
 link_unchanged_track() {
@@ -803,13 +1041,20 @@ for t in tracks:
         print("ERROR: zero-size track file: " + fname, file=sys.stderr)
         sys.exit(1)
 
+    expected_size = t.get('size_bytes', 0)
+    if not isinstance(expected_size, int) or expected_size <= 0 or file_size != expected_size:
+        print("ERROR: size mismatch for " + fname, file=sys.stderr)
+        sys.exit(1)
+
     expected_hash = t.get('sha256', '')
-    if expected_hash:
-        with open(path, 'rb') as fh:
-            actual_hash = hashlib.sha256(fh.read()).hexdigest()
-        if actual_hash != expected_hash:
-            print("ERROR: sha256 mismatch for " + fname, file=sys.stderr)
-            sys.exit(1)
+    if not isinstance(expected_hash, str) or len(expected_hash) != 64:
+        print("ERROR: missing sha256 for " + fname, file=sys.stderr)
+        sys.exit(1)
+    with open(path, 'rb') as fh:
+        actual_hash = hashlib.sha256(fh.read()).hexdigest()
+    if actual_hash != expected_hash:
+        print("ERROR: sha256 mismatch for " + fname, file=sys.stderr)
+        sys.exit(1)
 PYEOF
 
     if [ "$staging_valid" != "true" ]; then
@@ -839,18 +1084,35 @@ atomic_swap() {
 
     log "INFO" "Performing atomic swap"
 
-    # 1. Backup current active to archive
+    # Exchange active and staging in one renameat2 operation. Open decoder file
+    # descriptors remain valid and no observer can see a missing active path.
     mkdir -p "$backup_dir"
     if [ -d "$MUSIC_ACTIVE/tracks" ]; then
-        mv "$MUSIC_ACTIVE" "${backup_dir}/old_active/"
-        log "INFO" "Backed up old active → ${backup_dir}/old_active/"
+        python3 - "$MUSIC_ACTIVE" "$MUSIC_STAGING" <<'PYEOF'
+import ctypes
+import os
+import sys
+
+active, staging = (os.fsencode(value) for value in sys.argv[1:])
+libc = ctypes.CDLL(None, use_errno=True)
+renameat2 = getattr(libc, "renameat2", None)
+if renameat2 is None:
+    raise OSError("renameat2 is unavailable")
+AT_FDCWD = -100
+RENAME_EXCHANGE = 2
+if renameat2(AT_FDCWD, active, AT_FDCWD, staging, RENAME_EXCHANGE) != 0:
+    errno = ctypes.get_errno()
+    raise OSError(errno, os.strerror(errno))
+PYEOF
+        mv "$MUSIC_STAGING" "${backup_dir}/old_active/"
+        log "INFO" "Atomic generation exchange complete; previous cache archived"
+    else
+        rmdir "$MUSIC_ACTIVE" 2>/dev/null || true
+        mv "$MUSIC_STAGING" "$MUSIC_ACTIVE"
+        log "INFO" "First validated generation promoted atomically"
     fi
 
-    # 2. Swap staging → active
-    mv "$MUSIC_STAGING" "$MUSIC_ACTIVE"
-    log "INFO" "Atomic swap complete: staging → active"
-
-    # 3. Recreate staging for next cycle
+    # Recreate staging for next cycle.
     mkdir -p "$MUSIC_STAGING/tracks"
 
     # 4. Copy staging playlist to active dir for the player
@@ -1216,19 +1478,11 @@ sync_cycle() {
     prev_tracks_count=$(read_json_field "$CACHE_META_FILE" "active_cache.tracks_count" 2>/dev/null || echo "0")
     prev_tracks_count="${prev_tracks_count:-0}"
 
-    # --- C3: Recover from incomplete staging left by previous crash ---
-    if [ -d "$MUSIC_STAGING/tracks" ] && [ -n "$(ls -A "$MUSIC_STAGING/tracks/" 2>/dev/null)" ]; then
-        log "WARN" "Incomplete staging from previous run detected — cleaning"
-        clean_staging
-    fi
-    if [ -f "$PLAYLIST_STAGING_FILE" ]; then
-        if $DRY_RUN; then
-            log "DRY" "Would remove stale playlist.staging.json"
-        else
-            log "WARN" "Stale playlist.staging.json from previous run — removing"
-            rm -f "$PLAYLIST_STAGING_FILE"
-        fi
-    fi
+    # Keep individually validated staging tracks across transient failures and
+    # reboots. Partial files are never playable and are discarded before the
+    # generation identity is checked below.
+    find "$MUSIC_STAGING/tracks" -maxdepth 1 -type f -name '*.partial' \
+        -delete 2>/dev/null || true
 
     # --- Ensure state files exist ---
     ensure_cache_meta
@@ -1246,6 +1500,10 @@ sync_cycle() {
         failed=$(read_json_field "$CACHE_META_FILE" "statistics.failed_syncs")
         failed=$((failed + 1))
         update_cache_meta "statistics.failed_syncs" "$failed"
+        write_media_sync_state "SERVER_UNREACHABLE_USING_CACHE" \
+            "$(read_json_field "$PLAYLIST_ACTIVE_FILE" "playlist_id" 2>/dev/null || true)" \
+            "$(read_playlist_active_hash)" "$prev_tracks_count" "$prev_tracks_count" \
+            "PLAYLIST_REQUEST_FAILED" "0"
         flock -u 201
         flock -u 200
         log_event "MEDIA_SYNC_FAILED" "playlist_request" "failure" \
@@ -1259,6 +1517,10 @@ sync_cycle() {
         failed=$(read_json_field "$CACHE_META_FILE" "statistics.failed_syncs")
         failed=$((failed + 1))
         update_cache_meta "statistics.failed_syncs" "$failed"
+        write_media_sync_state "SERVER_UNREACHABLE_USING_CACHE" \
+            "$(read_json_field "$PLAYLIST_ACTIVE_FILE" "playlist_id" 2>/dev/null || true)" \
+            "$(read_playlist_active_hash)" "$prev_tracks_count" "$prev_tracks_count" \
+            "EMPTY_SERVER_RESPONSE" "0"
         flock -u 201
         flock -u 200
         return 1
@@ -1271,6 +1533,10 @@ sync_cycle() {
         failed=$(read_json_field "$CACHE_META_FILE" "statistics.failed_syncs")
         failed=$((failed + 1))
         update_cache_meta "statistics.failed_syncs" "$failed"
+        write_media_sync_state "SERVER_UNREACHABLE_USING_CACHE" \
+            "$(read_json_field "$PLAYLIST_ACTIVE_FILE" "playlist_id" 2>/dev/null || true)" \
+            "$(read_playlist_active_hash)" "$prev_tracks_count" "$prev_tracks_count" \
+            "INVALID_PLAYLIST_RESPONSE" "0"
         flock -u 201
         flock -u 200
         return 1
@@ -1293,7 +1559,7 @@ sync_cycle() {
 
     # --- Compare hashes ---
     if [ -n "$local_hash" ] && [ "$remote_hash" = "$local_hash" ]; then
-        if validate_active; then
+        if ensure_active_integrity_manifest && validate_active; then
             log "INFO" "Playlist unchanged (hash: ${remote_hash:0:12}) — skipping download"
             local saved_bandwidth
             saved_bandwidth=$(read_json_field "$CACHE_META_FILE" "statistics.bandwidth_saved_by_skipping")
@@ -1301,7 +1567,12 @@ sync_cycle() {
             update_cache_meta "statistics.bandwidth_saved_by_skipping" "$saved_bandwidth"
             # Reset staging_cache in case it was left from a previous failed sync
             reset_staging_cache
+            clean_staging
+            rm -f -- "$PLAYLIST_STAGING_FILE"
             update_cache_meta "active_cache.last_hash_check" "$(json_string "$remote_hash")"
+            write_media_sync_state "CACHE_ONLY" \
+                "$(read_json_field "$PLAYLIST_ACTIVE_FILE" "playlist_id")" \
+                "$remote_hash" "$prev_tracks_count" "$prev_tracks_count" "none" "0"
             log "INFO" "=== Sync cycle complete (skipped) ==="
             flock -u 201
             flock -u 200
@@ -1351,10 +1622,25 @@ else:
 print(json.dumps(result, indent=2))
 " 2>/dev/null) || staging_playlist="$remote_json"
 
+    local existing_staging_hash=""
+    existing_staging_hash=$(read_json_field "$PLAYLIST_STAGING_FILE" "version_hash" 2>/dev/null || true)
+    if [ "$existing_staging_hash" != "$remote_hash" ]; then
+        if [ -n "$existing_staging_hash" ]; then
+            log "INFO" "Discarding staging for a superseded playlist generation"
+        fi
+        clean_staging
+    else
+        log "INFO" "Resuming verified tracks from generation ${remote_hash:0:12}"
+    fi
+    ensure_dirs
+
     if $DRY_RUN; then
         log "DRY" "Would write: ${PLAYLIST_STAGING_FILE}"
+    elif [ "$existing_staging_hash" = "$remote_hash" ] \
+        && [ -f "$PLAYLIST_STAGING_FILE" ]; then
+        log "DEBUG" "Keeping enriched staging manifest for resumable validation"
     else
-        echo "$staging_playlist" > "$PLAYLIST_STAGING_FILE"
+        write_json_file "$PLAYLIST_STAGING_FILE" "$staging_playlist"
     fi
 
     # --- Extract tracks (handle both array and object formats) ---
@@ -1387,10 +1673,11 @@ except:
     update_cache_meta "staging_cache.tracks_total"       "$track_count"
     update_cache_meta "staging_cache.tracks_downloaded"  "0"
     update_cache_meta "staging_cache.progress_percent"   "0"
-
-    # --- Clean and prepare staging ---
-    clean_staging
-    ensure_dirs
+    local priority_cursor
+    priority_cursor=$(read_json_field "$PLAYBACK_STATE_FILE" "local.current_track_index" 2>/dev/null || echo 0)
+    case "$priority_cursor" in ''|*[!0-9]*) priority_cursor=0 ;; esac
+    write_media_sync_state "STREAM_WARMUP" "$remote_playlist_id" "$remote_hash" \
+        "0" "$track_count" "none" "$priority_cursor"
 
     # --- Download each track (using temp file to avoid subshell from pipe) ---
     local downloaded=0
@@ -1401,25 +1688,17 @@ except:
     local seen_fnames=""
     local tracks_temp
     tracks_temp=$(mktemp /tmp/radio-fetcher-tracks.XXXXXX)
-    echo "$remote_json" | python3 -c "
-import json, sys
-data = json.load(sys.stdin)
-if isinstance(data, list):
-    tracks = data
-else:
-    tracks = data.get('tracks', [])
-for t in tracks:
-    print(json.dumps(t))
-" 2>/dev/null > "$tracks_temp"
+    build_priority_track_queue "$PLAYLIST_STAGING_FILE" "$priority_cursor" "$tracks_temp"
 
     while IFS= read -r track_json <&3; do
         [ -z "$track_json" ] && continue
 
-        local track_id track_url track_filename track_hash
+        local track_id track_url track_filename track_hash track_size
         track_id=$(echo "$track_json" | python3 -c "import json,sys; print(json.load(sys.stdin).get('id',''))" 2>/dev/null)
         track_url=$(echo "$track_json" | python3 -c "import json,sys; print(json.load(sys.stdin).get('url',''))" 2>/dev/null)
         track_filename=$(echo "$track_json" | python3 -c "import json,sys; print(json.load(sys.stdin).get('filename',''))" 2>/dev/null)
         track_hash=$(echo "$track_json" | python3 -c "import json,sys; print(json.load(sys.stdin).get('sha256',''))" 2>/dev/null)
+        track_size=$(echo "$track_json" | python3 -c "import json,sys; print(json.load(sys.stdin).get('size_bytes',0) or 0)" 2>/dev/null)
 
         if [ -z "$track_filename" ]; then
             track_filename=$(basename "${track_url}")
@@ -1446,6 +1725,23 @@ for t in tracks:
 
         log "INFO" "Track $((downloaded + 1))/${track_count}: ${track_filename}"
 
+        # A prior run may already have committed this exact track into staging.
+        # Revalidate it before exposing it to the player.
+        if validate_track_file "$staging_path" "$track_hash" "$track_size" 1; then
+            local fsize
+            fsize=$(stat -c%s "$staging_path" 2>/dev/null || echo 0)
+            total_bytes=$((total_bytes + fsize))
+            downloaded=$((downloaded + 1))
+            verified=$((verified + 1))
+            update_cache_meta "staging_cache.tracks_downloaded" "$downloaded"
+            update_cache_meta "staging_cache.progress_percent" \
+                "$((downloaded * 100 / track_count))"
+            write_media_sync_state "STREAM_WARMUP" "$remote_playlist_id" \
+                "$remote_hash" "$verified" "$track_count" "none" "$priority_cursor"
+            continue
+        fi
+        rm -f -- "$staging_path" "${staging_path}.partial"
+
         # Check if track already exists in active with same hash
         if [ -f "$active_path" ] && [ -n "$track_hash" ]; then
             local active_hash
@@ -1453,17 +1749,26 @@ for t in tracks:
             if [ "$active_hash" = "$track_hash" ]; then
                 log "DEBUG" "Track unchanged in active — hardlinking"
                 link_unchanged_track "$active_path" "$staging_path"
+                record_track_integrity "$PLAYLIST_STAGING_FILE" "$track_id" \
+                    "$track_filename" "$staging_path"
                 local fsize
                 fsize=$(stat -c%s "$active_path" 2>/dev/null || echo 0)
                 total_bytes=$((total_bytes + fsize))
                 downloaded=$((downloaded + 1))
                 verified=$((verified + 1))
+                update_cache_meta "staging_cache.tracks_downloaded" "$downloaded"
+                if [ "$track_count" -gt 0 ]; then
+                    update_cache_meta "staging_cache.progress_percent" \
+                        "$((downloaded * 100 / track_count))"
+                fi
+                write_media_sync_state "STREAM_WARMUP" "$remote_playlist_id" \
+                    "$remote_hash" "$verified" "$track_count" "none" "$priority_cursor"
                 continue
             fi
         fi
 
         # Download track
-        if ! download_track "$track_url" "$staging_path" "$track_hash" > /dev/null; then
+        if ! download_track "$track_url" "$staging_path" "$track_hash" "$track_size" > /dev/null; then
             failed=$((failed + 1))
             local track_id_json
             track_id_json=$(json_string "$track_id")
@@ -1472,6 +1777,8 @@ for t in tracks:
             log "ERROR" "Failed to download track: ${track_filename}"
             continue
         fi
+        record_track_integrity "$PLAYLIST_STAGING_FILE" "$track_id" \
+            "$track_filename" "$staging_path"
 
         downloaded=$((downloaded + 1))
         verified=$((verified + 1))
@@ -1483,20 +1790,23 @@ for t in tracks:
         local pct=$((downloaded * 100 / track_count))
         update_cache_meta "staging_cache.tracks_downloaded" "$downloaded"
         update_cache_meta "staging_cache.progress_percent" "$pct"
+        write_media_sync_state "STREAM_WARMUP" "$remote_playlist_id" \
+            "$remote_hash" "$verified" "$track_count" "none" "$priority_cursor"
         log "DEBUG" "Progress: ${pct}% (${downloaded}/${track_count})"
     done 3< "$tracks_temp"
     rm -f "$tracks_temp"
 
     # --- Check if any track failed ---
     if [ "$failed" -gt 0 ]; then
-        log "ERROR" "${failed} track(s) failed to download — aborting sync"
+        log "ERROR" "${failed} track(s) failed; retaining verified staging tracks for retry"
         update_cache_meta "staging_cache.failed_tracks" "[${failed_list}]"
         local failed_total
         failed_total=$(read_json_field "$CACHE_META_FILE" "statistics.failed_syncs")
         failed_total=$((failed_total + 1))
         update_cache_meta "statistics.failed_syncs" "$failed_total"
-        clean_staging
-        reset_staging_cache
+        write_media_sync_state "WAITING_NETWORK" "$remote_playlist_id" \
+            "$remote_hash" "$verified" "$track_count" "TRACK_DOWNLOAD_FAILED" \
+            "$priority_cursor"
         log "INFO" "=== Sync cycle failed (${failed} failed tracks) ==="
         flock -u 201
         flock -u 200
@@ -1506,8 +1816,9 @@ for t in tracks:
     # --- C2: Validate staging completeness before atomic swap ---
     if ! validate_staging "$track_count"; then
         log "ERROR" "Staging validation failed — aborting sync, active playlist intact"
-        clean_staging
-        reset_staging_cache
+        write_media_sync_state "MEDIA_INTEGRITY_FAILURE" "$remote_playlist_id" \
+            "$remote_hash" "$verified" "$track_count" "STAGING_VALIDATION_FAILED" \
+            "$priority_cursor"
         local failed_total
         failed_total=$(read_json_field "$CACHE_META_FILE" "statistics.failed_syncs")
         failed_total=$((failed_total + 1))
@@ -1520,8 +1831,9 @@ for t in tracks:
     # --- Recheck SSH/logout coordination immediately before atomic swap ---
     if ! cache_fetch_coordination_allowed "pre-swap check"; then
         log "INFO" "SSH coordination changed during download — aborting swap"
-        clean_staging
-        reset_staging_cache
+        write_media_sync_state "MAINTENANCE" "$remote_playlist_id" \
+            "$remote_hash" "$verified" "$track_count" "SSH_MAINTENANCE" \
+            "$priority_cursor"
         flock -u 201
         flock -u 200
         return 2
@@ -1573,10 +1885,15 @@ for t in tracks:
         if $DRY_RUN; then
             log "DRY" "Would cp ${PLAYLIST_STAGING_FILE} → ${PLAYLIST_ACTIVE_FILE}"
         else
-            cp "$PLAYLIST_STAGING_FILE" "$PLAYLIST_ACTIVE_FILE"
+            cp "$PLAYLIST_STAGING_FILE" "${PLAYLIST_ACTIVE_FILE}.tmp"
+            sync -f "${PLAYLIST_ACTIVE_FILE}.tmp" 2>/dev/null || true
+            mv -fT -- "${PLAYLIST_ACTIVE_FILE}.tmp" "$PLAYLIST_ACTIVE_FILE"
             log "INFO" "Updated ${PLAYLIST_ACTIVE_FILE}"
         fi
     fi
+    write_media_sync_state "CACHE_ONLY" "$remote_playlist_id" "$remote_hash" \
+        "$downloaded" "$track_count" "none" "$priority_cursor"
+    rm -f -- "$PLAYLIST_STAGING_FILE"
 
     # Reset cumulative runtime counter only when cache was previously empty
     # (expiration rebuild, SSH wipe recovery, or firstboot).  A content update

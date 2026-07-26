@@ -7,7 +7,10 @@ set -uo pipefail
 umask 077
 
 PREFERRED="${SIGIL_BT_PREFERRED_FILE:-/home/sigil/preferred_bt.txt}"
+BT_STATE_FILE="${SIGIL_BT_STATE_FILE:-/var/lib/sigil/bluetooth_state.json}"
+BT_HISTORY_FILE="${SIGIL_BT_HISTORY_FILE:-/var/lib/sigil/bluetooth_ever_preferred}"
 BT_LOCK="${SIGIL_BT_LOCK_FILE:-/run/sigil/bluetooth-transition.lock}"
+USER_DISCONNECT_MARKER="${SIGIL_BT_USER_DISCONNECT_MARKER:-/run/sigil/bluetooth-user-disconnected}"
 LOCK_TIMEOUT="${SIGIL_BT_LOCK_TIMEOUT:-30}"
 LOG="${SIGIL_BT_LOG_FILE:-/var/log/bt-connect.log}"
 BLUETOOTHCTL="${SIGIL_BLUETOOTHCTL:-bluetoothctl}"
@@ -17,12 +20,15 @@ RESULT_MESSAGE="Error Bluetooth"
 RESULT_MAC=""
 COMMAND_MODE=0
 BT_LAST_RC=0
-AUTO_RETRY_INITIAL="${SIGIL_BT_RETRY_INITIAL:-15}"
+AUTO_RETRY_INITIAL="${SIGIL_BT_RETRY_INITIAL:-5}"
 # A saved speaker can be temporarily off, but a five-minute retry interval makes
 # a recovered speaker feel broken.  Keep trying in the background at least once
 # per minute while the panel gives the customer a bounded waiting screen.
 AUTO_RETRY_MAX="${SIGIL_BT_RETRY_MAX:-60}"
 AUTO_HEALTH_INTERVAL="${SIGIL_BT_HEALTH_INTERVAL:-15}"
+BT_PHASE="NO_PREFERRED_SPEAKER"
+BT_REASON="startup"
+BT_A2DP_READY=false
 
 if [ "${1:-}" = "request" ]; then
     COMMAND_MODE=1
@@ -30,10 +36,16 @@ fi
 
 touch "$LOG" 2>/dev/null || LOG=""
 
-SIGIL_UID=$(id -u sigil 2>/dev/null || echo "1000")
-export XDG_RUNTIME_DIR="/run/user/${SIGIL_UID}"
-export PULSE_RUNTIME_PATH="/run/user/${SIGIL_UID}/pulse"
-export PULSE_SERVER="unix:/run/user/${SIGIL_UID}/pulse/native"
+PULSE_RUNTIME_ENV="${SIGIL_PULSE_RUNTIME_ENV:-/etc/sigil/pulse-runtime.env}"
+if [ -r "$PULSE_RUNTIME_ENV" ]; then
+    # shellcheck disable=SC1090
+    set -a
+    . "$PULSE_RUNTIME_ENV"
+    set +a
+fi
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/sigil-pulse}"
+export PULSE_RUNTIME_PATH="${PULSE_RUNTIME_PATH:-/run/sigil-pulse}"
+export PULSE_SERVER="${PULSE_SERVER:-unix:${PULSE_RUNTIME_PATH}/native}"
 
 AUDIO_ROUTE_HELPER="${SIGIL_AUDIO_ROUTE_HELPER:-/usr/local/bin/sigil-audio-route.sh}"
 if [ -r "$AUDIO_ROUTE_HELPER" ]; then
@@ -113,11 +125,101 @@ atomic_preferred_value() {
 write_preferred() {
     local mac
     mac=$(normalize_mac "${1:-}") || return 1
-    atomic_preferred_value "$mac"
+    atomic_preferred_value "$mac" || return 1
+    : > "$BT_HISTORY_FILE"
+    chmod 0600 "$BT_HISTORY_FILE" 2>/dev/null || true
 }
 
 clear_preferred() {
     atomic_preferred_value ""
+}
+
+write_bt_state() {
+    local phase="$1" reason="${2:-}" retry_after="${3:-0}"
+    local preferred="" info="" name="" paired=false trusted=false
+    local connected=false resolved=false profile="" sink="" active_device=""
+    preferred=$(read_preferred 2>/dev/null || true)
+    if [ -n "$preferred" ]; then
+        info=$(device_info "$preferred" 2>/dev/null || true)
+        name=$(printf '%s\n' "$info" | sed -n 's/^[[:space:]]*Name:[[:space:]]*//p' | head -n 1)
+        grep -qiE '^[[:space:]]*Paired:[[:space:]]*yes$' <<< "$info" && paired=true
+        grep -qiE '^[[:space:]]*Trusted:[[:space:]]*yes$' <<< "$info" && trusted=true
+        grep -qiE '^[[:space:]]*Connected:[[:space:]]*yes$' <<< "$info" && connected=true
+        services_resolved "$preferred" && resolved=true
+    fi
+    if [ "$BT_A2DP_READY" = true ] && [ -n "$preferred" ]; then
+        active_device="$preferred"
+        profile="a2dp_sink"
+        sink="${AUDIO_ROUTE_SINK:-}"
+    fi
+
+    python3 - "$BT_STATE_FILE" "$phase" "$reason" "$retry_after" \
+        "$preferred" "$name" "$paired" "$trusted" "$connected" "$resolved" \
+        "$BT_A2DP_READY" "$profile" "$sink" "$active_device" <<'PY'
+import json
+import os
+import sys
+import tempfile
+from datetime import datetime, timezone
+
+(
+    path, phase, reason, retry_after, mac, name, paired, trusted,
+    connected, resolved, a2dp_ready, profile, sink, active_device,
+) = sys.argv[1:]
+now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+preferred = None
+if mac:
+    preferred = {
+        "mac": mac,
+        "name": name or "",
+        "paired": paired == "true",
+        "trusted": trusted == "true",
+    }
+
+doc = {
+    "_schema_version": "2.0",
+    "phase": phase,
+    "reason": reason or None,
+    "preferred_device": preferred,
+    "active_output_device": active_device or None,
+    "connection_status": {
+        "connected": connected == "true",
+        "services_resolved": resolved == "true",
+        "profile": profile or "",
+        "sink": sink or None,
+    },
+    "a2dp_ready": a2dp_ready == "true",
+    "retry_after_seconds": max(0, int(retry_after or 0)),
+    "updated_at": now,
+}
+
+directory = os.path.dirname(path) or "."
+os.makedirs(directory, exist_ok=True)
+fd, tmp = tempfile.mkstemp(dir=directory, prefix=".bluetooth-state.", suffix=".tmp")
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        json.dump(doc, fh, indent=2, ensure_ascii=False)
+        fh.write("\n")
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+except BaseException:
+    try:
+        os.unlink(tmp)
+    except FileNotFoundError:
+        pass
+    raise
+PY
+}
+
+set_bt_phase() {
+    BT_PHASE="$1"
+    BT_REASON="${2:-}"
+    BT_A2DP_READY="${3:-false}"
+    write_bt_state "$BT_PHASE" "$BT_REASON" "${4:-0}" || \
+        log "No se pudo actualizar bluetooth_state.json"
 }
 
 with_bluetooth_lock() {
@@ -172,13 +274,15 @@ is_connected() {
 }
 
 services_resolved() {
-    local info
+    local info object_path result
     info=$(device_info "$1") || return 1
-    # Some BlueZ versions do not print ServicesResolved in bluetoothctl info;
-    # the announced Audio Sink UUID is its compatible proof of completed
-    # service discovery for an audio device.
-    grep -qiE '^[[:space:]]*ServicesResolved:[[:space:]]*yes$' <<< "$info" \
-        || grep -qiE 'UUID:.*(Audio Sink|Advanced Audio|0000110[bBdD]-)' <<< "$info"
+    if grep -qiE '^[[:space:]]*ServicesResolved:[[:space:]]*yes$' <<< "$info"; then
+        return 0
+    fi
+    object_path="/org/bluez/hci0/dev_${1//:/_}"
+    result=$(timeout 3 busctl get-property org.bluez "$object_path" \
+        org.bluez.Device1 ServicesResolved 2>/dev/null || true)
+    [ "$result" = "b true" ]
 }
 
 wait_services_resolved() {
@@ -409,7 +513,9 @@ request_pair_locked() {
         RESULT_MESSAGE="No se pudo guardar la bocina preferida"
         return 1
     fi
+    rm -f -- "$USER_DISCONNECT_MARKER"
     complete_target_connection "$mac" "$previous_preferred" || return 1
+    set_bt_phase "READY" "paired_and_a2dp_ready" true
     RESULT_CODE="paired"
     RESULT_MESSAGE="Bocina emparejada y conectada exitosamente"
     return 0
@@ -425,7 +531,9 @@ request_connect_locked() {
         RESULT_MESSAGE="No se pudo guardar la bocina preferida"
         return 1
     fi
+    rm -f -- "$USER_DISCONNECT_MARKER"
     complete_target_connection "$mac" "$previous_preferred" || return 1
+    set_bt_phase "READY" "connected_and_a2dp_ready" true
     RESULT_CODE="connected"
     RESULT_MESSAGE="Conectado exitosamente"
     return 0
@@ -441,6 +549,11 @@ request_disconnect_locked() {
             return 1
         fi
     fi
+    if [ -n "$mac" ]; then
+        printf '%s\n' "$mac" > "${USER_DISCONNECT_MARKER}.tmp" \
+            && mv -f "${USER_DISCONNECT_MARKER}.tmp" "$USER_DISCONNECT_MARKER"
+    fi
+    set_bt_phase "DISCONNECTED_BY_USER" "explicit_disconnect" false
     RESULT_CODE="disconnected"
     RESULT_MESSAGE="Bocina desconectada; permanece como preferida para la reconexión automática"
     return 0
@@ -472,6 +585,8 @@ request_remove_locked() {
         RESULT_MESSAGE="La bocina se eliminó, pero no se pudo limpiar el estado preferido"
         return 1
     fi
+    rm -f -- "$USER_DISCONNECT_MARKER"
+    set_bt_phase "NO_PREFERRED_SPEAKER" "explicit_forget" false
     RESULT_CODE="removed"
     RESULT_MESSAGE="Bocina eliminada"
     RESULT_MAC="$mac"
@@ -480,7 +595,8 @@ request_remove_locked() {
 
 emit_result() {
     local success="$1"
-    python3 - "$success" "$RESULT_CODE" "$RESULT_MESSAGE" "$RESULT_MAC" <<'PY'
+    python3 - "$success" "$RESULT_CODE" "$RESULT_MESSAGE" "$RESULT_MAC" \
+        "$BT_PHASE" "$BT_A2DP_READY" <<'PY'
 import json
 import sys
 
@@ -489,6 +605,12 @@ print(json.dumps({
     "code": sys.argv[2],
     "message": sys.argv[3],
     "mac": sys.argv[4] or None,
+    "phase": sys.argv[5],
+    "a2dp_ready": sys.argv[6] == "true",
+    "retryable": sys.argv[2] in {
+        "busy", "connect_failed", "a2dp_failed", "power_failed",
+        "disconnect_failed", "exclusive_failed",
+    },
 }, ensure_ascii=False))
 PY
 }
@@ -550,44 +672,61 @@ prepare_adapter_locked() {
     return 1
 }
 
-wait_a2dp_ready() {
-    local waited=0 max_wait=60
-    log "Esperando endpoints A2DP de PulseAudio"
-    while [ "$waited" -lt "$max_wait" ]; do
-        if "$BLUETOOTHCTL" show 2>/dev/null | grep -q "UUID: Audio Sink"; then
-            return 0
-        fi
-        if pactl list modules short 2>/dev/null | grep -q "module-bluetooth"; then
-            return 0
-        fi
-        sleep 3
-        waited=$((waited + 3))
-    done
-    log "A2DP no apareció en ${max_wait}s; se intentará de todos modos"
-}
-
 auto_cycle_locked() {
     local connected preferred=""
     connected=$(connected_devices)
     preferred=$(read_preferred 2>/dev/null || true)
 
-    [ -n "$preferred" ] || return 0
-    if printf '%s\n' "$connected" | grep -qxF "$preferred"; then
-        if [ "$preferred" != "$PREV_MAC" ]; then
-            activate_a2dp "$preferred" || return 1
-            PREV_MAC="$preferred"
+    if [ -z "$preferred" ]; then
+        if [ -e "$BT_HISTORY_FILE" ]; then
+            set_bt_phase "NO_PREFERRED_SPEAKER" "no_preferred_speaker" false
+        else
+            set_bt_phase "NO_PREFERRED_SPEAKER" "first_install" false
         fi
         return 0
     fi
+    if [ -r "$USER_DISCONNECT_MARKER" ] \
+        && grep -qxF "$preferred" "$USER_DISCONNECT_MARKER" 2>/dev/null; then
+        set_bt_phase "DISCONNECTED_BY_USER" "explicit_disconnect" false
+        return 0
+    fi
+    if ! is_paired "$preferred" || ! is_trusted "$preferred"; then
+        set_bt_phase "STATE_CORRUPT" "preferred_device_not_paired_or_trusted" false \
+            "$AUTO_RETRY_MAX"
+        return 1
+    fi
+    if printf '%s\n' "$connected" | grep -qxF "$preferred"; then
+        set_bt_phase "WAITING_FOR_SERVICES" "bluetooth_connected" false
+        if ! wait_services_resolved "$preferred"; then
+            set_bt_phase "WAITING_FOR_SERVICES" "services_not_resolved" false \
+                "$AUTO_RETRY_INITIAL"
+            return 1
+        fi
+        set_bt_phase "WAITING_FOR_A2DP" "services_resolved" false
+        if activate_a2dp "$preferred"; then
+            PREV_MAC="$preferred"
+            set_bt_phase "READY" "a2dp_route_confirmed" true
+            return 0
+        fi
+        set_bt_phase "WAITING_FOR_A2DP" "audio_runtime_or_sink_not_ready" false \
+            "$AUTO_RETRY_INITIAL"
+        return 1
+    fi
 
     log "Bocina preferida ausente; intentando reconexión: $preferred"
-    prepare_target "$preferred" || return 1
+    set_bt_phase "WAITING_FOR_BLUETOOTH" "preferred_device_disconnected" false
+    if ! prepare_target "$preferred"; then
+        set_bt_phase "RETRY_BACKOFF" "prepare_target_failed" false "$AUTO_RETRY_INITIAL"
+        return 1
+    fi
     if connect_target "$preferred" && activate_a2dp "$preferred"; then
         PREV_MAC="$preferred"
+        set_bt_phase "READY" "reconnected_and_a2dp_ready" true
         return 0
     fi
     log "Reconexión automática fallida para $preferred"
     PREV_MAC=""
+    set_bt_phase "RETRY_BACKOFF" "connect_or_a2dp_failed" false "$AUTO_RETRY_INITIAL"
     return 1
 }
 
@@ -598,8 +737,6 @@ run_daemon() {
     # A preferred speaker is connected immediately after BlueZ is ready.
     # The panel and audio workers start in parallel; endpoint discovery below
     # only gates A2DP activation, never panel availability.
-    with_bluetooth_lock auto_cycle_locked || true
-    wait_a2dp_ready
     with_bluetooth_lock auto_cycle_locked || true
     if [ "${SIGIL_BT_RUN_ONCE:-0}" = "1" ]; then
         return 0

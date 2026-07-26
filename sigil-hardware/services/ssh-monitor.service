@@ -2,13 +2,15 @@
 Description=Sigil SSH Monitor — security maintenance mode when SSH is active
 After=network.target ssh.service
 Wants=network.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 Type=simple
 User=root
 Group=root
 ExecStart=/usr/local/bin/ssh-monitor.sh
-Restart=always
+Restart=on-failure
 RestartSec=5
 StandardOutput=journal
 StandardError=journal
