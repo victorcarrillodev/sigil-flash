@@ -1,0 +1,11 @@
+{
+  "_schema_version": "1.0",
+  "phase": "STREAM_WARMUP",
+  "playlist_id": "pl_xyz789",
+  "generation_id": "8f14e45fceea1673",
+  "validated_tracks": 2,
+  "total_tracks": 10,
+  "priority_cursor": 3,
+  "last_error": null,
+  "updated_at": "2026-07-09T12:00:00Z"
+}

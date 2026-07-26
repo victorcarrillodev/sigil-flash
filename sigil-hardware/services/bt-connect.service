@@ -6,15 +6,17 @@ Description=Sigil Bluetooth Auto Connect
 After=bluetooth.service bluetooth.target
 Wants=bluetooth.service sigil-pulseaudio.service
 # Reiniciar indefinidamente si falla (la Pi puede no tener Bluetooth listo de inmediato)
-StartLimitIntervalSec=0
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 Type=simple
 User=sigil
 Group=sigil
+EnvironmentFile=-/etc/sigil/pulse-runtime.env
 ExecStart=/usr/local/bin/bt-connect.sh
 Restart=on-failure
-RestartSec=15
+RestartSec=5
 StandardOutput=journal
 StandardError=journal
 

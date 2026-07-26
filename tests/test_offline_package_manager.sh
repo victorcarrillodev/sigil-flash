@@ -32,7 +32,7 @@ check() {
 check "builder and image metadata extractor are valid shell" \
     bash -n "$BUILDER" "$EXTRACTOR"
 
-check "canonical contract has schema, bundle version, profiles, and 23 required packages" \
+check "canonical contract has schema, bundle version, profiles, and 25 required packages" \
     python3 - "$CONTRACT" <<'PYEOF'
 import json, pathlib, re, sys
 contract = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
@@ -45,7 +45,7 @@ valid = (
     and contract["distribution_version"] == "13"
     and contract["architecture"] == "arm64"
     and contract["install_recommends"] is False
-    and len(required) == 23
+    and len(required) == 25
     and {item["profile"] for item in contract["packages"]} <= {"runtime", "factory-debug", "optional"}
     and optional == [{"name": "openssh-server", "required": False, "version": None, "profile": "factory-debug"}]
 )
@@ -84,7 +84,7 @@ valid = (
     and manifest["distribution"] == contract["distribution"]
     and manifest["distribution_version"] == contract["distribution_version"]
     and manifest["architecture"] == contract["architecture"]
-    and manifest["direct_package_count"] == 23
+    and manifest["direct_package_count"] == 25
     and manifest["resolved_package_count"] == len(manifest["packages"])
     and manifest["resolved_package_count"] > manifest["direct_package_count"]
     and manifest["unresolved_packages"] == []

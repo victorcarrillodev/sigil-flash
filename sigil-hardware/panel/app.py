@@ -20,7 +20,7 @@ import time
 import urllib.request
 import urllib.error
 import urllib.parse
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 from flask import Flask, render_template, jsonify, request, redirect, Response, session, url_for
 
@@ -106,6 +106,9 @@ _DEVICE_ID = load_identity()["device_id"]
 
 _PLAYBACK_STATE_FILE = "/var/lib/sigil/playback_state.json"
 _AUDIO_MODE_FILE = "/var/lib/sigil/audio_mode.json"
+_BLUETOOTH_STATE_FILE = "/var/lib/sigil/bluetooth_state.json"
+_MEDIA_SYNC_FILE = "/var/lib/sigil/media_sync_state.json"
+_MAINTENANCE_STATE_FILE = "/var/lib/sigil/maintenance_state.json"
 _LEGACY_NOW_PLAYING_FILE = "/home/sigil/now_playing.txt"
 _MAX_RUNTIME_STATE_BYTES = 64 * 1024
 _PANEL_PIN_HASH_FILE = os.environ.get(
@@ -374,27 +377,68 @@ def _services_active(services: tuple[str, ...]) -> bool:
     return result.returncode == 0
 
 
-def _startup_state() -> dict[str, bool]:
+def _playback_process_is_live(playback_state: dict) -> bool:
+    process = playback_state.get("process")
+    if not isinstance(process, dict) or playback_state.get("playing") is not True:
+        return False
+    pid = process.get("pid")
+    start_ticks = process.get("start_ticks")
+    lease = process.get("lease_expires_at")
+    if not isinstance(pid, int) or pid <= 0 or not isinstance(start_ticks, int):
+        return False
+    try:
+        with open(f"/proc/{pid}/stat", encoding="ascii") as stat_file:
+            actual_ticks = int(stat_file.read().split()[21])
+        lease_time = datetime.fromisoformat(str(lease).replace("Z", "+00:00"))
+    except (FileNotFoundError, OSError, ValueError, IndexError, TypeError):
+        return False
+    return actual_ticks == start_ticks and lease_time > datetime.now(timezone.utc)
+
+
+def _startup_state() -> dict[str, object]:
     """Return independent boot, audio-route, media and playback readiness states."""
     base_services_ready = _services_active(_BASE_STARTUP_SERVICES)
     panel_workers_ready = _services_active(_PANEL_STARTUP_SERVICES)
     panel_ready = base_services_ready and panel_workers_ready
     playback_state = _read_bounded_json(_PLAYBACK_STATE_FILE)
+    bluetooth_state = _read_bounded_json(_BLUETOOTH_STATE_FILE)
+    media_state = _read_bounded_json(_MEDIA_SYNC_FILE)
+    maintenance_state = _read_bounded_json(_MAINTENANCE_STATE_FILE)
     output = playback_state.get("output") if playback_state else None
     output_available = isinstance(output, dict) and output.get("available") is True
     preferred = get_preferred_device()
     no_preferred_speaker = not preferred
-    # The file is created only after an explicit successful connection. An
-    # absent file distinguishes a first installation from a later deselection.
+    bluetooth_phase = (
+        bluetooth_state.get("phase")
+        if isinstance(bluetooth_state, dict)
+        else "NO_PREFERRED_SPEAKER"
+    )
     preferred_file = getattr(config, "PREFERRED_BT_FILE", "/home/sigil/preferred_bt.txt")
-    first_install = no_preferred_speaker and not os.path.exists(preferred_file)
+    first_install = no_preferred_speaker and (
+        (
+            isinstance(bluetooth_state, dict)
+            and bluetooth_state.get("reason") == "first_install"
+        )
+        or (not bluetooth_state and not os.path.exists(preferred_file))
+    )
     a2dp_ready = _preferred_a2dp_is_ready()
     media_ready = _services_active(("radio-fetcher.service",))
+    media_phase = media_state.get("phase") if isinstance(media_state, dict) else "UNKNOWN"
+    playback_source = (
+        playback_state.get("source")
+        if isinstance(playback_state, dict)
+        else "IDLE"
+    )
+    maintenance_active = (
+        isinstance(maintenance_state, dict)
+        and maintenance_state.get("active") is True
+    )
     playback_active = bool(
         panel_ready
         and output_available
-        and playback_state
-        and playback_state.get("playing") is True
+        and isinstance(playback_state, dict)
+        and _playback_process_is_live(playback_state)
+        and not maintenance_active
     )
     return {
         "BASE_SERVICES_READY": base_services_ready,
@@ -402,10 +446,17 @@ def _startup_state() -> dict[str, bool]:
         "FIRST_INSTALL": first_install,
         "NO_PREFERRED_SPEAKER": no_preferred_speaker,
         "AUDIO_OUTPUT_WAITING": panel_ready and not output_available,
+        "AUDIO_BACKEND_READY": _services_active(("sigil-pulseaudio.service",)),
+        "BLUETOOTH_PHASE": bluetooth_phase,
         "A2DP_READY": a2dp_ready,
         # A running fetcher has started its job; a download completion is not
         # required before exposing the pairing/login panel.
         "MEDIA_READY": media_ready,
+        "MEDIA_STREAM_READY": media_phase == "STREAM_WARMUP",
+        "CACHE_READY": media_phase == "CACHE_ONLY",
+        "MEDIA_PHASE": media_phase,
+        "PLAYBACK_SOURCE": playback_source,
+        "MAINTENANCE_ACTIVE": maintenance_active,
         "PLAYBACK_ACTIVE": playback_active,
     }
 
@@ -609,9 +660,15 @@ def bt_status():
             "connected": bool(d.get("connected")),
             "known": True,
         })
+    bt_runtime = _read_bounded_json(_BLUETOOTH_STATE_FILE)
     return jsonify({
         "devices": result,
         "connected_macs": [d["mac"] for d in result if d["connected"]],
+        "phase": bt_runtime.get("phase") if bt_runtime else "NO_PREFERRED_SPEAKER",
+        "a2dp_ready": bool(bt_runtime and bt_runtime.get("a2dp_ready") is True),
+        "retry_after_seconds": (
+            bt_runtime.get("retry_after_seconds", 0) if bt_runtime else 0
+        ),
     })
 
 
@@ -782,10 +839,19 @@ def music_status():
     track_url = ""
     playback_state = _read_bounded_json(_PLAYBACK_STATE_FILE)
     audio_mode = _read_bounded_json(_AUDIO_MODE_FILE)
+    media_state = _read_bounded_json(_MEDIA_SYNC_FILE)
+    maintenance_state = _read_bounded_json(_MAINTENANCE_STATE_FILE)
 
     # Only the canonical runtime state can assert liveness.  now_playing.txt is
     # retained solely as rollback-era display metadata and may be stale.
-    is_playing = bool(playback_state and playback_state.get("playing") is True)
+    maintenance_active = bool(
+        maintenance_state and maintenance_state.get("active") is True
+    )
+    is_playing = bool(
+        playback_state
+        and _playback_process_is_live(playback_state)
+        and not maintenance_active
+    )
     canonical_track = ""
     if playback_state:
         current_track = playback_state.get("current_track")
@@ -823,6 +889,13 @@ def music_status():
         "route": route,
         "output": output_sink,
         "runtime_state": runtime_state,
+        "source": (
+            playback_state.get("source", "IDLE") if playback_state else "IDLE"
+        ),
+        "media_phase": (
+            media_state.get("phase", "UNKNOWN") if media_state else "UNKNOWN"
+        ),
+        "maintenance": maintenance_active,
         "error": runtime_error,
     })
 

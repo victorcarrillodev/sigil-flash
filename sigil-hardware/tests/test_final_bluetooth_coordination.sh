@@ -136,7 +136,13 @@ case "$command" in
         printf 'Device %s\n' "$mac"
         if contains "${state}/paired" "$mac"; then printf '    Paired: yes\n'; else printf '    Paired: no\n'; fi
         if contains "${state}/trusted" "$mac"; then printf '    Trusted: yes\n'; else printf '    Trusted: no\n'; fi
-        if contains "${state}/connected" "$mac"; then printf '    Connected: yes\n'; else printf '    Connected: no\n'; fi
+        if contains "${state}/connected" "$mac"; then
+            printf '    Connected: yes\n'
+            printf '    ServicesResolved: yes\n'
+        else
+            printf '    Connected: no\n'
+            printf '    ServicesResolved: no\n'
+        fi
         if [ "$mac" = "${MOCK_NON_AUDIO_MAC:-none}" ]; then
             printf '    UUID: Human Interface Device (00001124-0000-1000-8000-00805f9b34fb)\n'
             printf '    Class: 0x00000540\n'
@@ -192,6 +198,9 @@ MOCK
     export SIGIL_BT_PREFERRED_FILE="${TEST_DIR}/preferred_bt.txt"
     export SIGIL_BT_LOCK_FILE="${TEST_DIR}/bluetooth-transition.lock"
     export SIGIL_BT_LOG_FILE="${TEST_DIR}/bt.log"
+    export SIGIL_BT_STATE_FILE="${TEST_DIR}/bluetooth_state.json"
+    export SIGIL_BT_HISTORY_FILE="${TEST_DIR}/bluetooth_ever_preferred"
+    export SIGIL_BT_USER_DISCONNECT_MARKER="${TEST_DIR}/bluetooth-user-disconnected"
     export SIGIL_AUDIO_ROUTE_HELPER="${TEST_DIR}/audio-route.sh"
     export MOCK_BT_STATE="${TEST_DIR}/state"
     export MOCK_BT_EVENTS="${TEST_DIR}/events"
@@ -368,7 +377,8 @@ test_reconnect_starts_without_blind_boot_delay() {
         && ! has_pattern 'systemctl.*(start|stop|restart).*bt-connect' \
             "${ROOT}/panel/app.py" "${ROOT}/panel/bluetooth.py" \
         && grep -q 'with_bluetooth_lock auto_cycle_locked || true' "$OWNER" \
-        && grep -q 'wait_a2dp_ready' "$OWNER"
+        && ! grep -q 'wait_a2dp_ready' "$OWNER" \
+        && grep -q 'activate_a2dp "$preferred"' "$OWNER"
 }
 
 test_no_duplicate_systemctl_jobs() {

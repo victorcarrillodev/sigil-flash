@@ -12,6 +12,33 @@
       "enum": ["RADIO", "LOCAL", "TRANSITIONING", "IDLE", "CACHE_EXPIRED"]
     },
     "playing": { "type": "boolean" },
+    "source": {
+      "type": "string",
+      "enum": ["STREAM", "STAGING_CACHE", "CACHE", "IDLE"]
+    },
+    "process": {
+      "type": "object",
+      "required": ["pid", "start_ticks", "lease_expires_at"],
+      "properties": {
+        "pid": { "type": "integer", "minimum": 1 },
+        "start_ticks": { "type": "integer", "minimum": 1 },
+        "lease_expires_at": { "type": "string", "format": "date-time" }
+      },
+      "additionalProperties": false
+    },
+    "output": {
+      "type": "object",
+      "required": ["available", "updated_at"],
+      "properties": {
+        "available": { "type": "boolean" },
+        "type": { "type": ["string", "null"] },
+        "sink": { "type": ["string", "null"] },
+        "device": { "type": ["string", "null"] },
+        "reason": { "type": ["string", "null"] },
+        "updated_at": { "type": "string", "format": "date-time" }
+      },
+      "additionalProperties": false
+    },
     "radio": {
       "type": "object",
       "properties": {
@@ -25,6 +52,7 @@
       "type": "object",
       "properties": {
         "playlist_hash": { "type": ["string", "null"] },
+        "playlist_id": { "type": ["string", "null"] },
         "current_track_index": { "type": "integer", "minimum": 0 },
         "current_track_id": { "type": ["string", "null"] },
         "current_track_url": { "type": ["string", "null"] },

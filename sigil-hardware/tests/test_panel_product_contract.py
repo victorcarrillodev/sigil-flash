@@ -152,8 +152,9 @@ class PanelProductContractTests(unittest.TestCase):
         owner = (ROOT / "scripts/bt-connect.sh").read_text(encoding="utf-8")
         self.assertIn('preferred=$(read_preferred', owner)
         self.assertIn('prepare_target "$preferred"', owner)
-        self.assertIn('AUTO_RETRY_INITIAL="${SIGIL_BT_RETRY_INITIAL:-15}"', owner)
-        self.assertIn('AUTO_RETRY_MAX="${SIGIL_BT_RETRY_MAX:-300}"', owner)
+        self.assertIn('AUTO_RETRY_INITIAL="${SIGIL_BT_RETRY_INITIAL:-5}"', owner)
+        self.assertIn('AUTO_RETRY_MAX="${SIGIL_BT_RETRY_MAX:-60}"', owner)
+        self.assertIn('AUTO_HEALTH_INTERVAL="${SIGIL_BT_HEALTH_INTERVAL:-15}"', owner)
         self.assertIn('retry_delay=$((retry_delay * 2))', owner)
 
     def test_scan_snapshot_and_lock_are_bounded(self):

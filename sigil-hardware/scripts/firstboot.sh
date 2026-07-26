@@ -32,6 +32,7 @@ PLAYLIST_ACTIVE_FILE="${SIGIL_STATE_DIR}/playlist.active.json"
 PLAYLIST_STAGING_FILE="${SIGIL_STATE_DIR}/playlist.staging.json"
 CACHE_META_FILE="${SIGIL_STATE_DIR}/cache_meta.json"
 BT_STATE_FILE="${SIGIL_STATE_DIR}/bluetooth_state.json"
+MEDIA_SYNC_FILE="${SIGIL_STATE_DIR}/media_sync_state.json"
 FIRSTBOOT_DONE_FILE="${SIGIL_STATE_DIR}/firstboot_completed.json"
 
 LOGROTATE_FILE="/etc/logrotate.d/sigil"
@@ -363,7 +364,7 @@ doc = {
     "_schema_version": "1.0",
     "mode": "RADIO",
     "desired_mode": "RADIO",
-    "reason": "firstboot",
+    "reason": "startup",
     "since": sys.argv[2],
     "internet_available": False,
     "cache_status": "EMPTY",
@@ -405,16 +406,22 @@ file_path = sys.argv[1]
 doc = {
     "_schema_version": "1.0",
     "mode": "RADIO",
+    "playing": False,
+    "source": "IDLE",
     "radio": {
         "last_check": None,
         "last_hash": None,
+        "consecutive_failures": 0,
     },
     "local": {
         "playlist_hash": None,
+        "playlist_id": None,
         "current_track_index": 0,
         "current_track_id": None,
+        "current_track_url": None,
         "position_seconds": 0,
         "last_updated": sys.argv[2],
+        "consecutive_failures": 0,
     },
     "statistics": {
         "total_plays": 0,
@@ -525,8 +532,8 @@ doc = {
     "cache_policy": {
         "max_ttl_days": 7,
         "auto_renew": True,
-        "delete_on_expire": True,
-        "preserve_on_server_unavailable": False,
+        "delete_on_expire": False,
+        "preserve_on_server_unavailable": True,
     },
     "active_cache": {
         "playlist_id": None,
@@ -595,18 +602,22 @@ import json, os, sys, tempfile
 
 file_path = sys.argv[1]
 doc = {
-    "_schema_version": "1.0",
-    "preferred_device": {
-        "mac": None,
-        "name": None,
-        "paired_at": None,
-        "last_connected": None,
-    },
+    "_schema_version": "2.0",
+    "phase": "NO_PREFERRED_SPEAKER",
+    "reason": "first_install",
+    "preferred_device": None,
+    "active_output_device": None,
     "connection_status": {
         "connected": False,
-        "profile": None,
-        "since": None,
+        "services_resolved": False,
+        "profile": "",
+        "sink": None,
     },
+    "a2dp_ready": False,
+    "retry_after_seconds": 0,
+    "updated_at": __import__("datetime").datetime.now(
+        __import__("datetime").timezone.utc
+    ).strftime("%Y-%m-%dT%H:%M:%SZ"),
 }
 
 dir_name = os.path.dirname(file_path) or '.'
@@ -619,7 +630,45 @@ with os.fdopen(fd, 'w') as f:
 os.replace(tmp_path, file_path)
 PYEOF
     chown sigil:sigil "$BT_STATE_FILE"
-    chmod 644 "$BT_STATE_FILE"
+    chmod 600 "$BT_STATE_FILE"
+}
+
+create_media_sync_state_json() {
+    if [ -f "$MEDIA_SYNC_FILE" ]; then
+        log "INFO" "media_sync_state.json already exists — skipping"
+        return 0
+    fi
+    if $DRY_RUN; then
+        log "DRY" "Would create: ${MEDIA_SYNC_FILE}"
+        return 0
+    fi
+    python3 - "$MEDIA_SYNC_FILE" <<'PYEOF'
+import json, os, sys, tempfile
+from datetime import datetime, timezone
+
+path = sys.argv[1]
+doc = {
+    "_schema_version": "1.0",
+    "phase": "UNKNOWN",
+    "playlist_id": None,
+    "generation_id": None,
+    "validated_tracks": 0,
+    "total_tracks": 0,
+    "priority_cursor": 0,
+    "last_error": None,
+    "updated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+}
+directory = os.path.dirname(path) or "."
+fd, temporary = tempfile.mkstemp(dir=directory, suffix=".tmp")
+with os.fdopen(fd, "w", encoding="utf-8") as handle:
+    json.dump(doc, handle, indent=2)
+    handle.write("\n")
+    handle.flush()
+    os.fsync(handle.fileno())
+os.replace(temporary, path)
+PYEOF
+    chown sigil:sigil "$MEDIA_SYNC_FILE"
+    chmod 600 "$MEDIA_SYNC_FILE"
 }
 
 # ── Step 3: Device registration ─────────────────────────────────────────────
@@ -1014,21 +1063,26 @@ ensure_user_lingering() {
 
 usage() {
     cat <<EOF
-Usage: $(basename "$0") [--dry-run] [--status]
+Usage: $(basename "$0") [--dry-run] [--status] [--local-only]
 
 Options:
   --dry-run   Show what would be done without making changes
   --status    Show firstboot completion status and exit
   --once      Same as no-flag (firstboot is always one-shot)
+  --local-only
+              Initialize local identity, state and runtime prerequisites
+              without waiting for DNS, Internet or device registration
 EOF
     exit 0
 }
 
 firstboot_main() {
+    local local_only=false
     for arg in "$@"; do
         case "$arg" in
             --dry-run) DRY_RUN=true ;;
             --status)  STATUS_ONLY=true ;;
+            --local-only) local_only=true ;;
             --once)    ;;
             --help|-h) usage ;;
         esac
@@ -1063,47 +1117,15 @@ log "INFO" "=== firstboot starting ==="
 
 apply_manufacturing_identity
 provision_panel_credential
-load_config
-if ! provision_device_credential; then
-    log "WARN" "Device bootstrap remains pending — firstboot will retry"
-    return 1
-fi
-load_config
 
-log "INFO" "Device ID: $(get_device_id)"
-log "INFO" "Hostname: $(get_hostname)"
-
-# Check if already completed
-if is_firstboot_done; then
-    log "INFO" "Firstboot already completed — verifying state files and runtime permissions"
-    verify_state_perms
-    enforce_runtime_permissions
-    ensure_run_sigil
-    ensure_ssh_monitor
-    ensure_user_lingering
-    log "INFO" "=== firstboot complete (already done, state verified) ==="
-    exit 0
-fi
-
-# Step 1: registration state (identity remains canonical in device.conf)
-create_registration_state
-
-# Step 1b: register only after the permanent credential exists.
-init_curl_auth
-if ! register_device; then
-    cleanup_curl_auth
-    log "WARN" "Device registration remains pending — firstboot completion marker was not written"
-    return 1
-fi
-cleanup_curl_auth
-
-# Step 2: State files
+# Local bootstrap never depends on DNS, Internet or registration.
 create_audio_mode_json
 create_playback_state_json
 create_playlist_active_json
 create_playlist_staging_json
 create_cache_meta_json
 create_bluetooth_state_json
+create_media_sync_state_json
 
 # Step 3: Logrotate
 create_logrotate
@@ -1114,6 +1136,35 @@ enforce_runtime_permissions
 ensure_run_sigil
 ensure_ssh_monitor
 ensure_user_lingering
+
+if $local_only; then
+    log "INFO" "=== local bootstrap complete; remote registration remains asynchronous ==="
+    return 0
+fi
+
+load_config
+if ! provision_device_credential; then
+    log "WARN" "Device bootstrap remains pending — firstboot will retry"
+    return 1
+fi
+load_config
+
+log "INFO" "Device ID: $(get_device_id)"
+log "INFO" "Hostname: $(get_hostname)"
+
+if is_firstboot_done; then
+    log "INFO" "=== firstboot complete (already registered, local state verified) ==="
+    return 0
+fi
+
+create_registration_state
+init_curl_auth
+if ! register_device; then
+    cleanup_curl_auth
+    log "WARN" "Device registration remains pending — local services remain available"
+    return 1
+fi
+cleanup_curl_auth
 
 # Mark firstboot as completed
 mark_firstboot_done

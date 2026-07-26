@@ -53,7 +53,7 @@ valid = (
     and contract["architecture"] == "arm64"
     and set(contract["allowed_package_architectures"]) == {"arm64", "all"}
     and contract["install_recommends"] is False
-    and len(required) == 23
+    and len(required) == 25
     and all(item["profile"] == "runtime" for item in required)
     and optional == [{"name": "openssh-server", "required": False, "version": None, "profile": "factory-debug"}]
 )
@@ -66,8 +66,8 @@ check "sigil-hardware contains no downloaded packages or generated repositories"
 check "install.sh delegates package installation to the canonical offline installer" \
     sh -c "grep -q 'install-offline-packages.sh' '$ROOT/install.sh' && ! grep -Eq 'apt-get[[:space:]]+(update|install)|pip(3|[[:space:]])+[[:space:]]*install' '$ROOT/install.sh'"
 
-check "firstboot main path contains no package download or device registration" \
-    sh -c "! sed -n '/^firstboot_main()/,/^}/p' '$FIRSTBOOT' | grep -Eq 'apt(-get)?[[:space:]]+(update|install)|pip(3|[[:space:]])+[[:space:]]*install|curl|wget|register_device'"
+check "network-independent local bootstrap precedes all remote registration" \
+    sh -c "main=\$(sed -n '/^firstboot_main()/,/^}/p' '$FIRSTBOOT'); local_line=\$(printf '%s\n' \"\$main\" | grep -nF 'if \$local_only' | cut -d: -f1 | head -1); register_line=\$(printf '%s\n' \"\$main\" | grep -n 'register_device' | cut -d: -f1 | head -1); [ -n \"\$local_line\" ] && [ -n \"\$register_line\" ] && [ \"\$local_line\" -lt \"\$register_line\" ]"
 
 check "image preparation defers live systemd operations to firstboot" \
     sh -c "grep -q 'Preparación de imagen: user lingering se aplicará en firstboot' '$ROOT/install.sh' && grep -q 'Preparación de imagen: daemon-reload se aplicará en firstboot' '$ROOT/install.sh' && grep -q '^ensure_user_lingering()' '$FIRSTBOOT'"

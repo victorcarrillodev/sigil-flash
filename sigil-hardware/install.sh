@@ -86,7 +86,7 @@ SIGIL_HOME="/home/sigil"
 SIGIL_UID=1001          # UID fijo para evitar conflictos
 PANEL_INSTALL_DIR="/opt/sigil/panel"
 
-SERVICES="sigil-wifi-control bluetooth-panel sigil-pulseaudio bt-connect sigil-leds wifi-fallback ssh-monitor"
+SERVICES="sigil-local-bootstrap sigil-wifi-control bluetooth-panel sigil-pulseaudio bt-connect sigil-leds wifi-fallback ssh-monitor"
 PHASE2_AUDIO_SERVICES="radio-fetcher audio-manager audio-player"
 
 # ── Paso 1: Paquetes del sistema ──────────────────────────────────────────────
@@ -236,6 +236,7 @@ SCRIPTS=(
     sigil-cache-meta-perms.sh
     sigil-cache-wipe.sh
     sigil-logout-fetch-operation.sh
+    sigil-pulseaudio-supervisor.sh
     ssh-monitor.sh
     firstboot.sh
 )
@@ -266,6 +267,16 @@ fi
 # ── Paso 7: Configuración del sistema ────────────────────────────────────────
 log_step "Aplicando configuración del sistema"
 
+# Stable mDNS identity for the customer panel. Avahi resolves this as
+# http://sigil.local on normal LANs; the captive-portal IP remains available.
+printf 'sigil\n' > /etc/hostname
+if grep -qE '^127\.0\.1\.1[[:space:]]+' /etc/hosts 2>/dev/null; then
+    sed -i -E 's/^127\.0\.1\.1[[:space:]].*/127.0.1.1\tsigil/' /etc/hosts
+else
+    printf '127.0.1.1\tsigil\n' >> /etc/hosts
+fi
+log_ok "mDNS: hostname canónico sigil.local"
+
 # 7a. Config backup before overwriting
     for _cfg in bluetooth-main.conf pulse-daemon.conf dnsmasq.conf hostapd.conf; do
         _target=""
@@ -287,6 +298,9 @@ log_ok "bluetooth: /etc/bluetooth/main.conf"
 # 7b. PulseAudio daemon
 cp "${REPO_DIR}/conf/pulse-daemon.conf" /etc/pulse/daemon.conf
 log_ok "pulseaudio: /etc/pulse/daemon.conf"
+install -o root -g sigil -m 0644 \
+    "${REPO_DIR}/conf/pulse-runtime.env" /etc/sigil/pulse-runtime.env
+log_ok "pulseaudio: runtime persistente en /run/sigil-pulse"
 
 # 7c. PulseAudio default.pa — solo AÑADIR la línea, no reemplazar
 PULSE_LINE="load-module module-switch-on-connect"
@@ -578,6 +592,11 @@ if systemctl enable NetworkManager 2>/dev/null; then
     log_ok "NetworkManager habilitado"
 else
     log_warn "NetworkManager ya estaba habilitado"
+fi
+if systemctl enable avahi-daemon.service 2>/dev/null; then
+    log_ok "avahi-daemon habilitado para sigil.local"
+else
+    log_warn "No se pudo habilitar avahi-daemon; el panel seguirá disponible por IP"
 fi
 
 # ── Dispatcher de geolocalización WiFi ───────────────────────────────────────

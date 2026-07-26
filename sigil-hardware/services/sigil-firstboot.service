@@ -1,9 +1,10 @@
 [Unit]
 Description=Sigil first boot identity and secret provisioning
-After=local-fs.target network-online.target
-Wants=network-online.target
-Before=sigil-pulseaudio.service sigil-wifi-control.service bluetooth-panel.service bt-connect.service radio-fetcher.service audio-manager.service audio-player.service wifi-fallback.service
+After=sigil-local-bootstrap.service network-online.target
+Wants=network-online.target sigil-local-bootstrap.service
 ConditionPathExists=!/var/lib/sigil/firstboot_completed.json
+StartLimitIntervalSec=300
+StartLimitBurst=10
 
 [Service]
 Type=oneshot

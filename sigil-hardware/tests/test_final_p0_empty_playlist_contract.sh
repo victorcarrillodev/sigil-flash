@@ -83,7 +83,9 @@ if (
     # shellcheck source=scripts/audio-player.sh
     source "$ROOT/scripts/audio-player.sh"
     PLAYLIST_ACTIVE_FILE="$TMP/live-player-playlist.json"
+    PLAYBACK_STATE_FILE="$TMP/live-playback-state.json"
     printf '%s\n' '{"tracks":[{"id":"one","filename":"one.mp3"}]}' > "$PLAYLIST_ACTIVE_FILE"
+    printf '%s\n' '{"_schema_version":"1.0","mode":"LOCAL","playing":false}' > "$PLAYBACK_STATE_FILE"
     sleep 30 &
     MPG123_PID=$!
     owned_pid=$MPG123_PID

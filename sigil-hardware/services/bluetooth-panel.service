@@ -1,7 +1,9 @@
 [Unit]
 Description=Sigil Bluetooth Control Panel
-After=network.target bluetooth.target
-Wants=bluetooth.target
+After=network.target bluetooth.target sigil-local-bootstrap.service
+Wants=bluetooth.target sigil-local-bootstrap.service
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 User=sigil
@@ -16,7 +18,7 @@ AmbientCapabilities=CAP_NET_BIND_SERVICE
 # Descendant sudo commands retain only identity-transition and network
 # capabilities; Flask itself receives only the ambient low-port capability.
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_NET_ADMIN CAP_NET_RAW CAP_SETUID CAP_SETGID
-Restart=always
+Restart=on-failure
 RestartSec=5
 StandardOutput=journal
 StandardError=journal

@@ -1,6 +1,6 @@
 {
   "schema_version": "2.0",
-  "bundle_version": "2026.07.14.1",
+  "bundle_version": "2026.07.26.1",
   "distribution": "debian",
   "distribution_version": "13",
   "distribution_codename": "trixie",
@@ -28,6 +28,8 @@
     { "name": "mpg123", "required": true, "version": null, "profile": "runtime" },
     { "name": "hostapd", "required": true, "version": null, "profile": "runtime" },
     { "name": "dnsmasq", "required": true, "version": null, "profile": "runtime" },
+    { "name": "avahi-daemon", "required": true, "version": null, "profile": "runtime" },
+    { "name": "libnss-mdns", "required": true, "version": null, "profile": "runtime" },
     { "name": "wireless-tools", "required": true, "version": null, "profile": "runtime" },
     { "name": "rfkill", "required": true, "version": null, "profile": "runtime" },
     { "name": "iw", "required": true, "version": null, "profile": "runtime" },

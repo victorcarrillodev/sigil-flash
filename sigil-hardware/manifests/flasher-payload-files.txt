@@ -37,6 +37,7 @@ scripts/sigil-cache-wipe.sh
 scripts/sigil-healthcheck.sh
 scripts/sigil-leds.sh
 scripts/sigil-logout-fetch-operation.sh
+scripts/sigil-pulseaudio-supervisor.sh
 scripts/sigil-validate-state.sh
 scripts/sigil-wifi-control.py
 scripts/ssh-monitor.sh
@@ -52,6 +53,7 @@ services/radio-stream.service
 services/sigil-firstboot.service
 services/sigil-wifi-control.service
 services/sigil-leds.service
+services/sigil-local-bootstrap.service
 services/ssh-monitor.service
 services/wifi-fallback.service
 conf/90-sigil-geolocate
@@ -62,6 +64,7 @@ conf/bluetooth-main.conf
 conf/dnsmasq.conf
 conf/hostapd.conf
 conf/pulse-daemon.conf
+conf/pulse-runtime.env
 conf/security.conf
 conf/sigil-logrotate
 conf/sigil-network.sudoers

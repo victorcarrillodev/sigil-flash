@@ -28,6 +28,7 @@ import os
 import pathlib
 import sys
 import types
+from datetime import datetime, timedelta, timezone
 
 root = pathlib.Path(os.environ["ROOT"])
 tmp = pathlib.Path(os.environ["TEST_ROOT"])
@@ -63,6 +64,7 @@ sys.modules["flask"] = flask
 panel_auth = types.ModuleType("panel_auth")
 panel_auth.verify_panel_pin_hash = lambda _path, _pin: False
 panel_auth.panel_hash_is_provisioned = lambda _path: False
+panel_auth.read_panel_pin_length = lambda _path: None
 sys.modules["panel_auth"] = panel_auth
 
 config = types.ModuleType("config")
@@ -112,8 +114,17 @@ module._PLAYBACK_STATE_FILE = str(playback)
 module._AUDIO_MODE_FILE = str(mode)
 module._LEGACY_NOW_PLAYING_FILE = str(legacy)
 
+start_ticks = int(pathlib.Path(f"/proc/{os.getpid()}/stat").read_text().split()[21])
 playback.write_text(json.dumps({
     "playing": True,
+    "source": "STREAM",
+    "process": {
+        "pid": os.getpid(),
+        "start_ticks": start_ticks,
+        "lease_expires_at": (
+            datetime.now(timezone.utc) + timedelta(minutes=1)
+        ).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    },
     "local": {"current_track_url": "https://music.invalid/Track%20One.mp3?token=TOP_SECRET"},
     "output": {"available": True, "type": "bluetooth", "sink": "test_sink"},
 }), encoding="utf-8")

@@ -105,8 +105,8 @@ for item in contract["packages"]:
     if item["required"] or item["profile"] == "factory-debug":
         included_names.append(name)
         included_specifications.append(f"{name}={version}" if version else name)
-if len(direct_names) != 23:
-    raise SystemExit(f"expected 23 required packages, found {len(direct_names)}")
+if len(direct_names) != 25:
+    raise SystemExit(f"expected 25 required packages, found {len(direct_names)}")
 optional_ssh = [item for item in contract["packages"] if item["name"] == "openssh-server"]
 if optional_ssh != [{"name": "openssh-server", "required": False, "version": None, "profile": "factory-debug"}]:
     raise SystemExit("openssh-server factory-debug contract changed")

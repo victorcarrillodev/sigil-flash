@@ -19,6 +19,7 @@ STATE_DIR="${SIGIL_STATE_DIR:-/var/lib/sigil}"
 SSH_STATUS_FILE="${STATE_DIR}/ssh_status.json"
 PLAYBACK_STATE_FILE="${SIGIL_PLAYBACK_STATE_FILE:-${STATE_DIR}/playback_state.json}"
 AUDIO_MODE_FILE="${SIGIL_AUDIO_MODE_FILE:-${STATE_DIR}/audio_mode.json}"
+MAINTENANCE_STATE_FILE="${SIGIL_MAINTENANCE_STATE_FILE:-${STATE_DIR}/maintenance_state.json}"
 RUN_SIGIL_DIR="${SIGIL_RUN_DIR:-/run/sigil}"
 CACHE_WIPE="${SIGIL_CACHE_WIPE:-/usr/local/bin/sigil-cache-wipe.sh}"
 RADIO_FETCHER="${SIGIL_RADIO_FETCHER:-/usr/local/bin/radio-fetcher.sh}"
@@ -193,7 +194,7 @@ PYEOF
 
 stop_managed_services() {
     local svc expected_load _expected_active expected_enabled
-    local actual_load actual_active actual_enabled query_output query_rc
+    local actual_load actual_active actual_enabled post_stop_active query_output query_rc
     if ! validate_service_snapshot; then
         return 1
     fi
@@ -226,87 +227,56 @@ stop_managed_services() {
             fi
             query_rc=0
             query_output=$(query_service_state "$svc") || query_rc=$?
-            if [ "$query_rc" -ne 0 ] || [ "$(cut -f2 <<< "$query_output")" != "inactive" ]; then
-                log "ERROR" "Cannot verify ${svc} inactive after stop"
+            post_stop_active=$(cut -f2 <<< "$query_output")
+            # A managed Bash worker can exit with SIGTERM (143) while
+            # systemd is processing an explicit stop.  That is a completed
+            # maintenance stop, not a running service or a restart failure.
+            # Keep the pre-stop snapshot authoritative so logout restores the
+            # original active services.
+            if [ "$query_rc" -ne 0 ] || [[ "$post_stop_active" != "inactive" && "$post_stop_active" != "failed" ]]; then
+                log "ERROR" "Cannot verify ${svc} stopped after maintenance request (state=${post_stop_active:-unknown})"
                 return 1
             fi
         fi
     done < <(service_snapshot_rows)
-    if pgrep -x mpg123 &>/dev/null; then
-        pkill -9 mpg123 2>/dev/null || true
+    if pgrep -u sigil -x mpg123 &>/dev/null; then
+        log "ERROR" "A decoder survived managed cgroup shutdown; refusing global pkill"
+        return 1
     fi
 }
 
 mark_audio_stopped_for_ssh() {
-    # SSH maintenance intentionally stops audio. Persist that fact so panel
-    # telemetry does not continue reporting RADIO/playing=true from the last
-    # track. Preserve playlist, cursor, output, and cache metadata for resume.
-    python3 - "$PLAYBACK_STATE_FILE" "$AUDIO_MODE_FILE" <<'PYEOF'
+    # Playback and audio-mode have their own writers. Publish a maintenance
+    # overlay instead of forging their state while both services are stopped.
+    python3 - "$MAINTENANCE_STATE_FILE" <<'PYEOF'
 import json
 import os
 import sys
 import tempfile
 from datetime import datetime, timezone
 
-playback_path, audio_mode_path = sys.argv[1:]
+path = sys.argv[1]
 now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-def load(path):
-    try:
-        with open(path, encoding="utf-8") as handle:
-            value = json.load(handle)
-        return value if isinstance(value, dict) else None
-    except (FileNotFoundError, OSError, ValueError):
-        return None
-
-def atomic_write(path, document):
-    if document is None:
-        return
-    directory = os.path.dirname(path) or "."
-    try:
-        original = os.stat(path)
-    except OSError:
-        original = None
-    fd, temporary = tempfile.mkstemp(dir=directory, prefix=".ssh-audio-state.", suffix=".tmp")
-    try:
-        if original is not None:
-            os.fchmod(fd, original.st_mode & 0o7777)
-            try:
-                os.fchown(fd, original.st_uid, original.st_gid)
-            except PermissionError:
-                pass
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(document, handle, indent=2, ensure_ascii=False)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-        directory_fd = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-        try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
-    except BaseException:
-        try:
-            os.unlink(temporary)
-        except FileNotFoundError:
-            pass
-        raise
-
-playback = load(playback_path)
-if playback is not None:
-    playback["mode"] = "IDLE"
-    playback["playing"] = False
-    atomic_write(playback_path, playback)
-
-audio_mode = load(audio_mode_path)
-if audio_mode is not None:
-    audio_mode["mode"] = "IDLE"
-    audio_mode["reason"] = "ssh_maintenance"
-    audio_mode["since"] = now
-    audio_mode["last_error"] = None
-    atomic_write(audio_mode_path, audio_mode)
+document = {
+    "_schema_version": "1.0",
+    "active": True,
+    "reason": "ssh_maintenance",
+    "since": now,
+}
+directory = os.path.dirname(path) or "."
+fd, temporary = tempfile.mkstemp(dir=directory, prefix=".maintenance.", suffix=".tmp")
+with os.fdopen(fd, "w", encoding="utf-8") as handle:
+    json.dump(document, handle, indent=2)
+    handle.write("\n")
+    handle.flush()
+    os.fsync(handle.fileno())
+os.chmod(temporary, 0o640)
+os.replace(temporary, path)
 PYEOF
+}
+
+clear_maintenance_overlay() {
+    rm -f -- "$MAINTENANCE_STATE_FILE"
 }
 
 create_runtime_marker() {
@@ -1450,6 +1420,26 @@ exit_maintenance() {
         return 1
     fi
     log "  Removed marker ${SSH_ACTIVE_MARKER}"
+
+    # Audio services must return immediately. radio-fetcher will publish its
+    # authenticated staging playlist and warm the cache in the background.
+    if ! remove_runtime_marker "$LOGOUT_FETCH_MARKER"; then
+        LOGOUT_COORDINATION_OWNED=false
+        return 1
+    fi
+    LOGOUT_COORDINATION_OWNED=false
+    if ! restore_managed_services; then
+        write_ssh_status "$current_count" "$wipe_ok" "false" "" "" \
+            "false" "false" "$RESTORE_FAILED_SERVICE" "true" "1" "restore_failed" || true
+        preserve_logout_coordination
+        return 1
+    fi
+    clear_maintenance_overlay
+    write_ssh_status "$current_count" "$wipe_ok" "" "" "" \
+        "false" "true" "" "true" "" "background_warmup" || true
+    rm -f -- "$SERVICE_SNAPSHOT_FILE"
+    log "=== Services restored; authenticated stream/cache warm-up continues in background ==="
+    return 0
 
     if ! write_ssh_status "$current_count" "$wipe_ok" "" "" "" \
         "false" "false" "" "true" "" "fetch_in_progress"; then

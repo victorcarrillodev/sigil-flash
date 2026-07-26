@@ -4,28 +4,51 @@
   "title": "Bluetooth State",
   "description": "Preferred Bluetooth device and connection status",
   "type": "object",
-  "required": ["_schema_version"],
+  "required": ["_schema_version", "phase", "connection_status", "a2dp_ready", "updated_at"],
   "properties": {
-    "_schema_version": { "const": "1.0" },
+    "_schema_version": { "enum": ["1.0", "2.0"] },
+    "phase": {
+      "type": "string",
+      "enum": [
+        "NO_PREFERRED_SPEAKER",
+        "WAITING_FOR_BLUETOOTH",
+        "WAITING_FOR_SERVICES",
+        "WAITING_FOR_AUDIO_RUNTIME",
+        "WAITING_FOR_A2DP",
+        "READY",
+        "DISCONNECTED_BY_USER",
+        "RETRY_BACKOFF",
+        "STATE_CORRUPT"
+      ]
+    },
+    "reason": { "type": ["string", "null"] },
     "preferred_device": {
       "type": ["object", "null"],
       "properties": {
         "mac": { "type": "string", "pattern": "^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$" },
         "name": { "type": "string" },
+        "paired": { "type": "boolean" },
+        "trusted": { "type": "boolean" },
         "paired_at": { "type": "string", "format": "date-time" },
         "last_connected": { "type": "string", "format": "date-time" }
       },
       "additionalProperties": false
     },
+    "active_output_device": { "type": ["string", "null"] },
     "connection_status": {
       "type": "object",
       "properties": {
         "connected": { "type": "boolean" },
+        "services_resolved": { "type": "boolean" },
         "profile": { "type": "string" },
+        "sink": { "type": ["string", "null"] },
         "since": { "type": ["string", "null"], "format": "date-time" }
       },
       "additionalProperties": false
-    }
+    },
+    "a2dp_ready": { "type": "boolean" },
+    "retry_after_seconds": { "type": "integer", "minimum": 0, "maximum": 300 },
+    "updated_at": { "type": "string", "format": "date-time" }
   },
   "additionalProperties": false
 }

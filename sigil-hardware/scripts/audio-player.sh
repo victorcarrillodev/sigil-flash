@@ -42,8 +42,11 @@ DEVICE_CONF="${SIGIL_DEVICE_CONF:-/etc/sigil/device.conf}"
 AUDIO_MODE_FILE="/var/lib/sigil/audio_mode.json"
 PLAYBACK_STATE_FILE="${SIGIL_PLAYBACK_STATE_FILE:-/var/lib/sigil/playback_state.json}"
 PLAYLIST_ACTIVE_FILE="/var/lib/sigil/playlist.active.json"
+PLAYLIST_STAGING_FILE="${SIGIL_PLAYLIST_STAGING_FILE:-/var/lib/sigil/playlist.staging.json}"
+MEDIA_SYNC_FILE="${SIGIL_MEDIA_SYNC_FILE:-/var/lib/sigil/media_sync_state.json}"
 NOW_PLAYING_FILE="/home/sigil/now_playing.txt"
 MUSIC_ACTIVE="/home/sigil/music/active"
+MUSIC_STAGING="/home/sigil/music/staging"
 
 # --- Config defaults (overridden by audio.conf) ---
 SERVER_URL=""
@@ -73,10 +76,16 @@ DRY_RUN=false
 ONCE=false
 
 # --- PulseAudio setup ---
-SIGIL_UID=$(id -u sigil 2>/dev/null || echo 1000)
-export XDG_RUNTIME_DIR="/run/user/${SIGIL_UID}"
-export PULSE_SERVER="unix:/run/user/${SIGIL_UID}/pulse/native"
-export PULSE_RUNTIME_PATH="/run/user/${SIGIL_UID}/pulse"
+PULSE_RUNTIME_ENV="${SIGIL_PULSE_RUNTIME_ENV:-/etc/sigil/pulse-runtime.env}"
+if [ -r "$PULSE_RUNTIME_ENV" ]; then
+    # shellcheck disable=SC1090
+    set -a
+    . "$PULSE_RUNTIME_ENV"
+    set +a
+fi
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/sigil-pulse}"
+export PULSE_RUNTIME_PATH="${PULSE_RUNTIME_PATH:-/run/sigil-pulse}"
+export PULSE_SERVER="${PULSE_SERVER:-unix:${PULSE_RUNTIME_PATH}/native}"
 
 AUDIO_ROUTE_HELPER="${SIGIL_AUDIO_ROUTE_HELPER:-/usr/local/bin/sigil-audio-route.sh}"
 if [ -r "$AUDIO_ROUTE_HELPER" ]; then
@@ -97,6 +106,8 @@ TRACK_INDEX=0
 TRACK_ID=""
 TRACK_URL=""
 PLAYLIST_HASH=""
+PLAYLIST_ID=""
+PLAYBACK_SOURCE="IDLE"
 STOP_REQUESTED=false
 SINK=""
 NO_AUDIO_OUTPUT_ACTIVE=false
@@ -455,6 +466,9 @@ read_playback_state() {
 
     local_hash=$(read_json_field "$PLAYBACK_STATE_FILE" "local.playlist_hash")
     PLAYLIST_HASH="${local_hash:-}"
+    PLAYLIST_ID=$(read_json_field "$PLAYBACK_STATE_FILE" "local.playlist_id" 2>/dev/null || true)
+    PLAYBACK_SOURCE=$(read_json_field "$PLAYBACK_STATE_FILE" "source" 2>/dev/null || true)
+    PLAYBACK_SOURCE="${PLAYBACK_SOURCE:-IDLE}"
 
     radio_decoder_failures=$(read_json_field "$PLAYBACK_STATE_FILE" "radio.consecutive_failures" || true)
     local_decoder_failures=$(read_json_field "$PLAYBACK_STATE_FILE" "local.consecutive_failures" || true)
@@ -490,7 +504,8 @@ _write_playback_state() {
     python3 - "$PLAYBACK_STATE_FILE" "$action" "$mode" "$now" \
         "${PLAYLIST_HASH:-}" "${TRACK_ID:-}" "${TRACK_INDEX:-0}" "${TRACK_URL:-}" \
         "$RADIO_DECODER_FAILURES" "$LOCAL_DECODER_FAILURES" "$failure_source" \
-        "$decoder_exit" "$failed_track_id" "$failed_track_url" "$failed_local_path" "$playing" <<'PYEOF'
+        "$decoder_exit" "$failed_track_id" "$failed_track_url" "$failed_local_path" "$playing" \
+        "${PLAYLIST_ID:-}" "${PLAYBACK_SOURCE:-IDLE}" <<'PYEOF'
 import json
 import os
 import sys
@@ -501,6 +516,7 @@ import tempfile
     track_index_raw, current_track_url, radio_failures_raw,
     local_failures_raw, failure_source, decoder_exit_raw,
     failed_track_id, failed_track_url, failed_local_path, playing_raw,
+    playlist_id, playback_source,
 ) = sys.argv[1:]
 
 def nonnegative_int(value, default=0):
@@ -535,6 +551,7 @@ radio.setdefault("last_hash", None)
 radio["consecutive_failures"] = nonnegative_int(radio_failures_raw)
 
 local["playlist_hash"] = playlist_hash or None
+local["playlist_id"] = playlist_id or None
 local["current_track_index"] = nonnegative_int(track_index_raw)
 local["current_track_id"] = current_track_id or None
 local["current_track_url"] = current_track_url or None
@@ -549,6 +566,9 @@ statistics.setdefault("last_server_contact", None)
 doc["_schema_version"] = "1.0"
 doc["mode"] = mode
 doc["playing"] = playing_raw.lower() == "true"
+doc["source"] = playback_source
+if not doc["playing"]:
+    doc.pop("process", None)
 doc["radio"] = radio
 doc["local"] = local
 doc["statistics"] = statistics
@@ -602,6 +622,98 @@ except BaseException:
     except FileNotFoundError:
         pass
     raise
+PYEOF
+}
+
+refresh_playback_lease() {
+    local player_pid="${1:-$MPG123_PID}"
+    [ -n "$player_pid" ] && [ -r "/proc/${player_pid}/stat" ] || return 1
+    local start_ticks
+    start_ticks=$(awk '{print $22}' "/proc/${player_pid}/stat" 2>/dev/null) || return 1
+    python3 - "$PLAYBACK_STATE_FILE" "$player_pid" "$start_ticks" <<'PYEOF'
+import json
+import os
+import sys
+import tempfile
+from datetime import datetime, timedelta, timezone
+
+path, pid, start_ticks = sys.argv[1:]
+try:
+    with open(path, encoding="utf-8") as handle:
+        document = json.load(handle)
+except (FileNotFoundError, json.JSONDecodeError, OSError):
+    document = {"_schema_version": "1.0", "mode": "IDLE"}
+now = datetime.now(timezone.utc)
+document["playing"] = True
+document["process"] = {
+    "pid": int(pid),
+    "start_ticks": int(start_ticks),
+    "lease_expires_at": (now + timedelta(seconds=45)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+}
+directory = os.path.dirname(path) or "."
+fd, temporary = tempfile.mkstemp(dir=directory, prefix=".playback-lease.", suffix=".tmp")
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(document, handle, indent=2, ensure_ascii=False)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, path)
+except BaseException:
+    try:
+        os.unlink(temporary)
+    except FileNotFoundError:
+        pass
+    raise
+PYEOF
+}
+
+validated_track_path() {
+    local playlist_file="$1" track_json="$2" base_dir="$3"
+    python3 - "$playlist_file" "$track_json" "$base_dir" <<'PYEOF'
+import hashlib
+import json
+import os
+import sys
+
+playlist_file, raw_track, base_dir = sys.argv[1:]
+try:
+    requested = json.loads(raw_track)
+    with open(playlist_file, encoding="utf-8") as handle:
+        playlist = json.load(handle)
+except (json.JSONDecodeError, OSError, ValueError):
+    raise SystemExit(1)
+requested_filename = requested.get("filename") or os.path.basename(requested.get("url", ""))
+track = None
+for candidate in playlist.get("tracks", []):
+    candidate_filename = candidate.get("filename") or os.path.basename(candidate.get("url", ""))
+    if (
+        requested.get("id")
+        and candidate.get("id") == requested.get("id")
+    ) or candidate_filename == requested_filename:
+        track = candidate
+        break
+if not isinstance(track, dict):
+    raise SystemExit(1)
+filename = track.get("filename") or os.path.basename(track.get("url", ""))
+if not filename or os.path.basename(filename) != filename or filename in (".", ".."):
+    raise SystemExit(1)
+path = os.path.join(base_dir, "tracks", filename)
+if not os.path.isfile(path) or os.path.getsize(path) <= 0:
+    raise SystemExit(1)
+expected_size = track.get("size_bytes") or 0
+if not isinstance(expected_size, int) or expected_size <= 0 or os.path.getsize(path) != expected_size:
+    raise SystemExit(1)
+expected_hash = track.get("sha256") or ""
+if not isinstance(expected_hash, str) or len(expected_hash) != 64:
+    raise SystemExit(1)
+digest = hashlib.sha256()
+with open(path, "rb") as handle:
+    for block in iter(lambda: handle.read(1024 * 1024), b""):
+        digest.update(block)
+if digest.hexdigest().lower() != expected_hash.lower():
+    raise SystemExit(1)
+print(path)
 PYEOF
 }
 
@@ -797,11 +909,17 @@ wait_for_owned_playback() {
     local watcher_pid
 
     (
+        local lease_ticks=0
         while kill -0 "$player_pid" 2>/dev/null; do
             if playlist_requests_stop; then
                 kill "$player_pid" 2>/dev/null || true
                 exit 0
             fi
+            if [ "$lease_ticks" -le 0 ]; then
+                refresh_playback_lease "$player_pid" || true
+                lease_ticks=15
+            fi
+            lease_ticks=$((lease_ticks - 1))
             sleep 1
         done
     ) &
@@ -907,16 +1025,21 @@ radio_playback_cycle() {
         }
     fi
 
-    # Read playlist from local contract (written by radio-fetcher)
-    # RADIO mode does NOT fetch from the server — only radio-fetcher does.
+    # During warm-up, radio-fetcher publishes the authenticated target
+    # playlist before downloading it. Once promoted, active takes precedence.
+    local playlist_file="$PLAYLIST_ACTIVE_FILE" media_phase=""
+    media_phase=$(read_json_field "$MEDIA_SYNC_FILE" "phase" 2>/dev/null || true)
+    if [ "$media_phase" = "STREAM_WARMUP" ] && [ -f "$PLAYLIST_STAGING_FILE" ]; then
+        playlist_file="$PLAYLIST_STAGING_FILE"
+    fi
     local playlist_json
-    if [ ! -f "$PLAYLIST_ACTIVE_FILE" ]; then
-        log "WARN" "playlist.active.json not found — no content to stream"
+    if [ ! -f "$playlist_file" ]; then
+        log "WARN" "No authenticated playlist is available for streaming"
         RADIO_FAILURES=$((RADIO_FAILURES + 1))
         sleep 10
         return 1
     fi
-    playlist_json=$(cat "$PLAYLIST_ACTIVE_FILE")
+    playlist_json=$(cat "$playlist_file")
 
     local remote_hash
     remote_hash=$(echo "$playlist_json" | python3 -c "
@@ -929,21 +1052,28 @@ if not h:
 print(h)
 " 2>/dev/null)
 
-    # Detect playlist change — run continuity matching if hash differs
+    local remote_playlist_id
+    remote_playlist_id=$(read_json_field "$playlist_file" "playlist_id" 2>/dev/null || true)
+
+    # A different playlist begins at its own cursor. A restart of the same
+    # playlist resumes the persisted cursor.
     if [ -n "$PLAYLIST_HASH" ] && [ -n "$remote_hash" ] && \
        [ "$remote_hash" != "$PLAYLIST_HASH" ] && [ "$remote_hash" != "null" ]; then
         log "INFO" "Playlist hash changed: ${PLAYLIST_HASH:0:12} → ${remote_hash:0:12}"
-        local new_index
-        new_index=$(find_best_track_match "$playlist_json")
-        TRACK_INDEX=$new_index
-        log "INFO" "Mapped to track index ${new_index}"
+        if [ -n "$PLAYLIST_ID" ] && [ "$remote_playlist_id" = "$PLAYLIST_ID" ]; then
+            TRACK_INDEX=$(find_best_track_match "$playlist_json")
+        else
+            TRACK_INDEX=0
+        fi
+        log "INFO" "Controlled playlist boundary starts at index ${TRACK_INDEX}"
     fi
     PLAYLIST_HASH="$remote_hash"
+    PLAYLIST_ID="$remote_playlist_id"
 
     # Extract tracks to temp file
     local tracks_temp
     tracks_temp=$(mktemp /tmp/audio-player-radio.XXXXXX)
-    extract_tracks_json "$PLAYLIST_ACTIVE_FILE" > "$tracks_temp"
+    extract_tracks_json "$playlist_file" > "$tracks_temp"
 
     local track_count
     track_count=$(wc -l < "$tracks_temp" | tr -d ' ')
@@ -966,7 +1096,7 @@ print(h)
     fi
 
     # Validate playlist-wide filename uniqueness before playback
-    if ! validate_playlist_filenames "$PLAYLIST_ACTIVE_FILE"; then
+    if ! validate_playlist_filenames "$playlist_file"; then
         log "ERROR" "Playlist validation failed (duplicate/unsafe filenames) — rejecting"
         rm -f "$tracks_temp"
         sleep 10
@@ -1014,34 +1144,49 @@ print(h)
         TRACK_ID="$track_id"
         TRACK_URL="$track_url"
 
-        update_now_playing "$track_id" "$track_filename" "$track_num" "$track_title"
-        save_playback_state "RADIO" true
+        local local_track_path="" active_hash=""
+        active_hash=$(read_json_field "$PLAYLIST_ACTIVE_FILE" "version_hash" 2>/dev/null || true)
+        if [ "$active_hash" = "$remote_hash" ]; then
+            local_track_path=$(validated_track_path "$playlist_file" "$track_json" "$MUSIC_ACTIVE" 2>/dev/null || true)
+            [ -z "$local_track_path" ] || PLAYBACK_SOURCE="CACHE"
+        fi
+        if [ -z "$local_track_path" ] && [ "$playlist_file" = "$PLAYLIST_STAGING_FILE" ]; then
+            local_track_path=$(validated_track_path "$playlist_file" "$track_json" "$MUSIC_STAGING" 2>/dev/null || true)
+            [ -z "$local_track_path" ] || PLAYBACK_SOURCE="STAGING_CACHE"
+        fi
+        if [ -z "$local_track_path" ]; then
+            PLAYBACK_SOURCE="STREAM"
+        fi
 
-        log "INFO" "Radio track [${track_num}/${track_count}]: ${track_filename}"
+        update_now_playing "$track_id" "$track_filename" "$track_num" "$track_title"
+        save_playback_state "RADIO" false
+
+        log "INFO" "Hybrid track [${track_num}/${track_count}]: ${track_filename} source=${PLAYBACK_SOURCE}"
 
         if $DRY_RUN; then
-            log "DRY" "Would curl ${SERVER_URL}${track_url} | mpg123 -"
+            log "DRY" "Would play ${track_filename} from ${PLAYBACK_SOURCE}"
             track_num=$((track_num + 1))
             continue
         fi
 
-        # Build safe URL
-        local safe_url
-        safe_url="${track_url// /%20}"
-
-        local stream_url="${SERVER_URL}${safe_url}"
-
-        # Start playback: curl → mpg123 pipeline
-        # Streams remote URL from playlist contract — does NOT fetch the playlist API
-        if [ -n "$CURL_CONFIG" ]; then
-            curl -s -L --connect-timeout "${CONNECT_TIMEOUT_SECONDS}" --max-time "${STREAM_PLAYBACK_TIMEOUT_SECONDS}" \
-                --config "$CURL_CONFIG" \
-                "$stream_url" 2>/dev/null | mpg123 -a "${SINK}" - 2>/dev/null &
+        local stream_url=""
+        if [ -n "$local_track_path" ]; then
+            mpg123 -a "${SINK}" "$local_track_path" 2>/dev/null &
         else
-            curl -s -L --connect-timeout "${CONNECT_TIMEOUT_SECONDS}" --max-time "${STREAM_PLAYBACK_TIMEOUT_SECONDS}" \
-                "$stream_url" 2>/dev/null | mpg123 -a "${SINK}" - 2>/dev/null &
+            local safe_url
+            safe_url="${track_url// /%20}"
+            stream_url="${SERVER_URL}${safe_url}"
+            if [ -n "$CURL_CONFIG" ]; then
+                curl -s -L --connect-timeout "${CONNECT_TIMEOUT_SECONDS}" --max-time "${STREAM_PLAYBACK_TIMEOUT_SECONDS}" \
+                    --config "$CURL_CONFIG" \
+                    "$stream_url" 2>/dev/null | mpg123 -a "${SINK}" - 2>/dev/null &
+            else
+                curl -s -L --connect-timeout "${CONNECT_TIMEOUT_SECONDS}" --max-time "${STREAM_PLAYBACK_TIMEOUT_SECONDS}" \
+                    "$stream_url" 2>/dev/null | mpg123 -a "${SINK}" - 2>/dev/null &
+            fi
         fi
         MPG123_PID=$!
+        refresh_playback_lease "$MPG123_PID" || true
 
         # Wait for this track to finish
         local exit_code=0
@@ -1067,7 +1212,11 @@ print(h)
             RADIO_FAILURES=$((RADIO_FAILURES + 1))
             # Persist every genuine decoder failure immediately, including the
             # first failure, before evaluating any fallback policy.
-            record_decoder_failure "RADIO" "$exit_code" "$track_id" "$stream_url" ""
+            if [ "$PLAYBACK_SOURCE" = "STREAM" ]; then
+                record_decoder_failure "RADIO" "$exit_code" "$track_id" "$stream_url" ""
+            else
+                record_decoder_failure "LOCAL" "$exit_code" "$track_id" "" "$local_track_path"
+            fi
 
             if [ "$RADIO_FAILURES" -ge "$FALLBACK_THRESHOLD" ]; then
                 log "INFO" "Fallback threshold (${RADIO_FAILURES}/${FALLBACK_THRESHOLD})"
@@ -1083,14 +1232,32 @@ print(h)
                 fi
             fi
             log "INFO" "Radio failures: ${RADIO_FAILURES}/${FALLBACK_THRESHOLD}"
+            TRACK_INDEX=$track_num
+            exec 3<&-
+            rm -f "$tracks_temp"
+            return 1
         elif [ $exit_code -eq 0 ]; then
-            # A successful RADIO decode clears only RADIO's consecutive counter.
-            record_playback_success "RADIO"
+            if [ "$PLAYBACK_SOURCE" = "STREAM" ]; then
+                record_playback_success "RADIO"
+            else
+                record_playback_success "LOCAL"
+            fi
         else
             log "DEBUG" "RADIO decoder exited due to expected SIGTERM; failure state unchanged"
         fi
 
         track_num=$((track_num + 1))
+
+        # Source/mode changes are observed only after the current decoder exits,
+        # preserving the natural track boundary.
+        read_audio_mode
+        if [ "$CURRENT_MODE" = "LOCAL" ]; then
+            TRACK_INDEX=$((track_num % track_count))
+            save_playback_state "LOCAL" false
+            exec 3<&-
+            rm -f "$tracks_temp"
+            return 2
+        fi
     done
 
     exec 3<&-
@@ -1156,6 +1323,7 @@ print(h)
         log "INFO" "Mapped to track index ${new_index}"
     fi
     PLAYLIST_HASH="$playlist_hash"
+    PLAYLIST_ID=$(read_json_field "$PLAYLIST_ACTIVE_FILE" "playlist_id" 2>/dev/null || true)
 
     # Extract tracks to temp
     local tracks_temp
@@ -1184,6 +1352,7 @@ print(h)
 
     # Play through tracks starting at current index
     local played=0
+    local start_index=$TRACK_INDEX
     while [ $played -lt "$track_count" ]; do
         if $STOP_REQUESTED; then
             log "INFO" "Stop requested, exiting LOCAL cycle"
@@ -1191,7 +1360,7 @@ print(h)
             return 0
         fi
 
-        local idx=$(( (TRACK_INDEX + played) % track_count ))
+        local idx=$(( (start_index + played) % track_count ))
 
         # Read track at line idx (0-indexed, line = idx + 1)
         local track_json
@@ -1221,32 +1390,46 @@ print(h)
             continue
         fi
 
-        track_path="${MUSIC_ACTIVE}/tracks/${track_filename}"
+        track_path=$(validated_track_path "$PLAYLIST_ACTIVE_FILE" "$track_json" "$MUSIC_ACTIVE" 2>/dev/null || true)
 
         TRACK_INDEX=$idx
         TRACK_ID="$track_id"
         TRACK_URL="$track_url"
 
+        if [ -n "$track_path" ]; then
+            PLAYBACK_SOURCE="CACHE"
+        else
+            PLAYBACK_SOURCE="STREAM"
+        fi
         update_now_playing "$track_id" "$track_filename" "$idx" "$track_title"
-        save_playback_state "LOCAL" true
+        save_playback_state "LOCAL" false
 
-        log "INFO" "Local track [${idx}/${track_count}]: ${track_filename:-${track_url}}"
+        log "INFO" "Cache-first track [${idx}/${track_count}]: ${track_filename:-${track_url}} source=${PLAYBACK_SOURCE}"
 
         if $DRY_RUN; then
             played=$((played + 1))
             continue
         fi
 
-        # Check file exists
-        if [ ! -f "$track_path" ]; then
-            log "WARN" "Track file not found: ${track_path}"
-            played=$((played + 1))
-            continue
+        local stream_url=""
+        if [ -n "$track_path" ]; then
+            mpg123 -a "${SINK}" "$track_path" 2>/dev/null &
+        else
+            local safe_url
+            safe_url="${track_url// /%20}"
+            stream_url="${SERVER_URL}${safe_url}"
+            log "WARN" "Local media unavailable; controlled per-track streaming fallback"
+            if [ -n "$CURL_CONFIG" ]; then
+                curl -s -L --connect-timeout "${CONNECT_TIMEOUT_SECONDS}" --max-time "${STREAM_PLAYBACK_TIMEOUT_SECONDS}" \
+                    --config "$CURL_CONFIG" "$stream_url" 2>/dev/null \
+                    | mpg123 -a "${SINK}" - 2>/dev/null &
+            else
+                curl -s -L --connect-timeout "${CONNECT_TIMEOUT_SECONDS}" --max-time "${STREAM_PLAYBACK_TIMEOUT_SECONDS}" \
+                    "$stream_url" 2>/dev/null | mpg123 -a "${SINK}" - 2>/dev/null &
+            fi
         fi
-
-        # Play track
-        mpg123 -a "${SINK}" "$track_path" 2>/dev/null &
         MPG123_PID=$!
+        refresh_playback_lease "$MPG123_PID" || true
 
         local exit_code=0
         wait_for_owned_playback || exit_code=$?
@@ -1264,15 +1447,33 @@ print(h)
 
         if [ $exit_code -ne 0 ] && [ $exit_code -ne 143 ]; then
             log "WARN" "Track playback failed (exit: ${exit_code}) — skipping"
-            record_decoder_failure "LOCAL" "$exit_code" "$track_id" "" "$track_path"
+            if [ "$PLAYBACK_SOURCE" = "STREAM" ]; then
+                record_decoder_failure "RADIO" "$exit_code" "$track_id" "$stream_url" ""
+            else
+                record_decoder_failure "LOCAL" "$exit_code" "$track_id" "" "$track_path"
+            fi
+            TRACK_INDEX=$idx
+            rm -f "$tracks_temp"
+            return 1
         elif [ $exit_code -eq 0 ]; then
-            # A successful LOCAL decode clears only LOCAL's consecutive counter.
-            record_playback_success "LOCAL"
+            if [ "$PLAYBACK_SOURCE" = "STREAM" ]; then
+                record_playback_success "RADIO"
+            else
+                record_playback_success "LOCAL"
+            fi
         else
             log "DEBUG" "LOCAL decoder exited due to expected SIGTERM; failure state unchanged"
         fi
 
         played=$((played + 1))
+
+        read_audio_mode
+        if [ "$CURRENT_MODE" = "RADIO" ]; then
+            TRACK_INDEX=$(( (idx + 1) % track_count ))
+            save_playback_state "RADIO" false
+            rm -f "$tracks_temp"
+            return 2
+        fi
 
         # On each track boundary, check if playlist changed (hot reload)
         if [ -f "$PLAYLIST_ACTIVE_FILE" ]; then
@@ -1391,6 +1592,12 @@ main() {
 
             IDLE|BLOCKED_NO_CACHE|BLOCKED_NO_SINK|BLOCKED_LEGACY|ERROR)
                 if [ "$CURRENT_MODE" = "BLOCKED_NO_CACHE" ]; then
+                    if [ -f "$PLAYLIST_STAGING_FILE" ] \
+                        && [ "$(read_json_field "$MEDIA_SYNC_FILE" "phase" 2>/dev/null || true)" = "STREAM_WARMUP" ]; then
+                        log "INFO" "Authenticated staging playlist ready — starting warm-up stream"
+                        CURRENT_MODE="RADIO"
+                        continue
+                    fi
                     log "WARN" "Mode is BLOCKED_NO_CACHE — no cache available"
                 elif [ "$CURRENT_MODE" = "BLOCKED_NO_SINK" ]; then
                     log "WARN" "Mode is BLOCKED_NO_SINK — no audio sink"
@@ -1401,7 +1608,7 @@ main() {
                 else
                     log "DEBUG" "Mode is IDLE — waiting for mode change"
                 fi
-                sleep 10
+                sleep 2
                 ;;
 
             TRANSITIONING|TRANSITION_TO_LOCAL|TRANSITION_TO_RADIO)

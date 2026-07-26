@@ -53,6 +53,7 @@
         "recovery_timer_expired",
         "startup",
         "ssh_maintenance",
+        "server_stop_playback",
         "error"
       ]
     },
@@ -60,7 +61,7 @@
     "internet_available": { "type": "boolean" },
     "cache_status": {
       "type": "string",
-      "enum": ["COMPLETE", "PARTIAL", "EMPTY", "EXPIRED", "UNKNOWN"]
+      "enum": ["COMPLETE", "PARTIAL", "EMPTY", "EXPIRED", "INTENTIONAL_EMPTY", "UNKNOWN"]
     },
     "active_playlist_version": { "type": ["string", "null"] },
     "last_transition_at": { "type": ["string", "null"], "format": "date-time" },

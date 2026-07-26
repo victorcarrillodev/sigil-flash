@@ -65,10 +65,16 @@ PYEOF
 check "runtime scripts are included" test -f "${PAYLOAD}/scripts/firstboot.sh"
 check "runtime cache metadata helper is included" \
     test -f "${PAYLOAD}/scripts/sigil-cache-meta-perms.sh"
+check "PulseAudio supervisor is included" \
+    test -f "${PAYLOAD}/scripts/sigil-pulseaudio-supervisor.sh"
 check "installer installs runtime cache metadata helper" \
     grep -Eq '^[[:space:]]+sigil-cache-meta-perms\.sh$' "${PAYLOAD}/install.sh"
 check "systemd units are included" test -f "${PAYLOAD}/services/ssh-monitor.service"
+check "local bootstrap unit is included" \
+    test -f "${PAYLOAD}/services/sigil-local-bootstrap.service"
 check "runtime configuration is included" test -f "${PAYLOAD}/conf/sigil-tmpfiles.conf"
+check "PulseAudio runtime environment is included" \
+    test -f "${PAYLOAD}/conf/pulse-runtime.env"
 check "development trees are excluded" test ! -e "${PAYLOAD}/tests"
 check "Git and Python caches are excluded" \
     test -z "$(find "$PAYLOAD" \( -name .git -o -name .pytest_cache -o -name __pycache__ -o -name '*.pyc' \) -print -quit)"

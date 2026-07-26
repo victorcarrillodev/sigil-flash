@@ -35,9 +35,12 @@ STATE_FILES=(
     "playlist.staging.json"
     "cache_meta.json"
     "bluetooth_state.json"
+    "media_sync_state.json"
 )
 
 SERVICES=(
+    "sigil-local-bootstrap"
+    "sigil-pulseaudio"
     "bluetooth-panel"
     "bt-connect"
     "radio-stream"
@@ -208,7 +211,12 @@ check_bluetooth_sink() {
 
     # Query PulseAudio sinks as sigil user
     local pactl_out
-    pactl_out=$(sudo -u sigil pactl list sinks short 2>/dev/null || true)
+    pactl_out=$(sudo -H -u sigil -- env \
+        HOME=/home/sigil \
+        XDG_RUNTIME_DIR=/run/sigil-pulse \
+        PULSE_RUNTIME_PATH=/run/sigil-pulse \
+        PULSE_SERVER=unix:/run/sigil-pulse/native \
+        pactl list sinks short 2>/dev/null || true)
 
     if [ -n "$pactl_out" ]; then
         local sink_line
