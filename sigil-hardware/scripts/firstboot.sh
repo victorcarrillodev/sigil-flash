@@ -102,8 +102,61 @@ cleanup_curl_auth() {
     fi
 }
 
+sync_path() {
+    python3 - "$1" <<'PYEOF'
+import os
+import sys
+
+path = sys.argv[1]
+flags = os.O_RDONLY
+if os.path.isdir(path):
+    flags |= getattr(os, "O_DIRECTORY", 0)
+descriptor = os.open(path, flags)
+try:
+    os.fsync(descriptor)
+finally:
+    os.close(descriptor)
+PYEOF
+}
+
+remove_enrollment_key() {
+    [ -e "$ENROLLMENT_KEY_FILE" ] || return 0
+    rm -f -- "$ENROLLMENT_KEY_FILE"
+    sync_path "$(dirname "$ENROLLMENT_KEY_FILE")"
+    ENROLLMENT_KEY=""
+}
+
+persist_device_credential() {
+    local token="$1"
+    local temporary persisted
+    temporary=$(mktemp "${API_KEY_FILE}.tmp.XXXXXX") || return 1
+    umask 077
+    if ! printf '%s\n' "$token" > "$temporary" \
+        || ! chown root:sigil "$temporary" \
+        || ! chmod 640 "$temporary" \
+        || ! sync_path "$temporary"; then
+        rm -f -- "$temporary"
+        return 1
+    fi
+    if ! mv -f -- "$temporary" "$API_KEY_FILE" \
+        || ! sync_path "$(dirname "$API_KEY_FILE")"; then
+        rm -f -- "$temporary"
+        return 1
+    fi
+    IFS= read -r persisted < "$API_KEY_FILE" || true
+    [ "$persisted" = "$token" ]
+}
+
 provision_device_credential() {
     if [ -n "$API_KEY" ]; then
+        if [ -e "$ENROLLMENT_KEY_FILE" ]; then
+            if $DRY_RUN; then
+                log "DRY" "Would remove enrollment key after verifying the existing device credential"
+            elif ! remove_enrollment_key; then
+                log "WARN" "Could not remove the already-consumed enrollment key"
+                return 1
+            fi
+        fi
         log "INFO" "Device API credential already provisioned"
         return 0
     fi
@@ -161,16 +214,16 @@ PYEOF
         return 1
     fi
     rm -f -- "$response" "$request_body"
-    local temporary
-    temporary="${API_KEY_FILE}.tmp.$$"
-    umask 077
-    printf '%s\n' "$token" > "$temporary"
-    chown root:sigil "$temporary"
-    chmod 640 "$temporary"
-    mv -f "$temporary" "$API_KEY_FILE"
-    rm -f -- "$ENROLLMENT_KEY_FILE"
+    if ! persist_device_credential "$token"; then
+        log "WARN" "Could not durably persist the device credential; enrollment key retained for retry"
+        return 1
+    fi
+    if ! remove_enrollment_key; then
+        log "WARN" "Device credential persisted but enrollment key cleanup failed; retry will clean it safely"
+        API_KEY="$token"
+        return 1
+    fi
     API_KEY="$token"
-    ENROLLMENT_KEY=""
     log "INFO" "Device credential provisioned; enrollment key consumed"
 }
 

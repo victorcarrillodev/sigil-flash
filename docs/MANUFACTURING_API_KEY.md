@@ -1,4 +1,9 @@
-# Manufacturing enrollment key
+# Manufacturing enrollment key (legacy manual flow)
+
+> For the current production flow, where SIGIL Flash obtains one enrollment key
+> automatically from the dedicated Keyring-backed `FACTORY` account, follow
+> [FACTORY_PROVISIONING.md](FACTORY_PROVISIONING.md). Do not combine that flow
+> with this manual injection procedure.
 
 SIGIL Flash reads the one-use enrollment key from the local, Git-ignored file:
 
