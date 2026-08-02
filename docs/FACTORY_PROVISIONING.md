@@ -122,6 +122,12 @@ It logs in, receives a short-lived JWT, requests exactly one enrollment key,
 and injects that key through its private mode-0600 manufacturing configuration.
 The key is not part of the public payload or command arguments.
 
+The same `server_url` is injected into the individualized image as the
+`SERVER_URL` value in `/etc/sigil/audio.conf`. It is therefore the single API
+base for enrollment, registration, playlist, protected media, state, and Wi-Fi
+geolocation. Do not rely on the reusable payload's default URL or configure a
+terminal/web-console hostname unless it proxies `/api/` to the SIGIL backend.
+
 ## Raspberry lifecycle
 
 1. The image contains the one-use enrollment key at

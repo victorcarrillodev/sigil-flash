@@ -60,4 +60,9 @@ pub struct DeviceConfig {
     pub panel_pin: Option<String>,
     #[serde(rename = "apiKey")]
     pub api_key: Option<String>,
+    /// API base URL resolved by SIGIL Flash for this individual manufacturing run.
+    /// It is carried only by the private manufacturing configuration and written
+    /// into the image's audio configuration after the payload is installed.
+    #[serde(rename = "serverUrl", default)]
+    pub server_url: Option<String>,
 }

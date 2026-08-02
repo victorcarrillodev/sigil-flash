@@ -212,7 +212,8 @@ impl FlashService {
                 "La ruta del archivo de imagen no existe".to_string(),
             ));
         }
-        let manufacturing_config = manufacturing_config_with_api_key(config, &self.api_key_file).await?;
+        let manufacturing_config =
+            manufacturing_config_with_api_key(config, &self.api_key_file).await?;
         validate_bundle_for_image(
             &image_p,
             &self.hardware_payload,
@@ -552,7 +553,9 @@ async fn manufacturing_config_with_api_key(
 ) -> AppResult<DeviceConfig> {
     let mut manufacturing_config = config.clone();
     let _ = api_key_file;
-    manufacturing_config.api_key = Some(obtain_enrollment_key().await?);
+    let server_url = manufacturing_server_url()?;
+    manufacturing_config.api_key = Some(obtain_enrollment_key(&server_url).await?);
+    manufacturing_config.server_url = Some(server_url);
     validate_device_config(&manufacturing_config)?;
     Ok(manufacturing_config)
 }
@@ -581,12 +584,22 @@ fn manufacturing_server_url() -> AppResult<String> {
 }
 
 fn normalize_server_url(value: String) -> AppResult<String> {
-    let value = value.trim_end_matches('/').to_string();
+    let value = value.trim().trim_end_matches('/').to_string();
     if value.starts_with("https://") || value.starts_with("http://") {
-        Ok(value)
-    } else {
-        Err(AppError::Validation("server_url debe usar http:// o https://".into()))
+        if value.len() > 512
+            || value.chars().any(|character| {
+                character.is_whitespace() || matches!(character, '\0' | '\r' | '\n' | '\'' | '\"')
+            })
+        {
+            return Err(AppError::Validation(
+                "server_url contiene caracteres no permitidos".into(),
+            ));
+        }
+        return Ok(value);
     }
+    Err(AppError::Validation(
+        "server_url debe usar http:// o https://".into(),
+    ))
 }
 
 async fn keyring_password() -> AppResult<String> {
@@ -594,7 +607,11 @@ async fn keyring_password() -> AppResult<String> {
         .args(["lookup", "service", "sigil-flash", "username", "fabrica"])
         .output()
         .await
-        .map_err(|error| AppError::Validation(format!("No se pudo ejecutar secret-tool: {error}. Instala libsecret-tools")))?;
+        .map_err(|error| {
+            AppError::Validation(format!(
+                "No se pudo ejecutar secret-tool: {error}. Instala libsecret-tools"
+            ))
+        })?;
     if !output.status.success() {
         return Err(AppError::Validation(
             "No hay credencial de fabricación en GNOME Keyring para service=sigil-flash username=fabrica".into(),
@@ -602,47 +619,80 @@ async fn keyring_password() -> AppResult<String> {
     }
     let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if value.is_empty() {
-        return Err(AppError::Validation("La credencial de fabricación está vacía".into()));
+        return Err(AppError::Validation(
+            "La credencial de fabricación está vacía".into(),
+        ));
     }
     Ok(value)
 }
 
-async fn obtain_enrollment_key() -> AppResult<String> {
+async fn obtain_enrollment_key(server_url: &str) -> AppResult<String> {
     #[derive(serde::Deserialize)]
-    struct Login { token: String }
+    struct Login {
+        token: String,
+    }
     #[derive(serde::Deserialize)]
-    struct EnrollmentKey { enrollment_key: String }
+    struct EnrollmentKey {
+        enrollment_key: String,
+    }
     #[derive(serde::Deserialize)]
-    struct EnrollmentResponse { keys: Vec<EnrollmentKey> }
+    struct EnrollmentResponse {
+        keys: Vec<EnrollmentKey>,
+    }
 
-    let server_url = manufacturing_server_url()?;
     let password = keyring_password().await?;
-    let client = reqwest::Client::builder().timeout(Duration::from_secs(20)).build()
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(20))
+        .build()
         .map_err(|error| AppError::Flash(format!("No se pudo crear cliente HTTPS: {error}")))?;
-    let login_body = serde_json::to_string(&serde_json::json!({"username": "fabrica", "password": password}))
-        .map_err(|error| AppError::Internal(format!("No se pudo serializar login: {error}")))?;
-    let login = client.post(format!("{server_url}/api/login"))
+    let login_body =
+        serde_json::to_string(&serde_json::json!({"username": "fabrica", "password": password}))
+            .map_err(|error| AppError::Internal(format!("No se pudo serializar login: {error}")))?;
+    let login = client
+        .post(format!("{server_url}/api/login"))
         .header(reqwest::header::CONTENT_TYPE, "application/json")
         .body(login_body)
-        .send().await.map_err(|error| AppError::Flash(format!("Login de fabricación falló: {error}")))?;
+        .send()
+        .await
+        .map_err(|error| AppError::Flash(format!("Login de fabricación falló: {error}")))?;
     if !login.status().is_success() {
-        return Err(AppError::Validation(format!("Login de fabricación rechazado: HTTP {}", login.status())));
+        return Err(AppError::Validation(format!(
+            "Login de fabricación rechazado: HTTP {}",
+            login.status()
+        )));
     }
-    let token = serde_json::from_str::<Login>(&login.text().await
-        .map_err(|_| AppError::Validation("No se pudo leer respuesta de login".into()))?)
-        .map_err(|_| AppError::Validation("Login de fabricación no devolvió un token válido".into()))?.token;
-    let response = client.post(format!("{server_url}/api/admin/enrollment-keys"))
+    let token = serde_json::from_str::<Login>(
+        &login
+            .text()
+            .await
+            .map_err(|_| AppError::Validation("No se pudo leer respuesta de login".into()))?,
+    )
+    .map_err(|_| AppError::Validation("Login de fabricación no devolvió un token válido".into()))?
+    .token;
+    let response = client
+        .post(format!("{server_url}/api/admin/enrollment-keys"))
         .bearer_auth(&token)
         .header(reqwest::header::CONTENT_TYPE, "application/json")
         .body("{}")
-        .send().await.map_err(|error| AppError::Flash(format!("Solicitud de enrollment key falló: {error}")))?;
+        .send()
+        .await
+        .map_err(|error| AppError::Flash(format!("Solicitud de enrollment key falló: {error}")))?;
     if !response.status().is_success() {
-        return Err(AppError::Validation(format!("Servidor rechazó enrollment key: HTTP {}", response.status())));
+        return Err(AppError::Validation(format!(
+            "Servidor rechazó enrollment key: HTTP {}",
+            response.status()
+        )));
     }
-    let document = serde_json::from_str::<EnrollmentResponse>(&response.text().await
-        .map_err(|_| AppError::Validation("No se pudo leer respuesta de enrollment key".into()))?)
+    let document =
+        serde_json::from_str::<EnrollmentResponse>(&response.text().await.map_err(|_| {
+            AppError::Validation("No se pudo leer respuesta de enrollment key".into())
+        })?)
         .map_err(|_| AppError::Validation("Respuesta de enrollment key inválida".into()))?;
-    let key = document.keys.into_iter().next().map(|entry| entry.enrollment_key)
+    let key = document
+        .keys
+        .into_iter()
+        .next()
+        .map(|entry| entry.enrollment_key)
         .ok_or_else(|| AppError::Validation("Servidor no devolvió enrollment_key".into()))?;
     validate_device_api_key(Some(&key))?;
     Ok(key)
@@ -733,9 +783,12 @@ fn is_valid_hostname(hostname: &str) -> bool {
 }
 
 fn validate_panel_pin(pin: Option<&str>) -> AppResult<()> {
-    let pin = pin.map(str::trim).filter(|pin| !pin.is_empty()).ok_or_else(|| {
-        AppError::Validation("El PIN del panel es obligatorio para fabricación".into())
-    })?;
+    let pin = pin
+        .map(str::trim)
+        .filter(|pin| !pin.is_empty())
+        .ok_or_else(|| {
+            AppError::Validation("El PIN del panel es obligatorio para fabricación".into())
+        })?;
     if !(6..=12).contains(&pin.len()) || !pin.bytes().all(|byte| byte.is_ascii_digit()) {
         return Err(AppError::Validation(
             "El PIN del panel debe contener entre 6 y 12 dígitos".into(),
@@ -753,9 +806,12 @@ fn validate_panel_pin(pin: Option<&str>) -> AppResult<()> {
 }
 
 fn normalized_panel_pin(pin: Option<&str>) -> AppResult<&str> {
-    let pin = pin.map(str::trim).filter(|pin| !pin.is_empty()).ok_or_else(|| {
-        AppError::Validation("El PIN del panel es obligatorio para fabricación".into())
-    })?;
+    let pin = pin
+        .map(str::trim)
+        .filter(|pin| !pin.is_empty())
+        .ok_or_else(|| {
+            AppError::Validation("El PIN del panel es obligatorio para fabricación".into())
+        })?;
     validate_panel_pin(Some(pin))?;
     Ok(pin)
 }
@@ -1480,6 +1536,56 @@ fn provision_device_api_key(root: &Path, config: &DeviceConfig) -> AppResult<()>
     write_result
 }
 
+fn provision_server_url(root: &Path, config: &DeviceConfig) -> AppResult<()> {
+    let server_url = config.server_url.as_deref().ok_or_else(|| {
+        AppError::Validation(
+            "Falta la URL del API en la configuración privada de fabricación".into(),
+        )
+    })?;
+    let server_url = normalize_server_url(server_url.to_string())?;
+    let path = root.join("etc/sigil/audio.conf");
+    let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
+        AppError::Flash(format!(
+            "No se pudo leer la configuración de audio de la imagen: {error}"
+        ))
+    })?;
+    if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+        return Err(AppError::Validation(
+            "La configuración de audio dentro de la imagen debe ser un archivo regular".into(),
+        ));
+    }
+    let current = std::fs::read_to_string(&path)?;
+    let mut found = false;
+    let updated = current
+        .lines()
+        .map(|line| {
+            if line.trim_start().starts_with("SERVER_URL=") {
+                found = true;
+                format!("SERVER_URL=\"{server_url}\"")
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>();
+    if !found {
+        return Err(AppError::Validation(
+            "La configuración de audio de la imagen no define SERVER_URL".into(),
+        ));
+    }
+
+    let temporary = path.with_file_name(format!(".audio.conf.{}", std::process::id()));
+    if temporary.exists() {
+        std::fs::remove_file(&temporary)?;
+    }
+    let contents = format!("{}\n", updated.join("\n"));
+    let write_result = write_private_root_file(&temporary, contents.as_bytes())
+        .and_then(|()| std::fs::rename(&temporary, &path).map_err(Into::into));
+    if write_result.is_err() {
+        erase_plaintext_file(&temporary);
+    }
+    write_result
+}
+
 fn escape_network_manager_value(value: &str) -> String {
     let mut escaped = String::with_capacity(value.len());
     for (index, character) in value.chars().enumerate() {
@@ -1822,6 +1928,7 @@ fn install_sigil_hardware(
             provision_panel_credential(&mount_dir, config)?;
             provision_wifi_profile(&mount_dir, config)?;
             provision_ssh_access(&mount_dir, config)?;
+            provision_server_url(&mount_dir, config)?;
 
             // `install.sh` habilita los servicios con `systemctl enable`
             // dentro del chroot, pero sin daemon systemd activo esa llamada
@@ -2391,6 +2498,7 @@ mod tests {
             sigil_model_version: Some("v1".to_string()),
             panel_pin: Some("80427159".to_string()),
             api_key: Some("synthetic-device-api-key".to_string()),
+            server_url: Some("https://api.example.test:8443".to_string()),
         }
     }
 
@@ -2453,7 +2561,10 @@ mod tests {
 
         let result = read_local_device_api_key(&path);
 
-        assert_eq!(result.expect("valid enrollment key"), "synthetic-enrollment-key");
+        assert_eq!(
+            result.expect("valid enrollment key"),
+            "synthetic-enrollment-key"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -2507,6 +2618,41 @@ mod tests {
             .mode()
             & 0o777;
         assert_eq!(mode, 0o600);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn provision_server_url_replaces_payload_default_for_this_image() {
+        let root = isolated_lock_dir("provision-server-url");
+        let config_dir = root.join("etc/sigil");
+        std::fs::create_dir_all(&config_dir).expect("create image config directory");
+        let path = config_dir.join("audio.conf");
+        std::fs::write(
+            &path,
+            "# payload default\nSERVER_URL=\"https://stale.invalid\"\nAUTH_MODE=header\n",
+        )
+        .expect("write image audio config");
+
+        provision_server_url(&root, &manufacturing_config()).expect("inject API URL");
+
+        let written = std::fs::read_to_string(path).expect("read injected audio config");
+        assert!(written.contains("SERVER_URL=\"https://api.example.test:8443\""));
+        assert!(written.contains("AUTH_MODE=header"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn provision_server_url_rejects_missing_audio_directive() {
+        let root = isolated_lock_dir("provision-server-url-missing");
+        let config_dir = root.join("etc/sigil");
+        std::fs::create_dir_all(&config_dir).expect("create image config directory");
+        std::fs::write(config_dir.join("audio.conf"), "AUTH_MODE=header\n")
+            .expect("write image audio config");
+
+        let error = provision_server_url(&root, &manufacturing_config())
+            .expect_err("missing directive must be rejected");
+
+        assert!(error.to_string().contains("no define SERVER_URL"));
         let _ = std::fs::remove_dir_all(root);
     }
 

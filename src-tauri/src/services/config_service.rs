@@ -467,6 +467,7 @@ mod tests {
             sigil_model_version: Some("v1".to_string()),
             panel_pin: Some("80427159".to_string()),
             api_key: None,
+            server_url: None,
         }
     }
 
