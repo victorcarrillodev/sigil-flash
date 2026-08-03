@@ -380,6 +380,11 @@ test_manager_persists_no_output_reason() {
     CURRENT_MODE=BLOCKED_NO_SINK
     CURRENT_DESIRED=RADIO
     CURRENT_REASON=no_sink
+    # Route diagnostics are evaluated only after the authoritative manager has
+    # already admitted this licensed playback cycle.
+    LICENSE_PHASE=LICENSE_AUTHORIZED
+    LICENSE_PURGED=false
+    LICENSE_BLOCK_REASON=""
     evaluate_state
     [ "$CURRENT_MODE" = BLOCKED_NO_SINK ] \
         && [ "$CURRENT_REASON" = no_audio_output ] \

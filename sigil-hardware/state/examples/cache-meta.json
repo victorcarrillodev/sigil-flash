@@ -3,7 +3,6 @@
   "cache_policy": {
     "max_ttl_days": 7,
     "auto_renew": true,
-    "delete_on_expire": false,
     "preserve_on_server_unavailable": true
   },
   "active_cache": {
@@ -36,11 +35,5 @@
     "bandwidth_saved_by_skipping": 52428800000
   },
   "expiration_warning_sent": false,
-  "expiration_warning_at": null,
-  "runtime": {
-    "runtime_seconds": 352000,
-    "runtime_limit_seconds": 604800,
-    "runtime_remaining_seconds": 252800,
-    "last_runtime_check_uptime": 123456
-  }
+  "expiration_warning_at": null
 }

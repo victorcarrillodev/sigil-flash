@@ -30,6 +30,15 @@ CACHE_META_FILE="$CASE_DIR/state/cache_meta.json"
 MUSIC_ACTIVE="$CASE_DIR/active"
 MUSIC_STAGING="$CASE_DIR/staging"
 MUSIC_ARCHIVE="$CASE_DIR/archive"
+CACHE_OP_LOCK="$CASE_DIR/run/cache-operation.lock"
+LICENSE_STATE_FILE="$CASE_DIR/state/license_state.json"
+LICENSE_HELPER="$ROOT/scripts/sigil-license-state.py"
+SIGIL_LICENSE_STATE_FILE="$LICENSE_STATE_FILE" SIGIL_LICENSE_BLOCK_MARKER="$CASE_DIR/run/license-blocked" \
+  SIGIL_LICENSE_TEST_MODE=1 SIGIL_LICENSE_TEST_GRACE_SECONDS=60 \
+  python3 "$LICENSE_HELPER" init >/dev/null
+SIGIL_LICENSE_STATE_FILE="$LICENSE_STATE_FILE" SIGIL_LICENSE_BLOCK_MARKER="$CASE_DIR/run/license-blocked" \
+  SIGIL_LICENSE_TEST_MODE=1 SIGIL_LICENSE_TEST_GRACE_SECONDS=60 \
+  python3 "$LICENSE_HELPER" authorize --event-id hybrid-test >/dev/null
 
 printf 'verified-media' > "$CASE_DIR/source.mp3"
 SOURCE_SIZE=$(stat -c%s "$CASE_DIR/source.mp3")
@@ -88,9 +97,9 @@ check "generation promotion exposes the new active directory" test -f "$MUSIC_AC
 check "generation promotion archives the previous active directory" \
     bash -c 'find "$1" -type f -name old.mp3 -print -quit | grep -q .' _ "$MUSIC_ARCHIVE"
 
-# Exercise the complete first-generation transaction with server integrity
-# metadata absent. The fetcher must compute and persist local size/SHA before
-# promotion, matching the currently deployed server contract.
+# Exercise the complete first-generation transaction with the authenticated
+# server playlist contract. The fetcher still verifies size/SHA locally before
+# promotion.
 rm -rf "$MUSIC_ACTIVE" "$MUSIC_STAGING" "$MUSIC_ARCHIVE"
 mkdir -p "$MUSIC_ACTIVE/tracks" "$MUSIC_STAGING/tracks" "$MUSIC_ARCHIVE" "$CASE_DIR/run"
 rm -f "$PLAYLIST_ACTIVE_FILE" "$PLAYLIST_STAGING_FILE" "$CACHE_META_FILE" "$MEDIA_SYNC_FILE"
@@ -100,7 +109,7 @@ SSH_ACTIVE_MARKER="$RUN_SIGIL_DIR/ssh-active"
 LOGOUT_FETCH_MARKER="$RUN_SIGIL_DIR/logout-fetch-active"
 PLAYBACK_STATE_FILE="$CASE_DIR/state/playback-priority.json"
 LOCK_FILE="$CASE_DIR/fetcher.lock"
-REMOTE_JSON='{"_schema_version":"1.0","playlist_id":"production-like","tracks":[{"id":"only","url":"/only.mp3","filename":"only.mp3","sha256":"","size_bytes":0}]}'
+REMOTE_JSON="{\"ok\":true,\"_schema_version\":\"1.0\",\"source\":\"server\",\"playlist_id\":\"production-like\",\"version_hash\":\"server-version\",\"stop_playback\":false,\"tracks\":[{\"id\":\"only\",\"url\":\"/only.mp3\",\"filename\":\"only.mp3\",\"sha256\":\"${SOURCE_HASH}\",\"size_bytes\":${SOURCE_SIZE}}]}"
 get_device_id() { printf 'TEST-DEVICE\n'; }
 fetch_remote_playlist() { printf '%s\n' "$REMOTE_JSON"; }
 http_get_to_file() { cp "$CASE_DIR/source.mp3" "$3"; }
@@ -129,6 +138,8 @@ MUSIC_STAGING="$CASE_DIR/player-staging"
 MUSIC_ACTIVE="$CASE_DIR/player-active"
 PLAYBACK_STATE_FILE="$CASE_DIR/state/playback.json"
 NOW_PLAYING_FILE="$CASE_DIR/state/now-playing"
+LICENSE_STATE_FILE="$CASE_DIR/state/license_state.json"
+LICENSE_HELPER="$ROOT/scripts/sigil-license-state.py"
 mkdir -p "$MUSIC_STAGING/tracks" "$MUSIC_ACTIVE/tracks"
 cp "$CASE_DIR/source.mp3" "$MUSIC_STAGING/tracks/next.mp3"
 python3 - "$PLAYLIST_STAGING_FILE" "$SOURCE_HASH" "$SOURCE_SIZE" <<'PY'

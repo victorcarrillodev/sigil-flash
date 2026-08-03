@@ -3,8 +3,7 @@
   "cache_policy": {
     "max_ttl_days": 7,
     "auto_renew": true,
-    "delete_on_expire": true,
-    "preserve_on_server_unavailable": false
+    "preserve_on_server_unavailable": true
   },
   "active_cache": {
     "playlist_id": "pl_abc123",

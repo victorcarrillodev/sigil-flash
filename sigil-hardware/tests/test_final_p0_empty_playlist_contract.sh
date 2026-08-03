@@ -14,7 +14,7 @@ not_ok() { echo "FAIL: $1"; FAIL=$((FAIL + 1)); }
 # shellcheck source=scripts/radio-fetcher.sh
 source "$ROOT/scripts/radio-fetcher.sh"
 
-explicit_empty='{"ok":true,"version_hash":"empty-v1","stop_playback":true,"tracks":[]}'
+explicit_empty='{"ok":true,"_schema_version":"1.0","source":"server","playlist_id":"empty","version_hash":"empty-v1","stop_playback":true,"tracks":[]}'
 accidental_empty='{"ok":true,"version_hash":"empty-v1","tracks":[]}'
 
 if validate_remote_playlist "$explicit_empty"; then

@@ -9,7 +9,7 @@
     "_schema_version": { "const": "1.0" },
     "mode": {
       "type": "string",
-      "enum": ["RADIO", "LOCAL", "TRANSITIONING", "IDLE", "CACHE_EXPIRED"]
+      "enum": ["RADIO", "LOCAL", "TRANSITIONING", "IDLE", "BLOCKED_LICENSE"]
     },
     "playing": { "type": "boolean" },
     "source": {

@@ -1,0 +1,27 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "schema-license-state.json",
+  "title": "SIGIL Offline License State",
+  "description": "Single-writer persisted entitlement state; no credentials or media references.",
+  "type": "object",
+  "required": ["_schema_version", "phase", "offline_accumulated_seconds", "grace_limit_seconds", "boot_id", "last_monotonic_checkpoint", "purged"],
+  "properties": {
+    "_schema_version": { "const": "1.0" },
+    "phase": { "enum": ["LICENSE_REAUTHORIZING", "LICENSE_AUTHORIZED", "LICENSE_GRACE_OFFLINE", "LICENSE_EXPIRY_PENDING_TRACK_END", "LICENSE_DENIAL_PENDING_TRACK_END", "LICENSE_EXPIRED_PURGED", "LICENSE_DENIED_PURGED"] },
+    "offline_accumulated_seconds": { "type": "integer", "minimum": 0 },
+    "grace_limit_seconds": { "const": 604800 },
+    "boot_id": { "type": "string", "minLength": 1 },
+    "last_monotonic_checkpoint": { "type": "integer", "minimum": 0 },
+    "clean_shutdown": { "type": "boolean" },
+    "last_successful_authorization_at": { "type": ["string", "null"], "format": "date-time" },
+    "last_successful_authorization_source": { "type": ["string", "null"] },
+    "last_authorization_result": { "type": "string" },
+    "last_authorization_event_id": { "type": ["string", "null"] },
+    "expiry_pending": { "type": "boolean" },
+    "purge_required": { "type": "boolean" },
+    "purged": { "type": "boolean" },
+    "block_reason": { "type": ["string", "null"] },
+    "updated_at": { "type": "string", "format": "date-time" }
+  },
+  "additionalProperties": false
+}

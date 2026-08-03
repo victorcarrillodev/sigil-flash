@@ -294,6 +294,37 @@ class FlaskAuthenticationTests(unittest.TestCase):
         self.assertTrue(states["MEDIA_READY"])
         self.assertFalse(states["PLAYBACK_ACTIVE"])
 
+    def test_license_expiry_is_visible_without_blocking_the_panel(self):
+        license_state = {
+            "phase": "LICENSE_EXPIRED_PURGED",
+            "offline_accumulated_seconds": 604800,
+            "grace_limit_seconds": 604800,
+            "purged": True,
+            "expiry_pending": False,
+            "block_reason": "offline_grace_expired",
+            "last_authorization_result": "OFFLINE_GRACE_EXHAUSTED",
+        }
+        self.module._services_active = lambda _services: True
+        self.module.get_preferred_device = lambda: None
+        self.module._read_bounded_json = lambda path: (
+            license_state if path == self.module._LICENSE_STATE_FILE else None
+        )
+        states = self.module._startup_state()
+        self.assertTrue(states["PANEL_READY"])
+        self.assertEqual(states["LICENSE_PHASE"], "LICENSE_EXPIRED_PURGED")
+        self.assertFalse(states["LICENSE_AUTHORIZED"])
+        self.assertEqual(states["OFFLINE_GRACE_REMAINING_SECONDS"], 0)
+        self.assertTrue(states["LICENSE_PURGED"])
+        self.assertEqual(states["PLAYBACK_BLOCK_REASON"], "offline_grace_expired")
+
+        self.authenticate()
+        response = self.client.get("/music/status")
+        self.assertEqual(response.status_code, 200)
+        status = response.get_json()
+        self.assertEqual(status["license_phase"], "LICENSE_EXPIRED_PURGED")
+        self.assertTrue(status["license_purged"])
+        self.assertEqual(status["playback_block_reason"], "offline_grace_expired")
+
     def test_https_configuration_marks_session_cookie_secure(self):
         self.module.app.config["SESSION_COOKIE_SECURE"] = True
         page = self.client.get("/login", base_url="https://localhost")

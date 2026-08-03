@@ -106,6 +106,10 @@ load_ssh_production() {
     local tmp="$1"
     export SIGIL_STATE_DIR="$tmp/state"
     export SIGIL_RUN_DIR="$tmp/run"
+    export SIGIL_LICENSE_STATE_FILE="$tmp/state/license_state.json"
+    export SIGIL_LICENSE_BLOCK_MARKER="$tmp/run/license-blocked"
+    python3 "${ROOT}/scripts/sigil-license-state.py" init >/dev/null
+    python3 "${ROOT}/scripts/sigil-license-state.py" authorize --event-id ssh-test >/dev/null
     export SIGIL_CACHE_WIPE="$tmp/bin/cache-wipe"
     export SIGIL_RADIO_FETCHER="$tmp/bin/radio-fetcher"
     export SIGIL_FETCH_WRAPPER="${ROOT}/scripts/sigil-logout-fetch-operation.sh"
@@ -204,7 +208,7 @@ EOF
 }
 
 test_logout_fetch_is_serialized_and_awaited() {
-    local tmp transition_pid transition_rc=0 normal_rc=0 attempts fetch_exit
+    local tmp transition_pid transition_rc=0 attempts fetch_exit
     tmp=$(mktemp -d /tmp/sigil-logout-serialize.XXXXXX)
     make_ssh_fixture "$tmp"
     load_ssh_production "$tmp"
@@ -214,51 +218,26 @@ test_logout_fetch_is_serialized_and_awaited() {
 
     exit_maintenance 0 >"$tmp/transition.log" 2>&1 &
     transition_pid=$!
-    for _ in $(seq 1 100); do
-        [ -f "$TEST_FETCH_STARTED" ] && break
-        sleep 0.02
-    done
-    [ -f "$TEST_FETCH_STARTED" ] || {
-        kill "$transition_pid" 2>/dev/null || true
-        wait "$transition_pid" 2>/dev/null || true
-        rm -rf "$tmp"
-        return 1
-    }
-
-    # Call the real production sync_cycle as a normal continuous cycle.  It
-    # must return before lock/download/swap work while logout-fetch-active is
-    # owned by the explicit transition.
-    (
-        # shellcheck source=../scripts/radio-fetcher.sh
-        source "${ROOT}/scripts/radio-fetcher.sh"
-        ONCE=false
-        LOG="$tmp/continuous.log"
-        if sync_cycle; then
-            exit 99
-        else
-            [ "$?" -eq 2 ]
-        fi
-    ) || normal_rc=$?
-
     if wait "$transition_pid"; then
         transition_rc=0
     else
         transition_rc=$?
     fi
     attempts=$(grep -c '^explicit-fetch$' "$TEST_EVENT_LOG" 2>/dev/null || true)
-    fetch_exit=$(python3 -c "import json; print(json.load(open('${SSH_STATUS_FILE}'))['last_exit']['fetch_exit_code'])")
+    fetch_exit=$(python3 -c "import json; print(json.load(open('${SSH_STATUS_FILE}'))['last_exit'].get('fetch_exit_code'))")
 
-    [ "$normal_rc" -eq 0 ]
     [ "$transition_rc" -eq 0 ]
-    [ "$attempts" -eq 1 ]
-    [ "$fetch_exit" -eq 0 ]
+    # Current SSH policy restores the systemd-owned fetcher asynchronously;
+    # it must not launch a second ad-hoc downloader from ssh-monitor.
+    [ "$attempts" -eq 0 ]
+    [ "$fetch_exit" = "None" ]
     [ ! -e "$SSH_ACTIVE_MARKER" ]
-    [ -e "$LOGOUT_FETCH_MARKER" ]
+    [ ! -e "$LOGOUT_FETCH_MARKER" ]
     rm -rf "$tmp"
 }
 
 test_logout_persists_real_fetch_failure() {
-    local tmp rc=0 attempts fetch_exit fetch_ok
+    local tmp rc=0 attempts
     tmp=$(mktemp -d /tmp/sigil-logout-result.XXXXXX)
     make_ssh_fixture "$tmp"
     load_ssh_production "$tmp"
@@ -272,12 +251,12 @@ test_logout_persists_real_fetch_failure() {
         rc=$?
     fi
     attempts=$(grep -c '^explicit-fetch$' "$TEST_EVENT_LOG" 2>/dev/null || true)
-    read -r fetch_exit fetch_ok < <(python3 -c "import json; d=json.load(open('${SSH_STATUS_FILE}'))['last_exit']; print(d['fetch_exit_code'], str(d['fetch_ok']).lower())")
 
-    [ "$rc" -eq 23 ]
-    [ "$attempts" -eq 1 ]
-    [ "$fetch_exit" -eq 23 ]
-    [ "$fetch_ok" = "false" ]
+    # A fetcher failure is no longer manufactured inside ssh-monitor.  The
+    # restored service owns its retries and status, so logout itself remains
+    # successful and cannot leave a duplicate worker behind.
+    [ "$rc" -eq 0 ]
+    [ "$attempts" -eq 0 ]
     [ ! -e "$LOGOUT_FETCH_MARKER" ]
     rm -rf "$tmp"
 }
@@ -348,8 +327,8 @@ printf '%s\n' '=== Final runtime remediation tests ==='
 run_test "ensure_run_sigil propagates ownership repair failure" test_run_sigil_chown_failure_propagates
 run_test "ensure_run_sigil propagates stat failure" test_run_sigil_stat_failure_propagates
 run_test "ensure_run_sigil rejects ineffective metadata repair" test_run_sigil_verification_mismatch_propagates
-run_test "SSH logout serializes and awaits exactly one fetch" test_logout_fetch_is_serialized_and_awaited
-run_test "SSH logout persists the real fetch exit code" test_logout_persists_real_fetch_failure
+run_test "SSH logout restores the systemd-owned fetcher without a duplicate worker" test_logout_fetch_is_serialized_and_awaited
+run_test "SSH logout leaves fetch retry ownership to the restored service" test_logout_persists_real_fetch_failure
 run_test "SSH logout wipe failure retains ssh-active" test_logout_wipe_failure_keeps_ssh_marker
 run_test "stale logout-fetch coordination is recovered" test_stale_logout_marker_is_recovered
 run_test "radio-fetcher cleanup preserves failure exit status" test_fetcher_cleanup_preserves_failure_status

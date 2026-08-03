@@ -47,6 +47,11 @@ PLAYLIST_STAGING_FILE="/var/lib/sigil/playlist.staging.json"
 MUSIC_ACTIVE="${SIGIL_MUSIC_ACTIVE:-/home/sigil/music/active}"
 MUSIC_STAGING="/home/sigil/music/staging"
 MUSIC_ARCHIVE="/home/sigil/music/archive"
+LICENSE_STATE_FILE="${SIGIL_LICENSE_STATE_FILE:-/var/lib/sigil/license_state.json}"
+LICENSE_HELPER="${SIGIL_LICENSE_HELPER:-/usr/local/bin/sigil-license-state.py}"
+if [ ! -f "$LICENSE_HELPER" ]; then
+    LICENSE_HELPER="$(dirname "${BASH_SOURCE[0]}")/sigil-license-state.py"
+fi
 
 # --- Config defaults (overridden by audio.conf) ---
 SERVER_URL=""
@@ -63,6 +68,8 @@ LOG_LEVEL="INFO"
 # --- Authentication state (set by init_curl_auth) ---
 CURL_CONFIG=""
 OPERATION_ID="none"
+LAST_HTTP_STATUS="000"
+LAST_PROTOCOL_CODE=""
 
 # --- Flags ---
 DRY_RUN=false
@@ -261,6 +268,10 @@ write_json_file() {
         log "DRY" "Would write: $file"
         return 0
     fi
+    if ! license_allows_media; then
+        log "INFO" "License gate blocks media download"
+        return 2
+    fi
     python3 - "$file" "$content" <<'PYEOF'
 import json
 import os
@@ -297,6 +308,18 @@ write_media_sync_state() {
     local phase="$1" playlist_id="${2:-}" generation_id="${3:-}"
     local validated="${4:-0}" total="${5:-0}" error_id="${6:-none}"
     local cursor="${7:-0}"
+    if [ -f "$LICENSE_HELPER" ] && ! license_allows_media; then
+        case "$phase" in
+            LICENSE_BLOCKED|LICENSE_PURGED) ;;
+            *)
+                # The license purge owns terminal media state.  A fetcher
+                # which began before expiry must not recreate a usable-looking
+                # generation or overwrite the purge diagnosis afterwards.
+                log "DEBUG" "License gate suppresses media sync phase=${phase}"
+                return 0
+                ;;
+        esac
+    fi
     if $DRY_RUN; then
         log "DRY" "Would publish media sync phase=${phase}, validated=${validated}/${total}"
         return 0
@@ -310,6 +333,14 @@ import tempfile
 from datetime import datetime, timezone
 
 path, phase, playlist_id, generation_id, validated, total, error_id, cursor = sys.argv[1:]
+previous = {}
+try:
+    with open(path, encoding="utf-8") as previous_file:
+        parsed = json.load(previous_file)
+        if isinstance(parsed, dict):
+            previous = parsed
+except (OSError, ValueError, json.JSONDecodeError):
+    pass
 document = {
     "_schema_version": "1.0",
     "phase": phase,
@@ -321,6 +352,9 @@ document = {
     "last_error": None if error_id in ("", "none") else error_id,
     "updated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
 }
+event = previous.get("authorization_event")
+if isinstance(event, dict):
+    document["authorization_event"] = event
 directory = os.path.dirname(path) or "."
 os.makedirs(directory, exist_ok=True)
 fd, temporary = tempfile.mkstemp(dir=directory, prefix=".media-sync.", suffix=".tmp")
@@ -339,6 +373,83 @@ except BaseException:
         pass
     raise
 PYEOF
+}
+
+publish_authorization_event() {
+    local result="$1" protocol_code="${2:-}" http_status="${3:-$LAST_HTTP_STATUS}"
+    if $DRY_RUN; then
+        return 0
+    fi
+    local boot_id uptime
+    boot_id=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || echo unknown-boot)
+    uptime=$(awk '{printf "%d", $1}' /proc/uptime 2>/dev/null || echo 0)
+    python3 - "$MEDIA_SYNC_FILE" "$OPERATION_ID" "$boot_id" "$uptime" \
+        "$result" "$protocol_code" "$http_status" <<'PYEOF'
+import json, os, sys, tempfile
+from datetime import datetime, timezone
+path, operation_id, boot_id, uptime, result, protocol_code, http_status = sys.argv[1:]
+try:
+    with open(path, encoding='utf-8') as handle:
+        document = json.load(handle)
+        if not isinstance(document, dict): document = {}
+except Exception:
+    document = {"_schema_version":"1.0", "phase":"UNKNOWN", "playlist_id":None,
+                "generation_id":None, "validated_tracks":0, "total_tracks":0,
+                "priority_cursor":0, "last_error":None}
+document["authorization_event"] = {
+    "operation_id": operation_id,
+    "boot_id": boot_id,
+    "monotonic_seconds": max(0, int(uptime)),
+    "result": result,
+    "protocol_code": protocol_code or None,
+    "http_status": int(http_status) if http_status.isdigit() else 0,
+    "observed_at": datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+}
+document["updated_at"] = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+directory = os.path.dirname(path) or '.'
+os.makedirs(directory, exist_ok=True)
+fd, temporary = tempfile.mkstemp(dir=directory, prefix='.authorization-event.', suffix='.tmp')
+try:
+    os.fchmod(fd, 0o600)
+    with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+        json.dump(document, handle, ensure_ascii=False, indent=2)
+        handle.write('\n'); handle.flush(); os.fsync(handle.fileno())
+    os.replace(temporary, path)
+except BaseException:
+    try: os.unlink(temporary)
+    except FileNotFoundError: pass
+    raise
+PYEOF
+}
+
+license_allows_media() {
+    SIGIL_LICENSE_STATE_FILE="$LICENSE_STATE_FILE" python3 "$LICENSE_HELPER" gate >/dev/null 2>&1
+}
+
+wait_for_license_unlock() {
+    local attempt=0
+    while [ "$attempt" -lt 15 ]; do
+        if license_allows_media; then
+            return 0
+        fi
+        sleep 1
+        attempt=$((attempt + 1))
+    done
+    return 1
+}
+
+is_authoritative_license_denial() {
+    # HTTP status alone is intentionally insufficient: an intermediary may
+    # return 404/409 while the device remains entitled.  Only backend protocol
+    # codes documented by the device contract can force a denial boundary.
+    case "${1:-}" in
+        UNAUTHORIZED|FORBIDDEN|DEVICE_NOT_AUTHORIZED|DEVICE_NOT_REGISTERED|PLAYLIST_NOT_ASSIGNED|PLAYLIST_UNAVAILABLE)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
 }
 
 read_playlist_active_hash() {
@@ -416,10 +527,24 @@ clean_staging() {
     mkdir -p "$MUSIC_STAGING/tracks"
 }
 
+discard_staging_after_license_block() {
+    license_allows_media && return 0
+    # FD 201 is deliberately released around network I/O.  Reacquire the same
+    # canonical lock before touching staging so expiry purge and fetcher never
+    # delete or recreate it concurrently.
+    if flock -w 2 201; then
+        clean_staging
+        rm -f -- "$PLAYLIST_STAGING_FILE"
+        flock -u 201
+    fi
+    return 0
+}
+
 # ── Cache metadata management ───────────────────────────────────────────────
 
 ensure_cache_meta() {
     if [ -f "$CACHE_META_FILE" ]; then
+        migrate_legacy_cache_metadata
         return 0
     fi
     if $DRY_RUN; then
@@ -434,7 +559,6 @@ ensure_cache_meta() {
   "cache_policy": {
     "max_ttl_days": 7,
     "auto_renew": true,
-    "delete_on_expire": false,
     "preserve_on_server_unavailable": true
   },
   "active_cache": {
@@ -466,13 +590,7 @@ ensure_cache_meta() {
     "bandwidth_saved_by_skipping": 0
   },
   "expiration_warning_sent": false,
-    "expiration_warning_at": null,
-    "runtime": {
-        "runtime_seconds": 0,
-        "runtime_limit_seconds": 604800,
-        "runtime_remaining_seconds": 604800,
-        "last_runtime_check_uptime": 0
-    }
+  "expiration_warning_at": null
 }
 EOF
 )
@@ -480,9 +598,64 @@ EOF
     sigil_cache_meta_fix_permissions "$CACHE_META_FILE"
 }
 
+migrate_legacy_cache_metadata() {
+    [ -f "$CACHE_META_FILE" ] || return 0
+    $DRY_RUN && return 0
+    python3 - "$CACHE_META_FILE" <<'PYEOF'
+import json
+import os
+import sys
+import tempfile
+
+path = sys.argv[1]
+try:
+    with open(path, encoding="utf-8") as handle:
+        document = json.load(handle)
+except (OSError, ValueError, json.JSONDecodeError):
+    raise SystemExit(0)
+if not isinstance(document, dict):
+    raise SystemExit(0)
+changed = document.pop("runtime", None) is not None
+policy = document.get("cache_policy")
+if isinstance(policy, dict) and "delete_on_expire" in policy:
+    policy.pop("delete_on_expire", None)
+    changed = True
+if not changed:
+    raise SystemExit(0)
+directory = os.path.dirname(path) or "."
+fd, temporary = tempfile.mkstemp(prefix=".cache-meta-migrate.", suffix=".tmp", dir=directory)
+try:
+    os.fchmod(fd, 0o640)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(document, handle, ensure_ascii=False, indent=2)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, path)
+    directory_fd = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+finally:
+    try:
+        os.unlink(temporary)
+    except FileNotFoundError:
+        pass
+PYEOF
+    sigil_cache_meta_fix_permissions "$CACHE_META_FILE"
+    log "INFO" "Migrated obsolete cache freshness clock to license_state ownership"
+}
+
 update_cache_meta() {
     local key="$1"
     local value="$2"
+    if [ -f "$LICENSE_HELPER" ] && ! license_allows_media; then
+        # The purge owns the terminal empty metadata.  A stale downloader must
+        # never replace it with progress or a resumable generation afterwards.
+        log "DEBUG" "License gate suppresses cache metadata update for ${key}"
+        return 0
+    fi
     if [ ! -f "$CACHE_META_FILE" ]; then
         log "DEBUG" "cache_meta.json not found — skipping update for $key"
         return 0
@@ -571,20 +744,6 @@ reset_staging_cache() {
     update_cache_meta "staging_cache.failed_tracks"       '[]'
 }
 
-reset_cache_runtime() {
-    if $DRY_RUN; then
-        log "DRY" "Would reset cache runtime counter to 0"
-        return 0
-    fi
-    local current_limit
-    current_limit=$(read_json_field "$CACHE_META_FILE" "runtime.runtime_limit_seconds")
-    current_limit="${current_limit:-604800}"
-    update_cache_meta "runtime.runtime_seconds"          "0"
-    update_cache_meta "runtime.runtime_remaining_seconds" "$current_limit"
-    update_cache_meta "runtime.last_runtime_check_uptime" "0"
-    log "DEBUG" "Reset cumulative runtime counter to 0 (fresh cache, limit=${current_limit})"
-}
-
 # ── TTL check ───────────────────────────────────────────────────────────────
 
 check_cache_ttl() {
@@ -620,8 +779,13 @@ http_get_to_file() {
     local output_file="$3"
     local http_code="000"
     local curl_rc=0
+    LAST_HTTP_STATUS="000"
+    LAST_PROTOCOL_CODE=""
     local -a curl_args=(
-        --silent --show-error --location
+        # Never follow a redirect while the device credential is configured as
+        # an arbitrary HTTP header.  A redirect is a classified server failure,
+        # not permission to send that header to another origin.
+        --silent --show-error --proto '=https' --proto-redir '=https' --max-redirs 0
         --connect-timeout "${CONNECT_TIMEOUT_SECONDS}"
         --max-time "${4}"
         --limit-rate "${DOWNLOAD_RATE_LIMIT}"
@@ -661,6 +825,7 @@ http_get_to_file() {
 
     case "$http_code" in
         2??)
+            LAST_HTTP_STATUS="$http_code"
             log_event "HTTP_REQUEST_COMPLETED" "${endpoint_class}" "success" \
                 "none" "curl_exit=0 http_status=${http_code}"
             return 0
@@ -672,6 +837,20 @@ http_get_to_file() {
         5??) error_id="API_SERVER_ERROR" ;;
         *) error_id="API_HTTP_ERROR" ;;
     esac
+    LAST_HTTP_STATUS="$http_code"
+    LAST_PROTOCOL_CODE=$(python3 - "$output_file" <<'PYEOF' 2>/dev/null || true
+import json, sys
+try:
+    data = json.load(open(sys.argv[1], encoding='utf-8'))
+except Exception:
+    raise SystemExit(0)
+if isinstance(data, dict):
+    code = data.get('code')
+    if not isinstance(code, str) and isinstance(data.get('error'), dict):
+        code = data['error'].get('code')
+    if isinstance(code, str): print(code)
+PYEOF
+)
     rm -f "$output_file"
     log_event "HTTP_REQUEST_FAILED" "${endpoint_class}" "failure" \
         "$error_id" "curl_exit=0 http_status=${http_code}"
@@ -746,31 +925,43 @@ print(hashlib.sha256(norm.encode()).hexdigest())
 validate_remote_playlist() {
     local json="$1"
     echo "$json" | python3 -c "
-import json, sys
+import json, os, re, sys
 try:
     data = json.load(sys.stdin)
 except:
     sys.exit(1)
-if isinstance(data, list):
-    if not data:
+if not isinstance(data, dict):
+    sys.exit(1)
+if data.get('ok') is not True or data.get('_schema_version') != '1.0' or data.get('source') != 'server':
+    sys.exit(1)
+tracks = data.get('tracks', [])
+if not isinstance(tracks, list) or not isinstance(data.get('stop_playback'), bool):
+    sys.exit(1)
+if len(tracks) == 0:
+    if data.get('stop_playback') is not True:
         sys.exit(1)
-    t = data[0]
-    if 'url' not in t:
-        sys.exit(1)
-elif isinstance(data, dict):
-    if 'tracks' not in data and '_schema_version' not in data:
-        sys.exit(1)
-    tracks = data.get('tracks', [])
-    if not isinstance(tracks, list):
-        sys.exit(1)
-    if len(tracks) == 0:
-        if data.get('stop_playback') is not True:
-            sys.exit(1)
-    else:
-        t = tracks[0]
-        if 'url' not in t and 'filename' not in t:
-            sys.exit(1)
 else:
+    if data.get('stop_playback') is True:
+        sys.exit(1)
+    names = set()
+    for t in tracks:
+        if not isinstance(t, dict):
+            sys.exit(1)
+        url, filename, digest, size = (t.get('url'), t.get('filename'),
+                                       t.get('sha256'), t.get('size_bytes'))
+        if (not isinstance(url, str) or not url.startswith('/') or '//' in url
+                or not isinstance(filename, str) or not filename
+                or os.path.basename(filename) != filename
+                or filename in {'.', '..'} or chr(92) in filename
+                or any(ord(c) < 32 for c in filename)
+                or not isinstance(digest, str)
+                or not re.fullmatch(r'[0-9a-fA-F]{64}', digest)
+                or not isinstance(size, int) or isinstance(size, bool) or size <= 0):
+            sys.exit(1)
+        if filename in names:
+            sys.exit(1)
+        names.add(filename)
+if not isinstance(data.get('playlist_id'), str) or not isinstance(data.get('version_hash'), str):
     sys.exit(1)
 print('valid')
 " 2>/dev/null | grep -q 'valid'
@@ -831,9 +1022,25 @@ download_track() {
         log "DEBUG" "Hash verified for $(basename "$output_path")"
     fi
 
+    # Commit happens under the same cache-operation lock as the terminal
+    # purge.  Do not move a validated partial into staging merely because the
+    # state was playable before a long network transfer started.
     sync -f "$partial_path" 2>/dev/null || true
+    mkdir -p "$(dirname "$CACHE_OP_LOCK")" || return 1
+    exec 202>"$CACHE_OP_LOCK"
+    if ! flock -w 2 202; then
+        log "WARN" "Cache operation lock busy while committing download"
+        return 1
+    fi
+    if ! license_allows_media; then
+        flock -u 202
+        rm -f "$partial_path"
+        log "INFO" "License gate changed while downloading; discarding partial"
+        return 2
+    fi
     mv -fT -- "$partial_path" "$output_path"
     sync -f "$output_path" 2>/dev/null || true
+    flock -u 202
     log "DEBUG" "Downloaded $(basename "$output_path") ($size bytes)"
     echo "$size"
     return 0
@@ -860,6 +1067,7 @@ validate_track_file() {
 record_track_integrity() {
     local playlist_file="$1" track_id="$2" filename="$3" track_path="$4"
     $DRY_RUN && return 0
+    license_allows_media || return 2
     python3 - "$playlist_file" "$track_id" "$filename" "$track_path" <<'PYEOF'
 import hashlib
 import json
@@ -970,14 +1178,30 @@ link_unchanged_track() {
         log "DRY" "Would hardlink: $source → $target"
         return 0
     fi
+    # This mutation must serialize with the terminal license purge too.  A
+    # stale fetcher may reuse active media only while the license is still
+    # playable at the exact commit point.
+    mkdir -p "$(dirname "$CACHE_OP_LOCK")" || return 1
+    exec 202>"$CACHE_OP_LOCK"
+    if ! flock -w 2 202; then
+        log "WARN" "Cache operation lock busy while linking cached media"
+        return 1
+    fi
+    if ! license_allows_media; then
+        flock -u 202
+        return 2
+    fi
     if ln "$source" "$target" 2>/dev/null; then
+        flock -u 202
         log "DEBUG" "Hardlinked unchanged track: ${filename}"
         return 0
     fi
     log "WARN" "Hardlink failed for ${filename} — falling back to copy"
     if cp "$source" "$target" 2>/dev/null; then
+        flock -u 202
         log "INFO" "Copied unchanged track: ${filename}"
     else
+        flock -u 202
         log "ERROR" "Both hardlink and copy failed for ${filename}"
         return 1
     fi
@@ -1435,6 +1659,13 @@ sync_cycle() {
         OPERATION_ID="none"
     fi
     log_event "MEDIA_SYNC_REQUESTED" "sync_cycle" "started" "none"
+    # A blocked device may still ask for the authenticated playlist so it can
+    # reauthorize, but it may not touch cached media until audio-manager has
+    # consumed that fresh proof.
+    local media_was_allowed=true
+    if ! license_allows_media; then
+        media_was_allowed=false
+    fi
     # Normal continuous cycles check before taking the component lock so they
     # cannot briefly starve the explicit SSH-logout fetch.  The authorized
     # one-shot waits for a pre-existing cycle to release the component lock.
@@ -1493,8 +1724,15 @@ sync_cycle() {
     log "DEBUG" "Device identity loaded"
 
     # --- Fetch remote playlist ---
-    local remote_json
-    remote_json=$(fetch_remote_playlist "$device_id") || {
+    local remote_json remote_response_file
+    remote_response_file=$(mktemp /tmp/sigil-playlist-normalized.XXXXXX)
+    if ! fetch_remote_playlist "$device_id" > "$remote_response_file"; then
+        rm -f "$remote_response_file"
+        if is_authoritative_license_denial "${LAST_PROTOCOL_CODE:-}"; then
+            publish_authorization_event "AUTHORITATIVE_DENIAL" "$LAST_PROTOCOL_CODE" "$LAST_HTTP_STATUS"
+        else
+            publish_authorization_event "TRANSIENT_FAILURE" "${LAST_PROTOCOL_CODE:-PLAYLIST_REQUEST_FAILED}" "$LAST_HTTP_STATUS"
+        fi
         log "WARN" "Playlist request failed; classified HTTP event logged"
         local failed
         failed=$(read_json_field "$CACHE_META_FILE" "statistics.failed_syncs")
@@ -1509,7 +1747,9 @@ sync_cycle() {
         log_event "MEDIA_SYNC_FAILED" "playlist_request" "failure" \
             "PLAYLIST_REQUEST_FAILED"
         return 1
-    }
+    fi
+    remote_json=$(<"$remote_response_file")
+    rm -f "$remote_response_file"
 
     if [ -z "$remote_json" ] || [ "$remote_json" = "null" ]; then
         log "WARN" "Empty response from server"
@@ -1528,6 +1768,7 @@ sync_cycle() {
 
     # --- H4: Validate remote playlist before processing ---
     if ! validate_remote_playlist "$remote_json"; then
+        publish_authorization_event "TRANSIENT_FAILURE" "INVALID_PLAYLIST_RESPONSE" "$LAST_HTTP_STATUS"
         log "ERROR" "Remote playlist failed schema validation — rejecting"
         local failed
         failed=$(read_json_field "$CACHE_META_FILE" "statistics.failed_syncs")
@@ -1540,6 +1781,24 @@ sync_cycle() {
         flock -u 201
         flock -u 200
         return 1
+    fi
+
+    # This is the only client-side event permitted to reset entitlement.  The
+    # manager consumes the one-shot operation id and updates license_state.
+    publish_authorization_event "AUTHENTICATED_PLAYLIST_OK" "" "$LAST_HTTP_STATUS"
+    if ! $media_was_allowed; then
+        if ! wait_for_license_unlock; then
+            write_media_sync_state "LICENSE_BLOCKED" "" "" 0 0 "AWAITING_LICENSE_MANAGER" 0
+            flock -u 201
+            flock -u 200
+            return 2
+        fi
+    fi
+    if ! license_allows_media; then
+        write_media_sync_state "LICENSE_BLOCKED" "" "" 0 0 "LICENSE_BLOCKED" 0
+        flock -u 201
+        flock -u 200
+        return 2
     fi
 
     # --- Compute remote hash ---
@@ -1679,10 +1938,16 @@ except:
     write_media_sync_state "STREAM_WARMUP" "$remote_playlist_id" "$remote_hash" \
         "0" "$track_count" "none" "$priority_cursor"
 
+    # Network I/O must not monopolize the canonical cache-operation lock.  A
+    # pending license purge can now acquire it while curl is running; each
+    # later mutation is still gated and promotion reacquires the lock below.
+    flock -u 201
+
     # --- Download each track (using temp file to avoid subshell from pipe) ---
     local downloaded=0
     local verified=0
     local failed=0
+    local license_blocked_during_download=false
     local total_bytes=0
     local failed_list=""
     local seen_fnames=""
@@ -1692,6 +1957,10 @@ except:
 
     while IFS= read -r track_json <&3; do
         [ -z "$track_json" ] && continue
+        if ! license_allows_media; then
+            license_blocked_during_download=true
+            break
+        fi
 
         local track_id track_url track_filename track_hash track_size
         track_id=$(echo "$track_json" | python3 -c "import json,sys; print(json.load(sys.stdin).get('id',''))" 2>/dev/null)
@@ -1796,6 +2065,12 @@ except:
     done 3< "$tracks_temp"
     rm -f "$tracks_temp"
 
+    if $license_blocked_during_download; then
+        discard_staging_after_license_block
+        flock -u 200
+        return 2
+    fi
+
     # --- Check if any track failed ---
     if [ "$failed" -gt 0 ]; then
         log "ERROR" "${failed} track(s) failed; retaining verified staging tracks for retry"
@@ -1809,6 +2084,15 @@ except:
             "$priority_cursor"
         log "INFO" "=== Sync cycle failed (${failed} failed tracks) ==="
         flock -u 201
+        flock -u 200
+        return 1
+    fi
+
+    # Re-enter the short critical section for integrity confirmation and the
+    # atomic generation swap.  If a purge won while downloading, this waits
+    # briefly and the license gate below rejects promotion.
+    if ! flock -w 2 201; then
+        log "WARN" "Cache operation lock busy before promotion; retaining staging for retry"
         flock -u 200
         return 1
     fi
@@ -1833,6 +2117,16 @@ except:
         log "INFO" "SSH coordination changed during download — aborting swap"
         write_media_sync_state "MAINTENANCE" "$remote_playlist_id" \
             "$remote_hash" "$verified" "$track_count" "SSH_MAINTENANCE" \
+            "$priority_cursor"
+        flock -u 201
+        flock -u 200
+        return 2
+    fi
+
+    if ! license_allows_media; then
+        log "INFO" "License gate changed during cache reconstruction — aborting promotion"
+        write_media_sync_state "LICENSE_BLOCKED" "$remote_playlist_id" \
+            "$remote_hash" "$verified" "$track_count" "LICENSE_BLOCKED" \
             "$priority_cursor"
         flock -u 201
         flock -u 200
@@ -1895,14 +2189,8 @@ except:
         "$downloaded" "$track_count" "none" "$priority_cursor"
     rm -f -- "$PLAYLIST_STAGING_FILE"
 
-    # Reset cumulative runtime counter only when cache was previously empty
-    # (expiration rebuild, SSH wipe recovery, or firstboot).  A content update
-    # during normal operation must not extend the powered-on runtime budget.
-    if [ "${prev_tracks_count:-0}" -eq 0 ]; then
-        reset_cache_runtime
-    else
-        log "INFO" "Cache content updated — runtime counter preserved (prev_tracks=${prev_tracks_count})"
-    fi
+    # Cache promotion deliberately never changes entitlement.  Only the
+    # validated authenticated playlist event above may reset the grace clock.
 
     log "INFO" "=== Sync cycle complete (new cache: ${downloaded} tracks, expires ${expires_8601}) ==="
     log_event "MEDIA_SYNC_COMPLETED" "cache_commit" "success" "none" \
@@ -1952,6 +2240,7 @@ main() {
     ensure_dirs
 
     # Main loop
+    local reauthorization_backoff=30
     while true; do
         _sc_exit=0
         sync_cycle || _sc_exit=$?
@@ -1959,8 +2248,21 @@ main() {
             log "INFO" "--once specified, exiting after single cycle"
             exit $_sc_exit
         fi
-        log "DEBUG" "Sleeping ${PLAYLIST_SYNC_INTERVAL}s until next sync"
-        sleep "$PLAYLIST_SYNC_INTERVAL"
+        # A blocked license has no media to refresh, but it needs a bounded,
+        # quiet path back to a fresh authenticated playlist.  This is not a
+        # tight reconnect loop: 30, 60, 120, then at most 300 seconds.
+        if license_allows_media; then
+            reauthorization_backoff=30
+            log "DEBUG" "Sleeping ${PLAYLIST_SYNC_INTERVAL}s until next sync"
+            sleep "$PLAYLIST_SYNC_INTERVAL"
+        else
+            log "INFO" "License blocked; retrying authenticated validation in ${reauthorization_backoff}s"
+            sleep "$reauthorization_backoff"
+            if [ "$reauthorization_backoff" -lt 300 ]; then
+                reauthorization_backoff=$((reauthorization_backoff * 2))
+                [ "$reauthorization_backoff" -le 300 ] || reauthorization_backoff=300
+            fi
+        fi
     done
 }
 

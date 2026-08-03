@@ -44,6 +44,7 @@ EOF
 chmod +x "$TMP_DIR/bin/systemctl" "$TMP_DIR/bin/pgrep" "$TMP_DIR/bin/pkill"
 
 CACHE_META="$TMP_DIR/cache_meta.json"
+LICENSE_STATE="$TMP_DIR/license_state.json"
 cat > "$CACHE_META" <<'EOF'
 {
   "_schema_version": "1.0",
@@ -54,6 +55,9 @@ cat > "$CACHE_META" <<'EOF'
 }
 EOF
 chmod 0660 "$CACHE_META"
+cat > "$LICENSE_STATE" <<'EOF'
+{"_schema_version":"1.0","phase":"LICENSE_EXPIRED_PURGED","purged":true}
+EOF
 
 if [ "$(id -u)" -eq 0 ]; then
     if ! getent passwd sigil >/dev/null || ! getent group sigil >/dev/null; then
@@ -73,6 +77,7 @@ printf 'archive\n' > "$TMP_DIR/music/archive/keep.mp3"
 PATH="$TMP_DIR/bin:$ORIGINAL_PATH" \
 SIGIL_MUSIC_DIR="$TMP_DIR/music" \
 SIGIL_CACHE_META_FILE="$CACHE_META" \
+SIGIL_LICENSE_STATE_FILE="$LICENSE_STATE" \
 SIGIL_CACHE_OP_LOCK="$TMP_DIR/run/cache-operation.lock" \
     bash "$WIPE" >"$TMP_DIR/wipe.stdout" 2>"$TMP_DIR/wipe.stderr"
 WIPE_RC=$?
@@ -86,6 +91,8 @@ assert "active tracks are wiped" test -z "$(find "$TMP_DIR/music/active/tracks" 
 assert "staging tracks are wiped" test -z "$(find "$TMP_DIR/music/staging/tracks" -type f -print -quit)"
 assert "archive is preserved" test -f "$TMP_DIR/music/archive/keep.mp3"
 assert "temporary metadata files are removed" test -z "$(find "$TMP_DIR" -maxdepth 1 -name '*.tmp' -print -quit)"
+assert "SSH maintenance never clears terminal license state" \
+    grep -q 'LICENSE_EXPIRED_PURGED' "$LICENSE_STATE"
 assert "metadata content is reset and unrelated state preserved" \
     python3 - "$CACHE_META" <<'PYEOF'
 import json

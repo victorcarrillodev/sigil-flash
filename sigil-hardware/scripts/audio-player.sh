@@ -47,6 +47,11 @@ MEDIA_SYNC_FILE="${SIGIL_MEDIA_SYNC_FILE:-/var/lib/sigil/media_sync_state.json}"
 NOW_PLAYING_FILE="/home/sigil/now_playing.txt"
 MUSIC_ACTIVE="/home/sigil/music/active"
 MUSIC_STAGING="/home/sigil/music/staging"
+LICENSE_STATE_FILE="${SIGIL_LICENSE_STATE_FILE:-/var/lib/sigil/license_state.json}"
+LICENSE_HELPER="${SIGIL_LICENSE_HELPER:-/usr/local/bin/sigil-license-state.py}"
+if [ ! -f "$LICENSE_HELPER" ]; then
+    LICENSE_HELPER="$(dirname "${BASH_SOURCE[0]}")/sigil-license-state.py"
+fi
 
 # --- Config defaults (overridden by audio.conf) ---
 SERVER_URL=""
@@ -58,6 +63,7 @@ CONNECT_TIMEOUT_SECONDS=10
 STREAM_PLAYBACK_TIMEOUT_SECONDS=300
 AUDIO_OUTPUT_RETRY_INITIAL_SECONDS=2
 AUDIO_OUTPUT_RETRY_MAX_SECONDS=30
+LICENSE_BLOCKED_RECHECK_SECONDS=15
 # FUTURE: SERVER_CHECK_INTERVAL, PLAYLIST_SYNC_INTERVAL, CACHE_TTL_DAYS
 # loaded from audio.conf for use by other components — declared here for shellcheck
 # shellcheck disable=SC2034
@@ -78,8 +84,8 @@ ONCE=false
 # --- PulseAudio setup ---
 PULSE_RUNTIME_ENV="${SIGIL_PULSE_RUNTIME_ENV:-/etc/sigil/pulse-runtime.env}"
 if [ -r "$PULSE_RUNTIME_ENV" ]; then
-    # shellcheck disable=SC1090
     set -a
+    # shellcheck disable=SC1090
     . "$PULSE_RUNTIME_ENV"
     set +a
 fi
@@ -113,6 +119,7 @@ SINK=""
 NO_AUDIO_OUTPUT_ACTIVE=false
 AUDIO_OUTPUT_RETRY_SECONDS=$AUDIO_OUTPUT_RETRY_INITIAL_SECONDS
 LAST_PUBLISHED_OUTPUT=""
+LICENSE_BLOCK_REPORTED=false
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -134,6 +141,7 @@ die() {
 }
 
 cleanup() {
+    local status="${1:-0}"
     if [ -n "${CURL_CONFIG:-}" ] && [ -f "$CURL_CONFIG" ]; then
         rm -f "$CURL_CONFIG"
     fi
@@ -147,12 +155,15 @@ cleanup() {
         kill $children 2>/dev/null || true
         wait 2>/dev/null || true
     fi
-    log "INFO" "audio-player stopped"
-    exit 0
+    log "INFO" "audio-player stopped (status=${status})"
+    return "$status"
 }
 
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then
-    trap cleanup EXIT TERM INT
+    on_exit() { local status=$?; trap - EXIT TERM INT; cleanup "$status"; return "$status"; }
+    on_signal() { trap - EXIT TERM INT; STOP_REQUESTED=true; cleanup 0; exit 0; }
+    trap on_exit EXIT
+    trap on_signal TERM INT
 fi
 
 # ── Argument parsing ────────────────────────────────────────────────────────
@@ -797,6 +808,27 @@ read_audio_mode() {
     fi
 }
 
+license_allows_playback() {
+    SIGIL_LICENSE_STATE_FILE="$LICENSE_STATE_FILE" python3 "$LICENSE_HELPER" gate >/dev/null 2>&1
+}
+
+wait_for_license_gate() {
+    if license_allows_playback; then
+        LICENSE_BLOCK_REPORTED=false
+        return 0
+    fi
+    # The manager owns the persistent phase.  The player only records its own
+    # idle/boundary state and never kills a decoder to enforce a license.
+    PLAYBACK_SOURCE="IDLE"
+    # Do not fsync the same blocked state every main-loop iteration.  The
+    # manager owns license persistence; this is only a player boundary record.
+    if ! $LICENSE_BLOCK_REPORTED; then
+        save_playback_state "IDLE" false
+        LICENSE_BLOCK_REPORTED=true
+    fi
+    return 1
+}
+
 update_now_playing() {
     local track_id="$1"
     local filename="$2"
@@ -917,10 +949,13 @@ wait_for_owned_playback() {
             fi
             if [ "$lease_ticks" -le 0 ]; then
                 refresh_playback_lease "$player_pid" || true
-                lease_ticks=15
+                lease_ticks=60
             fi
             lease_ticks=$((lease_ticks - 1))
-            sleep 1
+            # Playlist stops are administrative events, not a one-second
+            # real-time control loop.  Five seconds avoids thousands of
+            # Python launches per day while retaining responsive silence.
+            sleep 5
         done
     ) &
     watcher_pid=$!
@@ -1158,6 +1193,12 @@ print(h)
             PLAYBACK_SOURCE="STREAM"
         fi
 
+        if ! wait_for_license_gate; then
+            exec 3<&-
+            rm -f "$tracks_temp"
+            return 0
+        fi
+
         update_now_playing "$track_id" "$track_filename" "$track_num" "$track_title"
         save_playback_state "RADIO" false
 
@@ -1177,11 +1218,11 @@ print(h)
             safe_url="${track_url// /%20}"
             stream_url="${SERVER_URL}${safe_url}"
             if [ -n "$CURL_CONFIG" ]; then
-                curl -s -L --connect-timeout "${CONNECT_TIMEOUT_SECONDS}" --max-time "${STREAM_PLAYBACK_TIMEOUT_SECONDS}" \
+                curl -s --proto '=https' --proto-redir '=https' --max-redirs 0 --connect-timeout "${CONNECT_TIMEOUT_SECONDS}" --max-time "${STREAM_PLAYBACK_TIMEOUT_SECONDS}" \
                     --config "$CURL_CONFIG" \
                     "$stream_url" 2>/dev/null | mpg123 -a "${SINK}" - 2>/dev/null &
             else
-                curl -s -L --connect-timeout "${CONNECT_TIMEOUT_SECONDS}" --max-time "${STREAM_PLAYBACK_TIMEOUT_SECONDS}" \
+                curl -s --proto '=https' --proto-redir '=https' --max-redirs 0 --connect-timeout "${CONNECT_TIMEOUT_SECONDS}" --max-time "${STREAM_PLAYBACK_TIMEOUT_SECONDS}" \
                     "$stream_url" 2>/dev/null | mpg123 -a "${SINK}" - 2>/dev/null &
             fi
         fi
@@ -1401,6 +1442,10 @@ print(h)
         else
             PLAYBACK_SOURCE="STREAM"
         fi
+        if ! wait_for_license_gate; then
+            rm -f "$tracks_temp"
+            return 0
+        fi
         update_now_playing "$track_id" "$track_filename" "$idx" "$track_title"
         save_playback_state "LOCAL" false
 
@@ -1420,11 +1465,11 @@ print(h)
             stream_url="${SERVER_URL}${safe_url}"
             log "WARN" "Local media unavailable; controlled per-track streaming fallback"
             if [ -n "$CURL_CONFIG" ]; then
-                curl -s -L --connect-timeout "${CONNECT_TIMEOUT_SECONDS}" --max-time "${STREAM_PLAYBACK_TIMEOUT_SECONDS}" \
+                curl -s --proto '=https' --proto-redir '=https' --max-redirs 0 --connect-timeout "${CONNECT_TIMEOUT_SECONDS}" --max-time "${STREAM_PLAYBACK_TIMEOUT_SECONDS}" \
                     --config "$CURL_CONFIG" "$stream_url" 2>/dev/null \
                     | mpg123 -a "${SINK}" - 2>/dev/null &
             else
-                curl -s -L --connect-timeout "${CONNECT_TIMEOUT_SECONDS}" --max-time "${STREAM_PLAYBACK_TIMEOUT_SECONDS}" \
+                curl -s --proto '=https' --proto-redir '=https' --max-redirs 0 --connect-timeout "${CONNECT_TIMEOUT_SECONDS}" --max-time "${STREAM_PLAYBACK_TIMEOUT_SECONDS}" \
                     "$stream_url" 2>/dev/null | mpg123 -a "${SINK}" - 2>/dev/null &
             fi
         fi
@@ -1545,6 +1590,14 @@ main() {
         # Re-read audio mode each cycle (Phase 2C: audio-manager writes audio_mode.json)
         read_audio_mode
 
+        if ! wait_for_license_gate; then
+            # A blocked license is a persistent policy state, not an audio
+            # failure.  Recheck quietly without writing the SD card in a hot
+            # loop; authorization is still observed within 15 seconds.
+            sleep "$LICENSE_BLOCKED_RECHECK_SECONDS"
+            continue
+        fi
+
         if ! audio_output_gate; then
             continue
         fi
@@ -1571,10 +1624,7 @@ main() {
                 fi
                 ;;
 
-            LOCAL|CACHE_EXPIRED)
-                if [ "$CURRENT_MODE" = "CACHE_EXPIRED" ]; then
-                    log "WARN" "Playing from EXPIRED cache (TTL exceeded)"
-                fi
+            LOCAL)
                 local rc=0
                 if local_playback_cycle; then
                     rc=0
@@ -1590,7 +1640,7 @@ main() {
                 fi
                 ;;
 
-            IDLE|BLOCKED_NO_CACHE|BLOCKED_NO_SINK|BLOCKED_LEGACY|ERROR)
+            IDLE|BLOCKED_LICENSE|BLOCKED_NO_CACHE|BLOCKED_NO_SINK|BLOCKED_LEGACY|ERROR)
                 if [ "$CURRENT_MODE" = "BLOCKED_NO_CACHE" ]; then
                     if [ -f "$PLAYLIST_STAGING_FILE" ] \
                         && [ "$(read_json_field "$MEDIA_SYNC_FILE" "phase" 2>/dev/null || true)" = "STREAM_WARMUP" ]; then
@@ -1603,6 +1653,8 @@ main() {
                     log "WARN" "Mode is BLOCKED_NO_SINK — no audio sink"
                 elif [ "$CURRENT_MODE" = "BLOCKED_LEGACY" ]; then
                     log "WARN" "Mode is BLOCKED_LEGACY — radio-stream.sh owns sink"
+                elif [ "$CURRENT_MODE" = "BLOCKED_LICENSE" ]; then
+                    log "INFO" "Mode is BLOCKED_LICENSE — awaiting authenticated authorization"
                 elif [ "$CURRENT_MODE" = "ERROR" ]; then
                     log "ERROR" "Mode is ERROR — manager in unexpected state"
                 else
@@ -1617,8 +1669,8 @@ main() {
                 ;;
 
             *)
-                log "WARN" "Unknown mode: ${CURRENT_MODE} — defaulting to RADIO"
-                CURRENT_MODE="RADIO"
+                log "WARN" "Unknown mode: ${CURRENT_MODE} — failing closed to IDLE"
+                CURRENT_MODE="IDLE"
                 ;;
         esac
 

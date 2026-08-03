@@ -23,7 +23,9 @@
         "WAITING_NETWORK",
         "SERVER_UNREACHABLE_USING_CACHE",
         "MEDIA_INTEGRITY_FAILURE",
-        "MAINTENANCE"
+        "MAINTENANCE",
+        "LICENSE_BLOCKED",
+        "LICENSE_PURGED"
       ]
     },
     "playlist_id": { "type": ["string", "null"] },
@@ -32,6 +34,20 @@
     "total_tracks": { "type": "integer", "minimum": 0 },
     "priority_cursor": { "type": "integer", "minimum": 0 },
     "last_error": { "type": ["string", "null"] },
+    "authorization_event": {
+      "type": "object",
+      "required": ["operation_id", "boot_id", "monotonic_seconds", "result", "http_status", "observed_at"],
+      "properties": {
+        "operation_id": { "type": "string", "minLength": 1 },
+        "boot_id": { "type": "string", "minLength": 1 },
+        "monotonic_seconds": { "type": "integer", "minimum": 0 },
+        "result": { "enum": ["AUTHENTICATED_PLAYLIST_OK", "TRANSIENT_FAILURE", "AUTHORITATIVE_DENIAL"] },
+        "protocol_code": { "type": ["string", "null"] },
+        "http_status": { "type": "integer", "minimum": 0, "maximum": 599 },
+        "observed_at": { "type": "string", "format": "date-time" }
+      },
+      "additionalProperties": false
+    },
     "updated_at": { "type": "string", "format": "date-time" }
   },
   "additionalProperties": false

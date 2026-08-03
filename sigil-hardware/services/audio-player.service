@@ -1,7 +1,9 @@
 [Unit]
 Description=Sigil Audio Player — playlist playback engine, state persistence
-After=sigil-local-bootstrap.service sigil-pulseaudio.service
+After=sigil-local-bootstrap.service sigil-pulseaudio.service audio-manager.service
 Wants=sigil-local-bootstrap.service sigil-pulseaudio.service bt-connect.service
+Requires=audio-manager.service
+BindsTo=audio-manager.service
 StartLimitIntervalSec=60
 StartLimitBurst=5
 

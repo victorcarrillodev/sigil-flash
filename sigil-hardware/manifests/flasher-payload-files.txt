@@ -28,11 +28,12 @@ scripts/bt-connect.sh
 scripts/firstboot.sh
 scripts/install-offline-packages.sh
 scripts/radio-fetcher.sh
-scripts/radio-stream.sh
 scripts/set-a2dp.sh
 scripts/sigil-audio-route.sh
 scripts/sigil-audio-capability.sh
 scripts/sigil-cache-meta-perms.sh
+scripts/sigil-license-state.py
+scripts/sigil-license-purge.sh
 scripts/sigil-cache-wipe.sh
 scripts/sigil-healthcheck.sh
 scripts/sigil-leds.sh
@@ -49,7 +50,6 @@ services/bluetooth-panel.service
 services/bt-connect.service
 services/sigil-pulseaudio.service
 services/radio-fetcher.service
-services/radio-stream.service
 services/sigil-firstboot.service
 services/sigil-wifi-control.service
 services/sigil-leds.service

@@ -115,6 +115,14 @@ save_state() {
         printf 'LAST_SUCCESSFUL_PROFILE=%s\n' "${WIFI_STATE[LAST_SUCCESSFUL_PROFILE]//$'\n'/ }"
         printf 'UPDATED_AT=%s\n' "${WIFI_STATE[UPDATED_AT]}"
     } > "$temporary" || { rm -f "$temporary"; return 1; }
+    # `UPDATED_AT` is diagnostic.  Do not wear the SD card merely because a
+    # stable, unchanged link was polled again.
+    if [ -f "$STATE_FILE" ] \
+        && diff -q <(grep -v '^UPDATED_AT=' "$STATE_FILE") \
+            <(grep -v '^UPDATED_AT=' "$temporary") >/dev/null 2>&1; then
+        rm -f "$temporary"
+        return 0
+    fi
     mv -f "$temporary" "$STATE_FILE"
 }
 

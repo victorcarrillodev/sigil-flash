@@ -36,6 +36,7 @@ STATE_FILES=(
     "cache_meta.json"
     "bluetooth_state.json"
     "media_sync_state.json"
+    "license_state.json"
 )
 
 SERVICES=(
@@ -43,7 +44,6 @@ SERVICES=(
     "sigil-pulseaudio"
     "bluetooth-panel"
     "bt-connect"
-    "radio-stream"
     "sigil-leds"
     "wifi-fallback"
     "audio-manager"
@@ -92,6 +92,13 @@ hostname_val() {
 # ── Check: State files ──────────────────────────────────────────────────────
 check_state_files() {
     local py_script='import json,sys; files=[]; failed=0; dir=sys.argv[1]
+license_purged = False
+try:
+    license_document = json.load(open(f"{dir}/license_state.json", encoding="utf-8"))
+    license_purged = (license_document.get("phase") in ("LICENSE_EXPIRED_PURGED", "LICENSE_DENIED_PURGED")
+                      and license_document.get("purged") is True)
+except Exception:
+    pass
 for fname in sys.argv[2:]:
     fp=f"{dir}/{fname}"
     try:
@@ -100,8 +107,11 @@ for fname in sys.argv[2:]:
         sv=data.get("_schema_version","MISSING")
         files.append({"file":fname,"status":"OK","schema_version":sv})
     except FileNotFoundError:
-        files.append({"file":fname,"status":"ERROR","reason":"File not found"})
-        failed+=1
+        if license_purged and fname in ("playlist.active.json", "playlist.staging.json"):
+            files.append({"file":fname,"status":"PURGED_EXPECTED","reason":"License-expired media manifest removed"})
+        else:
+            files.append({"file":fname,"status":"ERROR","reason":"File not found"})
+            failed+=1
     except json.JSONDecodeError as e:
         files.append({"file":fname,"status":"ERROR","reason":str(e)})
         failed+=1

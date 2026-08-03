@@ -53,6 +53,7 @@ if [ -r "$AUDIO_ROUTE_HELPER" ]; then
     source "$AUDIO_ROUTE_HELPER"
 else
     audio_route_activate_bluetooth() { return 1; }
+    audio_route_bluetooth_ready() { return 1; }
 fi
 
 log() {
@@ -193,6 +194,23 @@ doc = {
     "retry_after_seconds": max(0, int(retry_after or 0)),
     "updated_at": now,
 }
+
+# The reconnect daemon runs continuously.  A timestamp alone is not a state
+# transition and must not cause an fsync every health interval while the same
+# speaker, profile and sink remain healthy.
+try:
+    with open(path, encoding="utf-8") as existing:
+        previous = json.load(existing)
+    if isinstance(previous, dict):
+        previous.pop("updated_at", None)
+        candidate = dict(doc)
+        candidate.pop("updated_at", None)
+        if previous == candidate:
+            raise SystemExit(0)
+except FileNotFoundError:
+    pass
+except (OSError, ValueError, json.JSONDecodeError):
+    pass
 
 directory = os.path.dirname(path) or "."
 os.makedirs(directory, exist_ok=True)
@@ -696,6 +714,13 @@ auto_cycle_locked() {
         return 1
     fi
     if printf '%s\n' "$connected" | grep -qxF "$preferred"; then
+        # A healthy connection does not need profile activation or a silent
+        # PulseAudio probe every health interval.  Re-enter full activation
+        # only after BlueZ, the card profile or the sink has actually changed.
+        if [ "$BT_PHASE" = "READY" ] && [ "$BT_A2DP_READY" = true ] \
+            && audio_route_bluetooth_ready "$preferred"; then
+            return 0
+        fi
         set_bt_phase "WAITING_FOR_SERVICES" "bluetooth_connected" false
         if ! wait_services_resolved "$preferred"; then
             set_bt_phase "WAITING_FOR_SERVICES" "services_not_resolved" false \

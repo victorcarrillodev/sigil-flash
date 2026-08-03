@@ -220,7 +220,6 @@ log_step "Instalando scripts → /usr/local/bin"
 
 SCRIPTS=(
     bt-connect.sh
-    radio-stream.sh
     set-a2dp.sh
     sigil-leds.sh
     sigil-wifi-control.py
@@ -234,6 +233,8 @@ SCRIPTS=(
     sigil-audio-route.sh
     sigil-audio-capability.sh
     sigil-cache-meta-perms.sh
+    sigil-license-state.py
+    sigil-license-purge.sh
     sigil-cache-wipe.sh
     sigil-logout-fetch-operation.sh
     sigil-pulseaudio-supervisor.sh
@@ -252,6 +253,9 @@ log_step "Instalando servicios systemd → /etc/systemd/system"
 
 for svc_file in "${REPO_DIR}"/services/*.service; do
     svc_name=$(basename "$svc_file")
+    # Legacy radio-stream has no entitlement/cache gate and must not be
+    # accidentally restored by a wildcard installation.
+    [ "$svc_name" = "radio-stream.service" ] && continue
     install -o root -g root -m 0644 \
         "$svc_file" "/etc/systemd/system/${svc_name}"
     log_ok "${svc_name} copiado"
@@ -458,9 +462,9 @@ chown "${SIGIL_USER}:${SIGIL_USER}" "${SIGIL_HOME}/now_playing.txt" 2>/dev/null 
 chmod 644 "${SIGIL_HOME}/now_playing.txt" 2>/dev/null || true
 log_ok "${SIGIL_HOME}/now_playing.txt (pista actual, owner: ${SIGIL_USER}, perms: 644)"
 
-# Log files — bt-connect y radio-stream corren como 'sigil' pero escriben en /var/log/
-# Crear los archivos y darle ownership a sigil antes del primer arranque
-for logfile in bt-connect radio-stream; do
+# Log files — los servicios sin privilegios escriben únicamente en archivos
+# precreados y rotados.
+for logfile in bt-connect; do
     touch "/var/log/${logfile}.log"
     chown "${SIGIL_USER}:${SIGIL_USER}" "/var/log/${logfile}.log"
     chmod 644 "/var/log/${logfile}.log"
@@ -529,10 +533,19 @@ chown root:sigil /etc/sigil/audio.conf
 chmod 640 /etc/sigil/audio.conf
 log_ok "/etc/sigil/audio.conf (640, root:sigil, I2S=${I2S_DAC_PRESENT})"
 
-# Permanent API credentials are created by firstboot from the injected,
-# one-use enrollment key. Never generate or embed a shared token here.
-rm -f -- /etc/sigil/secrets/device-api-key
-log_ok "API credential deferred to firstboot enrollment"
+# A new image gets its credential at first boot from its one-use enrollment
+# key.  An in-place update must never delete an already enrolled token: the
+# consumed enrollment key cannot recreate it locally.
+if [[ "${SIGIL_IMAGE_PREPARATION:-0}" = "1" ]]; then
+    rm -f -- /etc/sigil/secrets/device-api-key
+    log_ok "API credential deferred to firstboot enrollment"
+elif [[ -s /etc/sigil/secrets/device-api-key ]]; then
+    chmod 600 /etc/sigil/secrets/device-api-key
+    chown root:sigil /etc/sigil/secrets/device-api-key
+    log_ok "Existing device API credential preserved during update"
+else
+    log_warn "No device API credential present; firstboot enrollment is required before playback"
+fi
 
 if [[ -f /etc/sigil/security.conf ]]; then
     log_ok "/etc/sigil/security.conf ya existe"
@@ -634,10 +647,12 @@ for svc in $SERVICES; do
     fi
 done
 
-# Phase 2 is the production audio runtime.  The legacy unit remains installed
-# as an explicit rollback path, but it must never coexist with audio-player.
-systemctl disable radio-stream.service 2>/dev/null || true
-log_ok "radio-stream.service: inactivo y deshabilitado (rollback explícito)"
+# radio-stream predates entitlement and generation validation.  Do not retain
+# a rollback executable that can bypass the production license gate.
+systemctl disable --now radio-stream.service 2>/dev/null || true
+rm -f -- /etc/systemd/system/radio-stream.service /usr/local/bin/radio-stream.sh
+systemctl daemon-reload 2>/dev/null || true
+log_ok "Legacy radio-stream runtime removed (license bypass impossible)"
 
 for svc in $PHASE2_AUDIO_SERVICES; do
     if systemctl enable "${svc}.service" 2>/dev/null; then

@@ -28,6 +28,7 @@
         "TRANSITION_TO_RADIO",
         "BLOCKED_NO_CACHE",
         "BLOCKED_NO_SINK",
+        "BLOCKED_LICENSE",
         "BLOCKED_LEGACY",
         "ERROR"
       ]
@@ -54,14 +55,15 @@
         "startup",
         "ssh_maintenance",
         "server_stop_playback",
-        "error"
+        "error",
+        "license_blocked"
       ]
     },
     "since": { "type": "string", "format": "date-time" },
     "internet_available": { "type": "boolean" },
     "cache_status": {
       "type": "string",
-      "enum": ["COMPLETE", "PARTIAL", "EMPTY", "EXPIRED", "INTENTIONAL_EMPTY", "UNKNOWN"]
+      "enum": ["COMPLETE", "PARTIAL", "EMPTY", "STALE", "INTENTIONAL_EMPTY", "PURGED", "UNKNOWN"]
     },
     "active_playlist_version": { "type": ["string", "null"] },
     "last_transition_at": { "type": ["string", "null"], "format": "date-time" },

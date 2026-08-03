@@ -109,6 +109,7 @@ _AUDIO_MODE_FILE = "/var/lib/sigil/audio_mode.json"
 _BLUETOOTH_STATE_FILE = "/var/lib/sigil/bluetooth_state.json"
 _MEDIA_SYNC_FILE = "/var/lib/sigil/media_sync_state.json"
 _MAINTENANCE_STATE_FILE = "/var/lib/sigil/maintenance_state.json"
+_LICENSE_STATE_FILE = "/var/lib/sigil/license_state.json"
 _LEGACY_NOW_PLAYING_FILE = "/home/sigil/now_playing.txt"
 _MAX_RUNTIME_STATE_BYTES = 64 * 1024
 _PANEL_PIN_HASH_FILE = os.environ.get(
@@ -404,6 +405,7 @@ def _startup_state() -> dict[str, object]:
     bluetooth_state = _read_bounded_json(_BLUETOOTH_STATE_FILE)
     media_state = _read_bounded_json(_MEDIA_SYNC_FILE)
     maintenance_state = _read_bounded_json(_MAINTENANCE_STATE_FILE)
+    license_state = _read_bounded_json(_LICENSE_STATE_FILE)
     output = playback_state.get("output") if playback_state else None
     output_available = isinstance(output, dict) and output.get("available") is True
     preferred = get_preferred_device()
@@ -433,6 +435,30 @@ def _startup_state() -> dict[str, object]:
         isinstance(maintenance_state, dict)
         and maintenance_state.get("active") is True
     )
+    license_phase = (
+        license_state.get("phase")
+        if isinstance(license_state, dict) and isinstance(license_state.get("phase"), str)
+        else "LICENSE_REAUTHORIZING"
+    )
+    grace_limit = (
+        license_state.get("grace_limit_seconds", 604800)
+        if isinstance(license_state, dict) else 604800
+    )
+    grace_used = (
+        license_state.get("offline_accumulated_seconds", 0)
+        if isinstance(license_state, dict) else 0
+    )
+    if not isinstance(grace_limit, int) or grace_limit < 0:
+        grace_limit = 604800
+    if not isinstance(grace_used, int) or grace_used < 0:
+        grace_used = 0
+    license_purged = bool(license_state and license_state.get("purged") is True)
+    license_pending = bool(license_state and license_state.get("expiry_pending") is True)
+    license_block_reason = (
+        license_state.get("block_reason")
+        if isinstance(license_state, dict) and isinstance(license_state.get("block_reason"), str)
+        else ""
+    )
     playback_active = bool(
         panel_ready
         and output_available
@@ -456,6 +482,14 @@ def _startup_state() -> dict[str, object]:
         "CACHE_READY": media_phase == "CACHE_ONLY",
         "MEDIA_PHASE": media_phase,
         "PLAYBACK_SOURCE": playback_source,
+        "LICENSE_PHASE": license_phase,
+        "LICENSE_AUTHORIZED": license_phase in ("LICENSE_AUTHORIZED", "LICENSE_GRACE_OFFLINE") and not license_purged,
+        "OFFLINE_GRACE_USED_SECONDS": min(grace_used, grace_limit),
+        "OFFLINE_GRACE_REMAINING_SECONDS": max(0, grace_limit - grace_used),
+        "OFFLINE_GRACE_LIMIT_SECONDS": grace_limit,
+        "LICENSE_EXPIRY_PENDING": license_pending,
+        "LICENSE_PURGED": license_purged,
+        "PLAYBACK_BLOCK_REASON": license_block_reason,
         "MAINTENANCE_ACTIVE": maintenance_active,
         "PLAYBACK_ACTIVE": playback_active,
     }
@@ -841,6 +875,7 @@ def music_status():
     audio_mode = _read_bounded_json(_AUDIO_MODE_FILE)
     media_state = _read_bounded_json(_MEDIA_SYNC_FILE)
     maintenance_state = _read_bounded_json(_MAINTENANCE_STATE_FILE)
+    license_state = _read_bounded_json(_LICENSE_STATE_FILE)
 
     # Only the canonical runtime state can assert liveness.  now_playing.txt is
     # retained solely as rollback-era display metadata and may be stale.
@@ -896,6 +931,13 @@ def music_status():
             media_state.get("phase", "UNKNOWN") if media_state else "UNKNOWN"
         ),
         "maintenance": maintenance_active,
+        "license_phase": license_state.get("phase", "LICENSE_REAUTHORIZING") if license_state else "LICENSE_REAUTHORIZING",
+        "license_purged": bool(license_state and license_state.get("purged") is True),
+        "license_expiry_pending": bool(license_state and license_state.get("expiry_pending") is True),
+        "offline_grace_used_seconds": license_state.get("offline_accumulated_seconds", 0) if license_state else 0,
+        "offline_grace_limit_seconds": license_state.get("grace_limit_seconds", 604800) if license_state else 604800,
+        "playback_block_reason": license_state.get("block_reason", "") if license_state else "",
+        "last_authorization_result": license_state.get("last_authorization_result", "NEVER_AUTHORIZED") if license_state else "NEVER_AUTHORIZED",
         "error": runtime_error,
     })
 

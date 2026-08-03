@@ -1,7 +1,9 @@
 [Unit]
 Description=Sigil Radio Fetcher — playlist download, hash verification, atomic swap
-After=sigil-local-bootstrap.service network.target
+After=sigil-local-bootstrap.service network.target audio-manager.service
 Wants=sigil-local-bootstrap.service
+Requires=audio-manager.service
+BindsTo=audio-manager.service
 StartLimitIntervalSec=60
 StartLimitBurst=5
 

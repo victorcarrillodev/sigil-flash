@@ -168,10 +168,10 @@ test_no_panel_playback_commands() {
 
 test_phase2_is_install_default() {
     grep -q 'PHASE2_AUDIO_SERVICES="radio-fetcher audio-manager audio-player"' "$ROOT/install.sh" \
-        && grep -q 'disable radio-stream.service' "$ROOT/install.sh" \
+        && grep -q 'Legacy radio-stream runtime removed' "$ROOT/install.sh" \
         && grep -q 'enable "${svc}.service"' "$ROOT/install.sh" \
         && grep -q 'enable sigil-firstboot.service' "$ROOT/install.sh" \
-        && ! grep -q 'systemctl .*--now' "$ROOT/install.sh" \
+        && grep -q 'disable --now radio-stream.service' "$ROOT/install.sh" \
         && ! grep -q 'SERVICES=.*radio-stream' "$ROOT/install.sh"
 }
 
@@ -180,8 +180,30 @@ test_service_manifest_defaults() {
 import json, sys
 doc = json.load(open(sys.argv[1], encoding="utf-8"))["services"]
 assert {"radio-fetcher", "audio-manager", "audio-player"} <= set(doc["enable"])
-assert "radio-stream" in doc["disable"]
+assert "radio-stream" not in doc["disable"]
 assert "radio-stream" not in doc["enable"]
+PYEOF
+}
+
+test_legacy_runtime_is_not_shipped() {
+    ! grep -qx 'scripts/radio-stream.sh' "$ROOT/manifests/flasher-payload-files.txt"
+    ! grep -qx 'services/radio-stream.service' "$ROOT/manifests/flasher-payload-files.txt"
+    ! grep -q 'radio-stream.sh' "$ROOT/manifests/install-layout.json"
+    ! sed -n '/SCRIPTS=(/,/)/p' "$ROOT/install.sh" | grep -q 'radio-stream.sh'
+}
+
+test_update_never_discards_device_credential() {
+    grep -q 'SIGIL_IMAGE_PREPARATION' "$ROOT/install.sh"
+    grep -q 'Existing device API credential preserved during update' "$ROOT/install.sh"
+    grep -q 'rm -f -- /etc/sigil/secrets/device-api-key' "$ROOT/install.sh"
+    python3 - "$ROOT/install.sh" <<'PYEOF'
+import sys
+text = open(sys.argv[1], encoding="utf-8").read()
+start = text.index('if [[ "${SIGIL_IMAGE_PREPARATION:-0}" = "1" ]]')
+end = text.index('if [[ -f /etc/sigil/security.conf ]]', start)
+block = text[start:end]
+assert 'elif [[ -s /etc/sigil/secrets/device-api-key ]]' in block
+assert block.index('rm -f -- /etc/sigil/secrets/device-api-key') < block.index('elif [[ -s /etc/sigil/secrets/device-api-key ]]')
 PYEOF
 }
 
@@ -240,6 +262,8 @@ run_test "Next control is absent from the technician UI" test_next_control_absen
 run_test "panel contains no playback process or service commands" test_no_panel_playback_commands
 run_test "image preparation enables Phase 2 without starting chroot services" test_phase2_is_install_default
 run_test "service manifest declares Phase 2 production defaults" test_service_manifest_defaults
+run_test "legacy player is excluded from production payloads" test_legacy_runtime_is_not_shipped
+run_test "updates preserve the permanent per-device credential" test_update_never_discards_device_credential
 run_test "audio-player is the only Phase 2 route activator" test_player_is_only_phase2_route_activator
 run_test "audio-manager consumes player-published output" test_manager_consumes_published_output
 run_test "audio-player publishes route state atomically" test_player_publishes_route_atomically

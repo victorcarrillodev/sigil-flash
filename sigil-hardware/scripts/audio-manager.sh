@@ -44,6 +44,15 @@ PLAYBACK_STATE_FILE="${SIGIL_PLAYBACK_STATE_FILE:-/var/lib/sigil/playback_state.
 CACHE_META_FILE="/var/lib/sigil/cache_meta.json"
 PLAYLIST_ACTIVE_FILE="/var/lib/sigil/playlist.active.json"
 MEDIA_SYNC_FILE="${SIGIL_MEDIA_SYNC_FILE:-/var/lib/sigil/media_sync_state.json}"
+LICENSE_STATE_FILE="${SIGIL_LICENSE_STATE_FILE:-/var/lib/sigil/license_state.json}"
+LICENSE_HELPER="${SIGIL_LICENSE_HELPER:-/usr/local/bin/sigil-license-state.py}"
+LICENSE_PURGE="${SIGIL_LICENSE_PURGE:-/usr/local/bin/sigil-license-purge.sh}"
+if [ ! -f "$LICENSE_HELPER" ]; then
+    LICENSE_HELPER="$(dirname "${BASH_SOURCE[0]}")/sigil-license-state.py"
+fi
+if [ ! -f "$LICENSE_PURGE" ]; then
+    LICENSE_PURGE="$(dirname "${BASH_SOURCE[0]}")/sigil-license-purge.sh"
+fi
 
 # --- Config defaults (overridden by audio.conf) ---
 SERVER_URL=""
@@ -75,8 +84,8 @@ ONCE=false
 # --- PulseAudio setup ---
 PULSE_RUNTIME_ENV="${SIGIL_PULSE_RUNTIME_ENV:-/etc/sigil/pulse-runtime.env}"
 if [ -r "$PULSE_RUNTIME_ENV" ]; then
-    # shellcheck disable=SC1090
     set -a
+    # shellcheck disable=SC1090
     . "$PULSE_RUNTIME_ENV"
     set +a
 fi
@@ -99,20 +108,18 @@ TRANSITION_COUNT=0
 LAST_ERROR=""
 # shellcheck disable=SC2034 # set for state tracking, available for debugging
 MODE_SINCE=""
-INTERNET_RESTORED_AT=""
-INTERNET_RESTORE_CHECKED=false
 LAST_INTERNET_CHECK_EPOCH=0
-RECOVERY_ELIGIBLE=false
 # shellcheck disable=SC2034 # set for state tracking, available for debugging
 CURRENT_REASON="startup"
 STOP_REQUESTED=false
 
-# Runtime-based cache expiration
-RUNTIME_SECONDS=0
-RUNTIME_LIMIT_SECONDS=604800
-RUNTIME_REMAINING_SECONDS=604800
-LAST_RUNTIME_CHECK_UPTIME=0
-RUNTIME_EXPIRED_HANDLED=false
+# License entitlement is independent from cache freshness.  The helper owns
+# persistence; this process is its only normal writer.
+LICENSE_PHASE="LICENSE_REAUTHORIZING"
+LICENSE_USED_SECONDS=0
+LICENSE_LIMIT_SECONDS=604800
+LICENSE_LAST_EVENT_ID=""
+LICENSE_BLOCK_REASON="no_successful_authorization"
 MEDIA_SYNC_PHASE="UNKNOWN"
 MEDIA_TARGET_HASH=""
 
@@ -136,11 +143,18 @@ die() {
 }
 
 cleanup() {
+    local status="${1:-0}"
     if [ -n "${CURL_CONFIG:-}" ] && [ -f "$CURL_CONFIG" ]; then
         rm -f "$CURL_CONFIG"
     fi
     log "DEBUG" "audio-manager shutting down"
     STOP_REQUESTED=true
+    # Only a controlled, successful service stop is a clean checkpoint.  A
+    # failed manager must retain clean_shutdown=false so a reboot cannot gain
+    # offline grace merely because Bash ran an EXIT trap.
+    if [ "$status" -eq 0 ] && [ -f "$LICENSE_HELPER" ] && ! $DRY_RUN; then
+        python3 "$LICENSE_HELPER" clean-shutdown >/dev/null 2>&1 || true
+    fi
     local children
     children=$(jobs -p 2>/dev/null || true)
     if [ -n "$children" ]; then
@@ -148,12 +162,15 @@ cleanup() {
         kill $children 2>/dev/null || true
         wait 2>/dev/null || true
     fi
-    log "INFO" "audio-manager stopped"
-    exit 0
+    log "INFO" "audio-manager stopped (status=${status})"
+    return "$status"
 }
 
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then
-    trap cleanup EXIT TERM INT
+    on_exit() { local status=$?; trap - EXIT TERM INT; cleanup "$status"; return "$status"; }
+    on_signal() { trap - EXIT TERM INT; STOP_REQUESTED=true; cleanup 0; exit 0; }
+    trap on_exit EXIT
+    trap on_signal TERM INT
 fi
 
 # ── Argument parsing ────────────────────────────────────────────────────────
@@ -333,18 +350,16 @@ check_internet() {
     local health_rc=0
     local http_code="000"
     if [ -n "$CURL_CONFIG" ]; then
-        http_code=$(curl -s -L -o /dev/null -w '%{http_code}' --connect-timeout "${CONNECT_TIMEOUT_SECONDS}" --max-time "${HEALTHCHECK_TIMEOUT_SECONDS}" \
+        http_code=$(curl -s --proto '=https' --proto-redir '=https' --max-redirs 0 -o /dev/null -w '%{http_code}' --connect-timeout "${CONNECT_TIMEOUT_SECONDS}" --max-time "${HEALTHCHECK_TIMEOUT_SECONDS}" \
             --config "$CURL_CONFIG" \
             "$health_url" 2>/dev/null) || health_rc=$?
     else
-        http_code=$(curl -s -L -o /dev/null -w '%{http_code}' --connect-timeout "${CONNECT_TIMEOUT_SECONDS}" --max-time "${HEALTHCHECK_TIMEOUT_SECONDS}" \
+        http_code=$(curl -s --proto '=https' --proto-redir '=https' --max-redirs 0 -o /dev/null -w '%{http_code}' --connect-timeout "${CONNECT_TIMEOUT_SECONDS}" --max-time "${HEALTHCHECK_TIMEOUT_SECONDS}" \
             "$health_url" 2>/dev/null) || health_rc=$?
     fi
     if [ "$health_rc" -eq 0 ] && [[ "$http_code" =~ ^2[0-9][0-9]$ ]]; then
         if ! $INTERNET_AVAILABLE; then
             log "INFO" "SIGIL server reachability restored"
-            INTERNET_RESTORED_AT=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
-            INTERNET_RESTORE_CHECKED=false
         fi
         INTERNET_AVAILABLE=true
         log "INFO" "SIGIL_EVENT event_id=SERVER_HEALTH_RESULT operation_id=audio-manager phase=server_health result=success error_id=none curl_exit=0 http_status=${http_code}"
@@ -378,13 +393,6 @@ check_internet() {
 # ── Cache status ────────────────────────────────────────────────────────────
 
 read_cache_status() {
-    # Runtime-based expiration check (highest priority)
-    if [ "$RUNTIME_SECONDS" -ge "$RUNTIME_LIMIT_SECONDS" ] && [ "$RUNTIME_LIMIT_SECONDS" -gt 0 ]; then
-        CACHE_STATUS="EXPIRED"
-        log "DEBUG" "Cache status: EXPIRED by runtime (${RUNTIME_SECONDS}s >= ${RUNTIME_LIMIT_SECONDS}s); retained until replacement"
-        return
-    fi
-
     if [ ! -f "$CACHE_META_FILE" ]; then
         CACHE_STATUS="EMPTY"
         log "DEBUG" "Cache status: EMPTY (no cache_meta.json)"
@@ -417,8 +425,8 @@ PYEOF
         now_epoch=$(date +%s)
         expires_epoch=$(date -d "$expires_at" +%s 2>/dev/null || echo "0")
         if [ "$expires_epoch" -gt 0 ] && [ "$now_epoch" -gt "$expires_epoch" ]; then
-            CACHE_STATUS="EXPIRED"
-            log "DEBUG" "Cache status: EXPIRED (expired at ${expires_at})"
+            CACHE_STATUS="STALE"
+            log "DEBUG" "Cache status: STALE (freshness timestamp ${expires_at})"
             return
         fi
     fi
@@ -432,6 +440,142 @@ read_media_sync_status() {
     MEDIA_TARGET_HASH=$(read_json_field "$MEDIA_SYNC_FILE" "generation_id" 2>/dev/null || true)
     MEDIA_SYNC_PHASE="${MEDIA_SYNC_PHASE:-UNKNOWN}"
     MEDIA_TARGET_HASH="${MEDIA_TARGET_HASH:-}"
+}
+
+# ── License state ──────────────────────────────────────────────────────────
+
+read_license_document() {
+    local document="${1:-}"
+    [ -n "$document" ] || return 1
+    eval "$(printf '%s' "$document" | python3 -c '
+import json, shlex, sys
+value = json.load(sys.stdin)
+mapping = {
+    "LICENSE_PHASE": value.get("phase", "LICENSE_REAUTHORIZING"),
+    "LICENSE_USED_SECONDS": value.get("offline_grace_used_seconds", 0),
+    "LICENSE_LIMIT_SECONDS": value.get("grace_limit_seconds", 604800),
+    "LICENSE_LAST_EVENT_ID": value.get("last_authorization_event_id") or "",
+    "LICENSE_BLOCK_REASON": value.get("block_reason") or "",
+}
+for key, item in mapping.items(): print(f"{key}={shlex.quote(str(item))}")
+')"
+}
+
+license_status() {
+    local document
+    document=$(SIGIL_LICENSE_STATE_FILE="$LICENSE_STATE_FILE" python3 "$LICENSE_HELPER" status 2>/dev/null || true)
+    read_license_document "$document" || return 1
+}
+
+license_tick() {
+    local document rc=0
+    document=$(SIGIL_LICENSE_STATE_FILE="$LICENSE_STATE_FILE" python3 "$LICENSE_HELPER" tick 2>/dev/null) || rc=$?
+    read_license_document "$document" || return 1
+    if [ "$rc" -eq 2 ]; then
+        log "WARN" "License grace reached ${LICENSE_USED_SECONDS}/${LICENSE_LIMIT_SECONDS}s; waiting for current track boundary"
+    fi
+    return 0
+}
+
+license_initialize() {
+    local document
+    document=$(SIGIL_LICENSE_STATE_FILE="$LICENSE_STATE_FILE" python3 "$LICENSE_HELPER" init 2>/dev/null) || return 1
+    read_license_document "$document"
+}
+
+consume_authorization_event() {
+    local event_id event_result event_code event_boot event_http current_boot document
+    event_id=$(read_json_field "$MEDIA_SYNC_FILE" "authorization_event.operation_id" 2>/dev/null || true)
+    event_result=$(read_json_field "$MEDIA_SYNC_FILE" "authorization_event.result" 2>/dev/null || true)
+    event_code=$(read_json_field "$MEDIA_SYNC_FILE" "authorization_event.protocol_code" 2>/dev/null || true)
+    event_boot=$(read_json_field "$MEDIA_SYNC_FILE" "authorization_event.boot_id" 2>/dev/null || true)
+    event_http=$(read_json_field "$MEDIA_SYNC_FILE" "authorization_event.http_status" 2>/dev/null || true)
+    [ -n "$event_id" ] && [ "$event_id" != "null" ] || return 0
+    [ "$event_id" != "$LICENSE_LAST_EVENT_ID" ] || return 0
+    current_boot=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || true)
+    if [ -z "$event_boot" ] || [ "$event_boot" != "$current_boot" ]; then
+        SIGIL_LICENSE_STATE_FILE="$LICENSE_STATE_FILE" python3 "$LICENSE_HELPER" \
+            ack-event --event-id "$event_id" --result "AUTH_EVENT_STALE_BOOT" >/dev/null || return 0
+        license_status || true
+        log "WARN" "Ignoring stale authorization event from a different boot"
+        return 0
+    fi
+
+    case "$event_result" in
+        AUTHENTICATED_PLAYLIST_OK)
+            if [ "$event_http" != "200" ]; then
+                SIGIL_LICENSE_STATE_FILE="$LICENSE_STATE_FILE" python3 "$LICENSE_HELPER" \
+                    ack-event --event-id "$event_id" --result "AUTH_EVENT_INVALID" >/dev/null || return 0
+                license_status || true
+                log "WARN" "Ignoring malformed authorization success event without HTTP 200"
+                return 0
+            fi
+            # A response received while purge is pending cannot resurrect old
+            # media.  A terminal purge requires a new response afterwards.
+            case "$LICENSE_PHASE" in
+                LICENSE_EXPIRY_PENDING_TRACK_END|LICENSE_DENIAL_PENDING_TRACK_END)
+                    SIGIL_LICENSE_STATE_FILE="$LICENSE_STATE_FILE" python3 "$LICENSE_HELPER" \
+                        ack-event --event-id "$event_id" --result "AUTH_IGNORED_DURING_PURGE" >/dev/null || return 0
+                    license_status || true
+                    log "INFO" "Authenticated playlist observed during irreversible license pending; waiting for post-purge validation"
+                    return 0
+                    ;;
+                LICENSE_EXPIRED_PURGED|LICENSE_DENIED_PURGED)
+                    SIGIL_LICENSE_STATE_FILE="$LICENSE_STATE_FILE" python3 "$LICENSE_HELPER" reauthorizing >/dev/null || return 0
+                    document=$(SIGIL_LICENSE_STATE_FILE="$LICENSE_STATE_FILE" python3 "$LICENSE_HELPER" authorize --post-purge --event-id "$event_id" 2>/dev/null) || return 0
+                    ;;
+                *)
+                    document=$(SIGIL_LICENSE_STATE_FILE="$LICENSE_STATE_FILE" python3 "$LICENSE_HELPER" authorize --event-id "$event_id" 2>/dev/null) || return 0
+                    ;;
+            esac
+            read_license_document "$document" || return 0
+            log "INFO" "Authenticated playlist validation reset the offline grace counter"
+            ;;
+        AUTHORITATIVE_DENIAL)
+            SIGIL_LICENSE_STATE_FILE="$LICENSE_STATE_FILE" python3 "$LICENSE_HELPER" denied \
+                --reason "${event_code:-SERVER_POLICY_DENIED}" --event-id "$event_id" >/dev/null || true
+            license_status || true
+            log "WARN" "Authoritative playlist denial (${event_code:-unknown}); blocking at track boundary"
+            ;;
+        TRANSIENT_FAILURE)
+            document=$(SIGIL_LICENSE_STATE_FILE="$LICENSE_STATE_FILE" python3 "$LICENSE_HELPER" tick \
+                --transient-failure "${event_code:-SERVER_UNREACHABLE}" --event-id "$event_id" 2>/dev/null || true)
+            read_license_document "$document" || true
+            ;;
+    esac
+}
+
+owned_decoder_is_live() {
+    python3 - "$PLAYBACK_STATE_FILE" <<'PYEOF'
+import json, pathlib, sys
+try:
+    state = json.load(open(sys.argv[1], encoding='utf-8'))
+    process = state.get('process') if state.get('playing') is True else None
+    pid = process.get('pid') if isinstance(process, dict) else None
+    ticks = process.get('start_ticks') if isinstance(process, dict) else None
+    if not isinstance(pid, int) or not isinstance(ticks, int): raise SystemExit(1)
+    actual = int(pathlib.Path(f'/proc/{pid}/stat').read_text(encoding='ascii').split()[21])
+    raise SystemExit(0 if actual == ticks else 1)
+except Exception:
+    raise SystemExit(1)
+PYEOF
+}
+
+process_license_purge() {
+    case "$LICENSE_PHASE" in
+        LICENSE_EXPIRY_PENDING_TRACK_END|LICENSE_DENIAL_PENDING_TRACK_END) ;;
+        *) return 0 ;;
+    esac
+    if owned_decoder_is_live; then
+        return 0
+    fi
+    SIGIL_LICENSE_STATE_FILE="$LICENSE_STATE_FILE" python3 "$LICENSE_HELPER" request-purge >/dev/null 2>&1 || return 0
+    if SIGIL_LICENSE_STATE_FILE="$LICENSE_STATE_FILE" \
+        SIGIL_PLAYBACK_STATE_FILE="$PLAYBACK_STATE_FILE" "$LICENSE_PURGE"; then
+        SIGIL_LICENSE_STATE_FILE="$LICENSE_STATE_FILE" python3 "$LICENSE_HELPER" purge-complete >/dev/null || return 0
+        license_status || true
+        log "WARN" "Licensed media purged after natural track boundary"
+    fi
 }
 
 # ── Sink check ──────────────────────────────────────────────────────────────
@@ -499,186 +643,16 @@ read_playlist_version() {
     ACTIVE_PLAYLIST_VERSION="${hash:-}"
 }
 
-# ── Runtime-based cache expiration ───────────────────────────────────────────
-
-load_runtime_state() {
-    if [ ! -f "$CACHE_META_FILE" ]; then
-        log "DEBUG" "Runtime: no cache_meta.json — using defaults"
-        return
-    fi
-    local rs rl rr lru eh
-    rs=$(read_json_field "$CACHE_META_FILE" "runtime.runtime_seconds")
-    rl=$(read_json_field "$CACHE_META_FILE" "runtime.runtime_limit_seconds")
-    rr=$(read_json_field "$CACHE_META_FILE" "runtime.runtime_remaining_seconds")
-    lru=$(read_json_field "$CACHE_META_FILE" "runtime.last_runtime_check_uptime")
-    eh=$(read_json_field "$CACHE_META_FILE" "runtime.expired_handled_uptime")
-    RUNTIME_SECONDS="${rs:-$RUNTIME_SECONDS}"
-    RUNTIME_LIMIT_SECONDS="${rl:-$RUNTIME_LIMIT_SECONDS}"
-    RUNTIME_REMAINING_SECONDS="${rr:-$RUNTIME_REMAINING_SECONDS}"
-    LAST_RUNTIME_CHECK_UPTIME="${lru:-$LAST_RUNTIME_CHECK_UPTIME}"
-    if [ "${eh:-0}" -gt 0 ] && [ "$RUNTIME_SECONDS" -ge "$RUNTIME_LIMIT_SECONDS" ]; then
-        RUNTIME_EXPIRED_HANDLED=true
-    fi
-    log "DEBUG" "Runtime state: ${RUNTIME_SECONDS}/${RUNTIME_LIMIT_SECONDS}s used, ${RUNTIME_REMAINING_SECONDS}s remaining"
-}
-
-_write_runtime_state() {
-    if $DRY_RUN; then
-        return
-    fi
-    exec 201>"$CACHE_OP_LOCK"
-    if ! flock -w 30 201; then
-        log "ERROR" "Could not acquire cache-operation lock for runtime write — another op in progress"
-        return 1
-    fi
-    python3 - "$CACHE_META_FILE" \
-        "$RUNTIME_SECONDS" "$RUNTIME_LIMIT_SECONDS" \
-        "$RUNTIME_REMAINING_SECONDS" "$LAST_RUNTIME_CHECK_UPTIME" <<'PYEOF'
-import json, os, sys, tempfile
-
-file_path  = sys.argv[1]
-rt_sec     = int(sys.argv[2])
-rt_limit   = int(sys.argv[3])
-rt_rem     = int(sys.argv[4])
-last_up    = int(float(sys.argv[5]))
-
-with open(file_path) as f:
-    data = json.load(f)
-
-data.setdefault("runtime", {})
-data["runtime"]["runtime_seconds"]          = rt_sec
-data["runtime"]["runtime_limit_seconds"]    = rt_limit
-data["runtime"]["runtime_remaining_seconds"] = rt_rem
-data["runtime"]["last_runtime_check_uptime"] = last_up
-
-dir_name = os.path.dirname(file_path) or '.'
-fd, tmp_path = tempfile.mkstemp(dir=dir_name, suffix='.tmp')
-with os.fdopen(fd, 'w') as f:
-    json.dump(data, f, indent=2, ensure_ascii=False)
-    f.write('\n')
-    f.flush()
-    os.fsync(f.fileno())
-os.replace(tmp_path, file_path)
-PYEOF
-    sigil_cache_meta_fix_permissions "$CACHE_META_FILE"
-    local _rc=$?
-    flock -u 201
-    return $_rc
-}
-
-update_runtime_counter() {
-    local current_uptime
-    current_uptime=$(awk '{printf "%d", $1}' /proc/uptime 2>/dev/null || echo 0)
-
-    # Reload persisted state — radio-fetcher may have reset it externally
-    local persisted_rs persisted_rl persisted_rr persisted_lru
-    persisted_rs=$(read_json_field "$CACHE_META_FILE" "runtime.runtime_seconds")
-    persisted_rl=$(read_json_field "$CACHE_META_FILE" "runtime.runtime_limit_seconds")
-    persisted_rr=$(read_json_field "$CACHE_META_FILE" "runtime.runtime_remaining_seconds")
-    persisted_lru=$(read_json_field "$CACHE_META_FILE" "runtime.last_runtime_check_uptime")
-    RUNTIME_SECONDS="${persisted_rs:-$RUNTIME_SECONDS}"
-    RUNTIME_LIMIT_SECONDS="${persisted_rl:-$RUNTIME_LIMIT_SECONDS}"
-    RUNTIME_REMAINING_SECONDS="${persisted_rr:-$RUNTIME_REMAINING_SECONDS}"
-    LAST_RUNTIME_CHECK_UPTIME="${persisted_lru:-$LAST_RUNTIME_CHECK_UPTIME}"
-
-    if [ "$LAST_RUNTIME_CHECK_UPTIME" -eq 0 ]; then
-        LAST_RUNTIME_CHECK_UPTIME="$current_uptime"
-        RUNTIME_REMAINING_SECONDS=$((RUNTIME_LIMIT_SECONDS - RUNTIME_SECONDS))
-        if [ "$RUNTIME_REMAINING_SECONDS" -lt 0 ]; then RUNTIME_REMAINING_SECONDS=0; fi
-        _write_runtime_state
-        return
-    fi
-
-    local delta=$((current_uptime - LAST_RUNTIME_CHECK_UPTIME))
-    if [ "$delta" -lt 0 ]; then
-        delta=0
-        log "DEBUG" "Runtime: reboot (uptime ${current_uptime} < ${LAST_RUNTIME_CHECK_UPTIME})"
-    fi
-
-    if [ "$delta" -gt 0 ]; then
-        RUNTIME_SECONDS=$((RUNTIME_SECONDS + delta))
-        RUNTIME_REMAINING_SECONDS=$((RUNTIME_LIMIT_SECONDS - RUNTIME_SECONDS))
-        if [ "$RUNTIME_REMAINING_SECONDS" -lt 0 ]; then RUNTIME_REMAINING_SECONDS=0; fi
-        log "DEBUG" "Runtime: +${delta}s → ${RUNTIME_SECONDS}/${RUNTIME_LIMIT_SECONDS}s"
-    fi
-
-    LAST_RUNTIME_CHECK_UPTIME="$current_uptime"
-    _write_runtime_state
-
-    # Re-enable expiration handling if counter was externally reset below limit
-    if [ "$RUNTIME_SECONDS" -lt "$RUNTIME_LIMIT_SECONDS" ] && $RUNTIME_EXPIRED_HANDLED; then
-        log "INFO" "Runtime counter externally reset — cache refresh succeeded, expiration handled"
-        RUNTIME_EXPIRED_HANDLED=false
-        exec 201>"$CACHE_OP_LOCK"
-        if flock -w 30 201; then
-            python3 - "$CACHE_META_FILE" <<'PYEOF'
-import json, os, sys, tempfile
-fp = sys.argv[1]
-with open(fp) as f:
-    data = json.load(f)
-data.setdefault("runtime", {})
-data["runtime"].pop("expired_handled_uptime", None)
-dirn = os.path.dirname(fp) or "."
-fd, tmp = tempfile.mkstemp(dir=dirn, suffix=".tmp")
-with os.fdopen(fd, "w") as f:
-    json.dump(data, f, indent=2, ensure_ascii=False)
-    f.write("\n")
-    f.flush()
-    os.fsync(f.fileno())
-os.replace(tmp, fp)
-PYEOF
-            sigil_cache_meta_fix_permissions "$CACHE_META_FILE"
-            flock -u 201
-        else
-            log "WARN" "Could not acquire lock for expired_handled_uptime removal — will retry next cycle"
-        fi
-    fi
-}
-
-CACHE_OP_LOCK="/run/sigil/cache-operation.lock"
-
-handle_cache_expiration() {
-    if $RUNTIME_EXPIRED_HANDLED; then
-        return
-    fi
-    if [ "$RUNTIME_SECONDS" -lt "$RUNTIME_LIMIT_SECONDS" ]; then
-        return
-    fi
-
-    # Acquire shared cache-operation lock for the metadata update only
-    exec 201>"$CACHE_OP_LOCK"
-    if ! flock -w 30 201; then
-        log "ERROR" "Could not acquire cache-operation lock for expiration — another cache op in progress"
-        return
-    fi
-
-    RUNTIME_EXPIRED_HANDLED=true
-    python3 - "$CACHE_META_FILE" "$LAST_RUNTIME_CHECK_UPTIME" <<'PYEOF'
-import json, os, sys, tempfile
-fp = sys.argv[1]
-uptime = int(float(sys.argv[2]))
-with open(fp) as f:
-    data = json.load(f)
-data.setdefault("runtime", {})
-data["runtime"]["expired_handled_uptime"] = uptime
-dirn = os.path.dirname(fp) or "."
-fd, tmp = tempfile.mkstemp(dir=dirn, suffix=".tmp")
-with os.fdopen(fd, "w") as f:
-    json.dump(data, f, indent=2, ensure_ascii=False)
-    f.write("\n")
-    f.flush()
-    os.fsync(f.fileno())
-os.replace(tmp, fp)
-PYEOF
-    sigil_cache_meta_fix_permissions "$CACHE_META_FILE"
-    flock -u 201
-    log "WARN" "Cache runtime expired (${RUNTIME_SECONDS}s); retaining validated generation until radio-fetcher promotes a replacement"
-}
-
 evaluate_hybrid_state() {
     CURRENT_DESIRED="LOCAL"
     local new_mode="" new_reason="" active_hash=""
     active_hash=$(read_json_field "$PLAYLIST_ACTIVE_FILE" "version_hash" 2>/dev/null || true)
+
+    if [ "$LICENSE_PHASE" != "LICENSE_AUTHORIZED" ] && [ "$LICENSE_PHASE" != "LICENSE_GRACE_OFFLINE" ]; then
+        LAST_ERROR="license_blocked:${LICENSE_BLOCK_REASON:-$LICENSE_PHASE}"
+        apply_mode "BLOCKED_LICENSE" "$CURRENT_DESIRED" "license_blocked"
+        return
+    fi
 
     if $LEGACY_ACTIVE; then
         LAST_ERROR="Legacy radio-stream.sh is active — cannot take sink"
@@ -705,14 +679,14 @@ evaluate_hybrid_state() {
             CURRENT_DESIRED="RADIO"
             new_mode="RADIO"
             new_reason="playlist_updated"
-        elif [ "$CACHE_STATUS" = "COMPLETE" ] || [ "$CACHE_STATUS" = "EXPIRED" ]; then
+        elif [ "$CACHE_STATUS" = "COMPLETE" ] || [ "$CACHE_STATUS" = "STALE" ]; then
             new_mode="LOCAL"
             new_reason="server_unreachable"
         else
             new_mode="BLOCKED_NO_CACHE"
             new_reason="cache_empty"
         fi
-    elif [ "$CACHE_STATUS" = "COMPLETE" ] || [ "$CACHE_STATUS" = "EXPIRED" ]; then
+    elif [ "$CACHE_STATUS" = "COMPLETE" ] || [ "$CACHE_STATUS" = "STALE" ]; then
         new_mode="LOCAL"
         new_reason="cache_ready"
     elif $INTERNET_AVAILABLE && [ -f "/var/lib/sigil/playlist.staging.json" ]; then
@@ -728,201 +702,10 @@ evaluate_hybrid_state() {
     apply_mode "$new_mode" "$CURRENT_DESIRED" "$new_reason"
 }
 
-# ── Recovery interval ───────────────────────────────────────────────────────
-
-check_recovery_eligible() {
-    if [ "$AUTO_RETURN_TO_RADIO" != "true" ]; then
-        RECOVERY_ELIGIBLE=false
-        return
-    fi
-    if [ -z "$INTERNET_RESTORED_AT" ]; then
-        RECOVERY_ELIGIBLE=false
-        return
-    fi
-
-    local restored_epoch now_epoch interval_sec
-    restored_epoch=$(date -d "$INTERNET_RESTORED_AT" +%s 2>/dev/null || echo "0")
-    now_epoch=$(date +%s)
-    interval_sec=$(( RECOVERY_INTERVAL_MINUTES * 60 ))
-
-    if [ "$restored_epoch" -gt 0 ] && [ $(( now_epoch - restored_epoch )) -ge "$interval_sec" ]; then
-        if ! $RECOVERY_ELIGIBLE; then
-            log "INFO" "Recovery interval (${RECOVERY_INTERVAL_MINUTES}min) elapsed — eligible for RADIO return"
-        fi
-        RECOVERY_ELIGIBLE=true
-    else
-        local remaining=0
-        if [ "$restored_epoch" -gt 0 ]; then
-            remaining=$(( interval_sec - (now_epoch - restored_epoch) ))
-        fi
-        if [ $remaining -gt 0 ] && [ $(( remaining % 60 )) -eq 0 ]; then
-            log "DEBUG" "Recovery in ~${remaining}s — not yet eligible"
-        fi
-        RECOVERY_ELIGIBLE=false
-    fi
-}
-
 # ── State evaluation ────────────────────────────────────────────────────────
 
 evaluate_state() {
     evaluate_hybrid_state
-    return
-
-    # Legacy radio/local policy retained below for rollback reference. The
-    # controlled hybrid policy above is the production state machine.
-    # Determine desired mode from configuration
-    if [ "$PLAYBACK_MODE" = "local-first" ]; then
-        CURRENT_DESIRED="LOCAL"
-    else
-        CURRENT_DESIRED="RADIO"
-    fi
-
-    local new_mode=""
-    local new_reason=""
-
-    # --- Blocked conditions (highest priority) ---
-    if $LEGACY_ACTIVE; then
-        LAST_ERROR="Legacy radio-stream.sh is active — cannot take sink"
-        new_mode="BLOCKED_LEGACY"
-        new_reason="legacy_active"
-        log "DEBUG" "Eval: BLOCKED_LEGACY"
-        apply_mode "$new_mode" "$CURRENT_DESIRED" "$new_reason"
-        return
-    fi
-
-    if [ "$CACHE_STATUS" = "INTENTIONAL_EMPTY" ]; then
-        LAST_ERROR=""
-        new_mode="IDLE"
-        new_reason="server_stop_playback"
-        log "INFO" "Eval: IDLE (server requested intentional silence)"
-        apply_mode "$new_mode" "$CURRENT_DESIRED" "$new_reason"
-        return
-    fi
-
-    if ! $SINK_AVAILABLE; then
-        LAST_ERROR="no_audio_output: no connected A2DP or writable PCM5102A output"
-        new_mode="BLOCKED_NO_SINK"
-        new_reason="no_audio_output"
-        log "DEBUG" "Eval: BLOCKED_NO_SINK"
-        apply_mode "$new_mode" "$CURRENT_DESIRED" "$new_reason"
-        return
-    fi
-
-    # --- Desired mode: RADIO ---
-    if [ "$CURRENT_DESIRED" = "RADIO" ]; then
-        if ! $INTERNET_AVAILABLE; then
-            # SIGIL server is unavailable — try LOCAL if cache is available.
-            if [ "$CACHE_STATUS" = "COMPLETE" ] || [ "$CACHE_STATUS" = "PARTIAL" ] || [ "$CACHE_STATUS" = "EXPIRED" ]; then
-                # Only transition if not already LOCAL
-                if [ "$CURRENT_MODE" = "RADIO" ] || [ "$CURRENT_MODE" = "TRANSITION_TO_RADIO" ]; then
-                    new_mode="TRANSITION_TO_LOCAL"
-                    new_reason="server_unreachable"
-                    log "INFO" "Eval: RADIO → TRANSITION_TO_LOCAL (server unavailable, cache: ${CACHE_STATUS})"
-                elif [ "$CURRENT_MODE" = "TRANSITION_TO_LOCAL" ]; then
-                    # Complete the transition
-                    log "INFO" "Eval: TRANSITION_TO_LOCAL → LOCAL"
-                    new_mode="LOCAL"
-                    new_reason="server_unreachable"
-                else
-                    new_mode="LOCAL"
-                    new_reason="network_lost"
-                    log "INFO" "Eval: staying LOCAL (server unavailable, cache: ${CACHE_STATUS})"
-                fi
-            else
-                # No cache and no server access — blocked.
-                if [ "$CURRENT_MODE" != "BLOCKED_NO_CACHE" ]; then
-                    log "WARN" "Eval: BLOCKED_NO_CACHE (server unavailable, cache: ${CACHE_STATUS})"
-                fi
-                new_mode="BLOCKED_NO_CACHE"
-                new_reason="cache_empty"
-            fi
-        else
-            # SIGIL server is available.
-            if [ "$CURRENT_MODE" = "LOCAL" ] || [ "$CURRENT_MODE" = "BLOCKED_NO_CACHE" ] || \
-               [ "$CURRENT_MODE" = "TRANSITION_TO_LOCAL" ]; then
-                # Currently in LOCAL or blocked — can we return to RADIO?
-                if [ "$AUTO_RETURN_TO_RADIO" = "true" ] && [ "$RECOVERY_INTERVAL_MINUTES" -gt 0 ]; then
-                    if ! $INTERNET_RESTORE_CHECKED; then
-                        # First check — start recovery timer
-                        if [ -z "$INTERNET_RESTORED_AT" ]; then
-                            INTERNET_RESTORED_AT=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
-                        fi
-                        INTERNET_RESTORE_CHECKED=true
-                        # Don't transition yet — wait for recovery interval
-                        new_mode="$CURRENT_MODE"
-                        new_reason="internet_restored"
-                        log "INFO" "Eval: internet restored, waiting ${RECOVERY_INTERVAL_MINUTES}min recovery timer"
-                    else
-                        # Check if recovery timer elapsed
-                        check_recovery_eligible
-                        if $RECOVERY_ELIGIBLE; then
-                            new_mode="TRANSITION_TO_RADIO"
-                            new_reason="recovery_timer_expired"
-                            log "INFO" "Eval: recovery timer elapsed → TRANSITION_TO_RADIO"
-                        else
-                            new_mode="$CURRENT_MODE"
-                            new_reason="internet_restored"
-                            log "DEBUG" "Eval: still in recovery window — staying ${CURRENT_MODE}"
-                        fi
-                    fi
-                else
-                    # Auto-return disabled or no recovery interval — immediate return
-                    new_mode="TRANSITION_TO_RADIO"
-                    new_reason="internet_restored"
-                    log "INFO" "Eval: internet restored → TRANSITION_TO_RADIO"
-                fi
-            elif [ "$CURRENT_MODE" = "TRANSITION_TO_RADIO" ]; then
-                # Complete the transition
-                log "INFO" "Eval: TRANSITION_TO_RADIO → RADIO"
-                new_mode="RADIO"
-                new_reason="server_available"
-            else
-                new_mode="RADIO"
-                new_reason="server_available"
-                log "DEBUG" "Eval: RADIO (internet OK)"
-            fi
-            # Reset internet restored tracking once we're back in RADIO
-            if [ "$new_mode" = "RADIO" ]; then
-                INTERNET_RESTORED_AT=""
-                INTERNET_RESTORE_CHECKED=false
-            fi
-        fi
-    fi
-
-    # --- Desired mode: LOCAL ---
-    if [ "$CURRENT_DESIRED" = "LOCAL" ]; then
-        if [ "$CACHE_STATUS" = "COMPLETE" ] || [ "$CACHE_STATUS" = "PARTIAL" ] || [ "$CACHE_STATUS" = "EXPIRED" ]; then
-            if [ "$CURRENT_MODE" = "RADIO" ] || [ "$CURRENT_MODE" = "TRANSITION_TO_RADIO" ]; then
-                new_mode="TRANSITION_TO_LOCAL"
-                new_reason="manual_switch"
-                log "INFO" "Eval: RADIO → TRANSITION_TO_LOCAL (local-first mode)"
-            elif [ "$CURRENT_MODE" = "TRANSITION_TO_LOCAL" ]; then
-                new_mode="LOCAL"
-                new_reason="manual_switch"
-                log "INFO" "Eval: TRANSITION_TO_LOCAL → LOCAL"
-            else
-                new_mode="LOCAL"
-                new_reason="manual_switch"
-                log "DEBUG" "Eval: staying LOCAL (local-first mode)"
-            fi
-        else
-            if [ "$CURRENT_MODE" != "BLOCKED_NO_CACHE" ]; then
-                log "WARN" "Eval: BLOCKED_NO_CACHE (local-first but cache: ${CACHE_STATUS})"
-            fi
-            new_mode="BLOCKED_NO_CACHE"
-            new_reason="cache_empty"
-        fi
-    fi
-
-    # --- Fallback ---
-    if [ -z "$new_mode" ]; then
-        log "WARN" "Eval: no transition determined — defaulting to ERROR"
-        LAST_ERROR="No valid state transition determined"
-        new_mode="ERROR"
-        new_reason="error"
-    fi
-
-    apply_mode "$new_mode" "$CURRENT_DESIRED" "$new_reason"
 }
 
 # ── Apply mode change ───────────────────────────────────────────────────────
@@ -1008,18 +791,21 @@ main() {
     # Load previous mode state
     load_audio_mode
 
-    # Load runtime-based cache expiration state
-    load_runtime_state
+    # The persistent entitlement state is initialized before any mode can
+    # select cache or streaming media.  A missing/invalid state fails closed.
+    license_initialize || die "Cannot initialize license state"
 
     # Quick initial assessment
     check_legacy
     check_sink
     check_internet
-    update_runtime_counter
-    handle_cache_expiration
+    consume_authorization_event
+    license_tick
     read_cache_status
     read_media_sync_status
     read_playlist_version
+
+    process_license_purge
 
     # Initial evaluation
     evaluate_state
@@ -1040,11 +826,12 @@ main() {
         check_legacy
         check_sink
         check_internet
-        update_runtime_counter
-        handle_cache_expiration
+        consume_authorization_event
+        license_tick
         read_cache_status
         read_media_sync_status
         read_playlist_version
+        process_license_purge
         evaluate_state
 
         if $ONCE; then

@@ -126,12 +126,35 @@ _audio_route_a2dp_profile() {
     '
 }
 
-audio_route_activate_bluetooth() {
+audio_route_bluetooth_ready() {
     local mac="${1:-}"
     _audio_route_mac_is_valid "$mac" || return 1
     _audio_route_connected_trusted "$mac" || return 1
 
-    local normalized card card_block profile active_profile sink
+    local normalized card card_block active_profile sink
+    normalized=$(printf '%s' "$mac" | tr '[:lower:]:' '[:upper:]_')
+    card="bluez_card.${normalized}"
+    card_block=$(_audio_route_card_block "$card")
+    [ -n "$card_block" ] || return 1
+    active_profile=$(printf '%s\n' "$card_block" | awk -F': ' '/^[[:space:]]*Active Profile:/ {print $2; exit}')
+    [[ "$active_profile" == *a2dp* ]] || return 1
+
+    sink=$(_pactl list sinks short 2>/dev/null \
+        | awk -v marker="bluez_sink.${normalized}" '$2 ~ marker && tolower($2) ~ /a2dp/ {print $2; exit}')
+    [ -n "$sink" ] || return 1
+    _audio_route_sink_available "$sink" || return 1
+    AUDIO_ROUTE_TYPE="bluetooth"
+    AUDIO_ROUTE_SINK="$sink"
+    AUDIO_ROUTE_DEVICE="$mac"
+    AUDIO_ROUTE_REASON="bluetooth_connected_a2dp"
+    return 0
+}
+
+audio_route_activate_bluetooth() {
+    local mac="${1:-}"
+    _audio_route_mac_is_valid "$mac" || return 1
+    _audio_route_connected_trusted "$mac" || return 1
+    local normalized card card_block profile active_profile
     normalized=$(printf '%s' "$mac" | tr '[:lower:]:' '[:upper:]_')
     card="bluez_card.${normalized}"
     card_block=$(_audio_route_card_block "$card")
@@ -142,18 +165,9 @@ audio_route_activate_bluetooth() {
     if [[ "$active_profile" != *a2dp* ]]; then
         _pactl set-card-profile "$card" "$profile" >/dev/null 2>&1 || return 1
     fi
-
-    sink=$(_pactl list sinks short 2>/dev/null \
-        | awk -v marker="bluez_sink.${normalized}" '$2 ~ marker && tolower($2) ~ /a2dp/ {print $2; exit}')
-    [ -n "$sink" ] || return 1
-    _audio_route_sink_available "$sink" || return 1
-    _pactl set-default-sink "$sink" >/dev/null 2>&1 || return 1
-    _audio_route_silent_probe "$sink" || return 1
-
-    AUDIO_ROUTE_TYPE="bluetooth"
-    AUDIO_ROUTE_SINK="$sink"
-    AUDIO_ROUTE_DEVICE="$mac"
-    AUDIO_ROUTE_REASON="bluetooth_connected_a2dp"
+    audio_route_bluetooth_ready "$mac" || return 1
+    _pactl set-default-sink "$AUDIO_ROUTE_SINK" >/dev/null 2>&1 || return 1
+    _audio_route_silent_probe "$AUDIO_ROUTE_SINK" || return 1
     return 0
 }
 

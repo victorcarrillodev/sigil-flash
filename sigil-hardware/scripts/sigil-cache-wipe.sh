@@ -19,6 +19,7 @@ STAGING_DIR="${MUSIC_DIR}/staging/tracks"
 ARCHIVE_DIR="${MUSIC_DIR}/archive"
 CACHE_META="${SIGIL_CACHE_META_FILE:-/var/lib/sigil/cache_meta.json}"
 CACHE_OP_LOCK="${SIGIL_CACHE_OP_LOCK:-/run/sigil/cache-operation.lock}"
+PLAYBACK_STATE_FILE="${SIGIL_PLAYBACK_STATE_FILE:-/var/lib/sigil/playback_state.json}"
 
 DRY_RUN=false
 
@@ -74,13 +75,33 @@ stop_playback() {
             systemctl stop audio-player.service 2>/dev/null || true
         fi
     fi
-    if pgrep -x mpg123 &>/dev/null; then
-        log "INFO" "Killing mpg123 processes"
-        if $DRY_RUN; then
-            log "DRY" "Would pkill -9 mpg123"
-        else
-            pkill -9 mpg123 2>/dev/null || true
-        fi
+    # Never kill a global decoder name: a machine may contain an unrelated
+    # mpg123 process.  Only a PID/start-ticks lease written by SIGIL's player
+    # is eligible for cleanup after its unit has been stopped.
+    local owned_pid=""
+    owned_pid=$(python3 - "$PLAYBACK_STATE_FILE" <<'PYEOF' 2>/dev/null || true
+import json, pathlib, sys
+try:
+    doc = json.load(open(sys.argv[1], encoding='utf-8'))
+    process = doc.get('process') if doc.get('playing') else None
+    pid = process.get('pid') if isinstance(process, dict) else None
+    ticks = process.get('start_ticks') if isinstance(process, dict) else None
+    if not isinstance(pid, int) or not isinstance(ticks, int): raise ValueError
+    actual = int(pathlib.Path(f'/proc/{pid}/stat').read_text(encoding='ascii').split()[21])
+    if actual == ticks: print(pid)
+except Exception:
+    pass
+PYEOF
+)
+    [ -n "$owned_pid" ] || return 0
+    if $DRY_RUN; then
+        log "DRY" "Would terminate SIGIL-owned decoder pid=${owned_pid}"
+        return 0
+    fi
+    kill -TERM "$owned_pid" 2>/dev/null || true
+    sleep 1
+    if kill -0 "$owned_pid" 2>/dev/null; then
+        kill -KILL "$owned_pid" 2>/dev/null || true
     fi
 }
 
@@ -120,8 +141,7 @@ if not os.path.exists(fp):
         "cache_policy": {
             "max_ttl_days": 7,
             "auto_renew": True,
-            "delete_on_expire": True,
-            "preserve_on_server_unavailable": False,
+            "preserve_on_server_unavailable": True,
         },
         "statistics": {
             "total_sync_operations": 0,
@@ -134,12 +154,6 @@ if not os.path.exists(fp):
         },
         "expiration_warning_sent": False,
         "expiration_warning_at": None,
-        "runtime": {
-            "runtime_seconds": 0,
-            "runtime_limit_seconds": 604800,
-            "runtime_remaining_seconds": 604800,
-            "last_runtime_check_uptime": 0,
-        },
     }
 doc["active_cache"] = {
     "playlist_id": None,

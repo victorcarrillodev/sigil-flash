@@ -33,6 +33,11 @@ PLAYLIST_STAGING_FILE="${SIGIL_STATE_DIR}/playlist.staging.json"
 CACHE_META_FILE="${SIGIL_STATE_DIR}/cache_meta.json"
 BT_STATE_FILE="${SIGIL_STATE_DIR}/bluetooth_state.json"
 MEDIA_SYNC_FILE="${SIGIL_STATE_DIR}/media_sync_state.json"
+LICENSE_STATE_FILE="${SIGIL_STATE_DIR}/license_state.json"
+LICENSE_HELPER="${SIGIL_LICENSE_HELPER:-/usr/local/bin/sigil-license-state.py}"
+if [ ! -f "$LICENSE_HELPER" ]; then
+    LICENSE_HELPER="$(dirname "${BASH_SOURCE[0]}")/sigil-license-state.py"
+fi
 FIRSTBOOT_DONE_FILE="${SIGIL_STATE_DIR}/firstboot_completed.json"
 
 LOGROTATE_FILE="/etc/logrotate.d/sigil"
@@ -585,7 +590,6 @@ doc = {
     "cache_policy": {
         "max_ttl_days": 7,
         "auto_renew": True,
-        "delete_on_expire": False,
         "preserve_on_server_unavailable": True,
     },
     "active_cache": {
@@ -619,14 +623,7 @@ doc = {
     },
     "expiration_warning_sent": False,
     "expiration_warning_at": None,
-    "runtime": {
-        "runtime_seconds": 0,
-        "runtime_limit_seconds": 604800,
-        "runtime_remaining_seconds": 604800,
-        "last_runtime_check_uptime": 0
-    },
 }
-
 dir_name = os.path.dirname(file_path) or '.'
 fd, tmp_path = tempfile.mkstemp(dir=dir_name, suffix='.tmp')
 with os.fdopen(fd, 'w') as f:
@@ -638,6 +635,46 @@ os.replace(tmp_path, file_path)
 PYEOF
     chown sigil:sigil "$CACHE_META_FILE"
     sigil_cache_meta_fix_permissions "$CACHE_META_FILE"
+}
+
+migrate_cache_metadata_schema() {
+    [ -f "$CACHE_META_FILE" ] || return 0
+    $DRY_RUN && return 0
+    python3 - "$CACHE_META_FILE" <<'PYEOF'
+import json, os, sys, tempfile
+
+path = sys.argv[1]
+try:
+    with open(path, encoding='utf-8') as handle:
+        document = json.load(handle)
+except Exception:
+    raise SystemExit(0)
+if not isinstance(document, dict):
+    raise SystemExit(0)
+changed = document.pop('runtime', None) is not None
+policy = document.get('cache_policy')
+if isinstance(policy, dict) and 'delete_on_expire' in policy:
+    policy.pop('delete_on_expire', None)
+    changed = True
+if not changed:
+    raise SystemExit(0)
+directory = os.path.dirname(path) or '.'
+fd, temporary = tempfile.mkstemp(dir=directory, prefix='.cache-meta-migrate.', suffix='.tmp')
+try:
+    with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+        json.dump(document, handle, ensure_ascii=False, indent=2)
+        handle.write('\n')
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, path)
+finally:
+    try:
+        os.unlink(temporary)
+    except FileNotFoundError:
+        pass
+PYEOF
+    sigil_cache_meta_fix_permissions "$CACHE_META_FILE"
+    log "INFO" "Migrated cache metadata: removed obsolete license clock fields"
 }
 
 create_bluetooth_state_json() {
@@ -722,6 +759,25 @@ os.replace(temporary, path)
 PYEOF
     chown sigil:sigil "$MEDIA_SYNC_FILE"
     chmod 600 "$MEDIA_SYNC_FILE"
+}
+
+create_license_state_json() {
+    if [ -f "$LICENSE_STATE_FILE" ]; then
+        log "INFO" "license_state.json already exists — preserving entitlement state"
+        return 0
+    fi
+    if $DRY_RUN; then
+        log "DRY" "Would create ${LICENSE_STATE_FILE} in fail-closed reauthorization state"
+        return 0
+    fi
+    if [ ! -f "$LICENSE_HELPER" ]; then
+        log "ERROR" "License helper is missing: ${LICENSE_HELPER}"
+        return 1
+    fi
+    SIGIL_LICENSE_STATE_FILE="$LICENSE_STATE_FILE" python3 "$LICENSE_HELPER" init >/dev/null
+    chown sigil:sigil "$LICENSE_STATE_FILE"
+    chmod 600 "$LICENSE_STATE_FILE"
+    log "INFO" "Created fail-closed license_state.json"
 }
 
 # ── Step 3: Device registration ─────────────────────────────────────────────
@@ -966,7 +1022,7 @@ verify_state_perms() {
         return 0
     fi
     local fix_count=0
-    for f in "$AUDIO_MODE_FILE" "$PLAYBACK_STATE_FILE" "$PLAYLIST_ACTIVE_FILE" "$PLAYLIST_STAGING_FILE" "$CACHE_META_FILE" "$BT_STATE_FILE"; do
+    for f in "$AUDIO_MODE_FILE" "$PLAYBACK_STATE_FILE" "$PLAYLIST_ACTIVE_FILE" "$PLAYLIST_STAGING_FILE" "$CACHE_META_FILE" "$BT_STATE_FILE" "$MEDIA_SYNC_FILE" "$LICENSE_STATE_FILE"; do
         if [ -f "$f" ]; then
             local owner
             owner=$(stat -c '%U:%G' "$f" 2>/dev/null || echo "")
@@ -1156,7 +1212,7 @@ print(f\"  hostname:     {d.get('hostname', 'unknown')}\")
     else
         echo "Firstboot: NOT COMPLETED"
     fi
-    for f in "$DEVICE_CONF" "$REGISTRATION_FILE" "$AUDIO_MODE_FILE" "$PLAYBACK_STATE_FILE" "$PLAYLIST_ACTIVE_FILE" "$PLAYLIST_STAGING_FILE" "$CACHE_META_FILE" "$BT_STATE_FILE" "$LOGROTATE_FILE"; do
+    for f in "$DEVICE_CONF" "$REGISTRATION_FILE" "$AUDIO_MODE_FILE" "$PLAYBACK_STATE_FILE" "$PLAYLIST_ACTIVE_FILE" "$PLAYLIST_STAGING_FILE" "$CACHE_META_FILE" "$BT_STATE_FILE" "$MEDIA_SYNC_FILE" "$LICENSE_STATE_FILE" "$LOGROTATE_FILE"; do
         if [ -f "$f" ]; then
             echo "  EXISTS: $f"
         else
@@ -1177,8 +1233,10 @@ create_playback_state_json
 create_playlist_active_json
 create_playlist_staging_json
 create_cache_meta_json
+migrate_cache_metadata_schema
 create_bluetooth_state_json
 create_media_sync_state_json
+create_license_state_json
 
 # Step 3: Logrotate
 create_logrotate
@@ -1215,6 +1273,7 @@ init_curl_auth
 if ! register_device; then
     cleanup_curl_auth
     log "WARN" "Device registration remains pending — local services remain available"
+    log "WARN" "firstboot completion marker was not written because registration did not succeed"
     return 1
 fi
 cleanup_curl_auth

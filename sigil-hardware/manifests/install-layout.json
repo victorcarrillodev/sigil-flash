@@ -38,7 +38,6 @@
     {
       "sources": [
         "scripts/bt-connect.sh",
-        "scripts/radio-stream.sh",
         "scripts/set-a2dp.sh",
         "scripts/sigil-leds.sh",
         "scripts/sigil-wifi-control.py",
@@ -51,8 +50,10 @@
         "scripts/sigil-healthcheck.sh",
         "scripts/sigil-audio-route.sh",
         "scripts/sigil-audio-capability.sh",
-    "scripts/sigil-cache-meta-perms.sh",
-    "scripts/sigil-cache-wipe.sh",
+        "scripts/sigil-cache-meta-perms.sh",
+        "scripts/sigil-license-state.py",
+        "scripts/sigil-license-purge.sh",
+        "scripts/sigil-cache-wipe.sh",
     "scripts/sigil-logout-fetch-operation.sh",
     "scripts/sigil-pulseaudio-supervisor.sh",
     "scripts/ssh-monitor.sh",

@@ -17,8 +17,7 @@
     ],
     "disable": [
       "hostapd",
-      "dnsmasq",
-      "radio-stream"
+      "dnsmasq"
     ],
     "mask": [],
     "unmask": [
@@ -31,6 +30,6 @@
     "NetworkManager is enabled; dhcpcd should have wlan0 in denyinterfaces",
     "bluetooth-panel requires /etc/sigil/panel.env (created by firstboot or flasher)",
     "audio-manager, radio-fetcher and audio-player are the production autonomous playback runtime",
-    "radio-stream remains installed but disabled as an explicit rollback path"
+    "legacy radio-stream is not installed because it bypasses the production license gate"
   ]
 }

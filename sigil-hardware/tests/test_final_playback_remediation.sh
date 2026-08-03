@@ -16,6 +16,17 @@ cleanup_test() {
 }
 trap cleanup_test EXIT
 
+# These playback-behaviour assertions cover an already authorized cycle.  The
+# production player is now fail-closed before any server validation.
+export SIGIL_LICENSE_STATE_FILE="${TMP_DIR}/license_state.json"
+export SIGIL_LICENSE_BLOCK_MARKER="${TMP_DIR}/license-blocked"
+SIGIL_LICENSE_STATE_FILE="$SIGIL_LICENSE_STATE_FILE" \
+SIGIL_LICENSE_BLOCK_MARKER="$SIGIL_LICENSE_BLOCK_MARKER" \
+python3 "${ROOT_DIR}/scripts/sigil-license-state.py" init >/dev/null
+SIGIL_LICENSE_STATE_FILE="$SIGIL_LICENSE_STATE_FILE" \
+SIGIL_LICENSE_BLOCK_MARKER="$SIGIL_LICENSE_BLOCK_MARKER" \
+python3 "${ROOT_DIR}/scripts/sigil-license-state.py" authorize --event-id playback-test >/dev/null
+
 # shellcheck source=../scripts/audio-player.sh
 source "$PLAYER_SCRIPT"
 # audio-player.sh deliberately enables errexit for production. The test runner
