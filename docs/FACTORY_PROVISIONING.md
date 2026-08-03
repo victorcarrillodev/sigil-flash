@@ -122,6 +122,38 @@ It logs in, receives a short-lived JWT, requests exactly one enrollment key,
 and injects that key through its private mode-0600 manufacturing configuration.
 The key is not part of the public payload or command arguments.
 
+## Binding a key to one unit
+
+Fill the **MAC del dispositivo (wlan0)** field with the MAC printed on the
+board's label. SIGIL Flash normalizes it and mints the enrollment key bound to
+that address, so the resulting image cannot enrol any other unit. Without it the
+key is unbound: whoever holds the SD card before first boot can enrol arbitrary
+hardware until the key expires.
+
+The field accepts `dc:a6:32:04:05:06` and `DC-A6-32-04-05-06`. Both normalize to
+the lowercase colon form the backend stores. The serial number typed on the same
+screen travels with the request and is checked again at `/api/devices/register`,
+so a unit that reports a different serial is refused.
+
+Minting a bound key also revokes any live unused key for the same unit, and a
+unit that already holds an active credential is rejected with HTTP 409 before
+anything is written to the SD card. Revoke its credential in the panel first if
+you need to reflash it.
+
+Set `ENROLLMENT_REQUIRE_BINDING=true` on the server once every workstation sends
+the MAC. From then on an unbound mint is refused with HTTP 400.
+
+Every mint, bootstrap, and registration — accepted or refused — is recorded in
+the `ProvisioningEvent` table with the caller IP. A bootstrap refused because the
+key was bound to a different MAC is the signal that an image was diverted; the
+device itself only ever sees the generic 401.
+
+## Transport
+
+`server_url` must use `https://`. Otherwise the factory password and the
+enrollment key travel in the clear. For a throwaway lab setup, export
+`SIGIL_ALLOW_INSECURE_TRANSPORT=1` to allow `http://` — never in production.
+
 The same `server_url` is injected into the individualized image as the
 `SERVER_URL` value in `/etc/sigil/audio.conf`. It is therefore the single API
 base for enrollment, registration, playlist, protected media, state, and Wi-Fi
@@ -161,6 +193,8 @@ credentials.
 - The manufacturing workstation has `secret-tool` and an unlocked Keyring.
 - The Keyring lookup succeeds without printing its value.
 - `SIGIL_SERVER_URL` points to the intended HTTPS API.
+- The MAC field is filled from the board's label, so the key is bound to the
+  unit being flashed.
 - The first boot can reach `/api/devices/bootstrap`.
 - Each flash requests a new enrollment key; never reuse a key or permanent
   device token.

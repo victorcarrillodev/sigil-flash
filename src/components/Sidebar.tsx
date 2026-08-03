@@ -26,6 +26,8 @@ interface Props {
   setHostname: (val: string) => void;
   serialNumber: string;
   setSerialNumber: (val: string) => void;
+  deviceId: string;
+  setDeviceId: (val: string) => void;
   sigilModel: string;
   setSigilModel: (val: string) => void;
   sigilModelVersion: string;
@@ -87,6 +89,7 @@ export default function Sidebar({
   logPassword, setLogPassword,
   hostname, setHostname,
   serialNumber, setSerialNumber,
+  deviceId, setDeviceId,
   sigilModel, setSigilModel, sigilModelVersion, setSigilModelVersion,
   wifiSsid, setWifiSsid,
   wifiPassword, setWifiPassword
@@ -239,7 +242,7 @@ export default function Sidebar({
           </div>
           <div style={{ display: "flex", flexDirection: "column" }}>
             <span style={{ fontSize: "14px", fontWeight: 700, color: "var(--text-primary)" }}>Identidad del Dispositivo</span>
-            <span style={{ fontSize: "11px", color: "var(--text-muted)", fontWeight: 500 }}>Hostname y número de serie único</span>
+            <span style={{ fontSize: "11px", color: "var(--text-muted)", fontWeight: 500 }}>Hostname, número de serie y MAC del equipo</span>
           </div>
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px" }}>
@@ -250,6 +253,24 @@ export default function Sidebar({
           <div className="form-group">
             <label className="form-label">NÚMERO DE SERIE</label>
             <input type="text" className="form-input" value={serialNumber} onChange={(e) => setSerialNumber(e.target.value)} placeholder="Introduce el número de serie" />
+          </div>
+          {/* La MAC liga la enrollment key a este equipo: la imagen resultante
+              no sirve para enrolar ningún otro. Viene impresa en la etiqueta de
+              la placa y en la caja. */}
+          <div className="form-group" style={{ gridColumn: "1 / -1" }}>
+            <label className="form-label">MAC DEL DISPOSITIVO (wlan0)</label>
+            <input
+              type="text"
+              className="form-input"
+              value={deviceId}
+              onChange={(e) => setDeviceId(e.target.value)}
+              placeholder="dc:a6:32:00:00:00 · liga la clave a este equipo"
+              spellCheck={false}
+              autoCapitalize="none"
+            />
+            <span style={{ fontSize: "10px", color: "var(--text-muted)", fontWeight: 500 }}>
+              Opcional. Sin MAC, la clave de enrolamiento sirve en cualquier equipo.
+            </span>
           </div>
           <div className="form-group">
             <label className="form-label">MODELO SIGIL</label>

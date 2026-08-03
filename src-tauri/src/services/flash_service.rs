@@ -493,6 +493,15 @@ fn validate_device_config(config: &DeviceConfig) -> AppResult<()> {
             "El número de serie contiene caracteres no permitidos".into(),
         ));
     }
+    // La MAC es opcional mientras la fábrica migra al flujo de keys ligadas,
+    // pero si viene tiene que ser válida: una MAC mal tecleada produce una key
+    // que el equipo nunca podrá consumir, y el fallo aparecería recién en el
+    // primer arranque, con el hardware ya ensamblado.
+    if let Some(device_id) = config.device_id.as_deref() {
+        if !device_id.trim().is_empty() {
+            normalize_device_id(device_id)?;
+        }
+    }
     let rpi_model = config
         .rpi_model
         .as_deref()
@@ -554,7 +563,23 @@ async fn manufacturing_config_with_api_key(
     let mut manufacturing_config = config.clone();
     let _ = api_key_file;
     let server_url = manufacturing_server_url()?;
-    manufacturing_config.api_key = Some(obtain_enrollment_key(&server_url).await?);
+
+    // La MAC se normaliza antes de salir a la red para que el servidor guarde
+    // exactamente la misma forma que el Raspberry enviará en su primer arranque.
+    let device_id = match manufacturing_config.device_id.as_deref() {
+        Some(value) if !value.trim().is_empty() => Some(normalize_device_id(value)?),
+        _ => None,
+    };
+    manufacturing_config.device_id = device_id.clone();
+
+    manufacturing_config.api_key = Some(
+        obtain_enrollment_key(
+            &server_url,
+            device_id.as_deref(),
+            manufacturing_config.serial_number.as_deref(),
+        )
+        .await?,
+    );
     manufacturing_config.server_url = Some(server_url);
     validate_device_config(&manufacturing_config)?;
     Ok(manufacturing_config)
@@ -583,6 +608,17 @@ fn manufacturing_server_url() -> AppResult<String> {
     ))
 }
 
+/// `true` cuando el operario aceptó explícitamente usar HTTP en claro.
+///
+/// Por esta conexión viaja la contraseña de fabricación y la enrollment key que
+/// se graba en la imagen. En texto plano, cualquiera en la red las lee.
+fn insecure_transport_allowed() -> bool {
+    matches!(
+        std::env::var("SIGIL_ALLOW_INSECURE_TRANSPORT").as_deref(),
+        Ok("1") | Ok("true")
+    )
+}
+
 fn normalize_server_url(value: String) -> AppResult<String> {
     let value = value.trim().trim_end_matches('/').to_string();
     if value.starts_with("https://") || value.starts_with("http://") {
@@ -595,11 +631,37 @@ fn normalize_server_url(value: String) -> AppResult<String> {
                 "server_url contiene caracteres no permitidos".into(),
             ));
         }
+        if value.starts_with("http://") && !insecure_transport_allowed() {
+            return Err(AppError::Validation(
+                "server_url debe usar https://: por esa conexión viajan la contraseña de fabricación y la enrollment key. Para un entorno de pruebas, exporta SIGIL_ALLOW_INSECURE_TRANSPORT=1".into(),
+            ));
+        }
         return Ok(value);
     }
     Err(AppError::Validation(
         "server_url debe usar http:// o https://".into(),
     ))
+}
+
+/// Normaliza la MAC que el operario teclea a la forma canónica del servidor:
+/// minúsculas y separada por `:`. Acepta `-` como separador porque es como
+/// Raspberry Pi la imprime en la etiqueta de la placa.
+///
+/// Debe coincidir con `normalizeDeviceId` de sigil-system: si divergieran, una
+/// enrollment key ligada no podría consumirse nunca.
+pub fn normalize_device_id(value: &str) -> AppResult<String> {
+    let normalized = value.trim().to_ascii_lowercase().replace('-', ":");
+    let octets: Vec<&str> = normalized.split(':').collect();
+    let well_formed = octets.len() == 6
+        && octets.iter().all(|octet| {
+            octet.len() == 2 && octet.chars().all(|character| character.is_ascii_hexdigit())
+        });
+    if !well_formed {
+        return Err(AppError::Validation(
+            "La MAC del dispositivo debe tener el formato aa:bb:cc:dd:ee:ff".into(),
+        ));
+    }
+    Ok(normalized)
 }
 
 async fn keyring_password() -> AppResult<String> {
@@ -626,7 +688,16 @@ async fn keyring_password() -> AppResult<String> {
     Ok(value)
 }
 
-async fn obtain_enrollment_key(server_url: &str) -> AppResult<String> {
+/// Pide al servidor una enrollment key de un solo uso.
+///
+/// Cuando se conoce la MAC del equipo, la key se emite ligada a ella: deja de
+/// servir en cualquier otro hardware, así que una imagen extraviada antes del
+/// primer arranque ya no puede enrolar un dispositivo ajeno.
+async fn obtain_enrollment_key(
+    server_url: &str,
+    device_id: Option<&str>,
+    serial_number: Option<&str>,
+) -> AppResult<String> {
     #[derive(serde::Deserialize)]
     struct Login {
         token: String,
@@ -669,18 +740,37 @@ async fn obtain_enrollment_key(server_url: &str) -> AppResult<String> {
     )
     .map_err(|_| AppError::Validation("Login de fabricación no devolvió un token válido".into()))?
     .token;
+    let mut request_body = serde_json::Map::new();
+    if let Some(device_id) = device_id {
+        request_body.insert("device_id".into(), serde_json::Value::from(device_id));
+    }
+    if let Some(serial_number) = serial_number {
+        request_body.insert("serial_number".into(), serde_json::Value::from(serial_number));
+    }
+    let request_body = serde_json::to_string(&serde_json::Value::Object(request_body)).map_err(
+        |error| AppError::Internal(format!("No se pudo serializar la solicitud: {error}")),
+    )?;
+
     let response = client
         .post(format!("{server_url}/api/admin/enrollment-keys"))
         .bearer_auth(&token)
         .header(reqwest::header::CONTENT_TYPE, "application/json")
-        .body("{}")
+        .body(request_body)
         .send()
         .await
         .map_err(|error| AppError::Flash(format!("Solicitud de enrollment key falló: {error}")))?;
     if !response.status().is_success() {
+        // Se traducen los rechazos que el operario puede resolver sin ayuda. El
+        // 409 es el más frecuente: un equipo que ya se flasheó antes.
+        let status = response.status().as_u16();
+        let detail = match status {
+            409 => "ese equipo ya tiene una credencial activa. Revócala en el panel antes de volver a flashearlo",
+            400 => "el servidor exige una MAC para emitir la key. Rellena el campo MAC del dispositivo",
+            429 => "demasiadas solicitudes seguidas. Espera un momento y reintenta",
+            _ => "revisa la conexión con el servidor y la credencial de fabricación",
+        };
         return Err(AppError::Validation(format!(
-            "Servidor rechazó enrollment key: HTTP {}",
-            response.status()
+            "Servidor rechazó enrollment key (HTTP {status}): {detail}"
         )));
     }
     let document =
@@ -2513,6 +2603,59 @@ mod tests {
     #[test]
     fn manufacturing_contract_accepts_complete_configuration() {
         assert!(validate_device_config(&manufacturing_config()).is_ok());
+    }
+
+    #[test]
+    fn device_id_normalizes_to_the_form_the_server_stores() {
+        // El separador `-` es el que Raspberry Pi imprime en la etiqueta.
+        assert_eq!(
+            normalize_device_id("DC-A6-32-04-05-06").unwrap(),
+            "dc:a6:32:04:05:06"
+        );
+        assert_eq!(
+            normalize_device_id("  dc:a6:32:04:05:06  ").unwrap(),
+            "dc:a6:32:04:05:06"
+        );
+    }
+
+    #[test]
+    fn device_id_rejects_anything_that_is_not_a_mac() {
+        for candidate in [
+            "dc:a6:32:04:05",       // faltan octetos
+            "dc:a6:32:04:05:06:07", // sobran
+            "dc:a6:32:04:05:zz",    // no hexadecimal
+            "dca6320405 06",        // separador inválido
+            "",
+        ] {
+            assert!(
+                normalize_device_id(candidate).is_err(),
+                "debería rechazar {candidate:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn manufacturing_contract_rejects_a_mistyped_mac() {
+        // Una MAC mal tecleada produce una enrollment key que el equipo nunca
+        // podrá consumir, y el fallo aparecería recién en el primer arranque.
+        let mut config = manufacturing_config();
+        config.device_id = Some("dc:a6:32:04:05".to_string());
+        assert!(validate_device_config(&config).is_err());
+
+        config.device_id = Some("dc:a6:32:04:05:06".to_string());
+        assert!(validate_device_config(&config).is_ok());
+    }
+
+    #[test]
+    fn server_url_refuses_plaintext_http_unless_explicitly_allowed() {
+        assert!(normalize_server_url("https://api.example.test".to_string()).is_ok());
+        // Las variables de entorno son globales al proceso de test; si el
+        // entorno ya autoriza HTTP en claro, esta aserción no aplica.
+        if insecure_transport_allowed() {
+            return;
+        }
+        // Por esa conexión viajan la contraseña de fabricación y la enrollment key.
+        assert!(normalize_server_url("http://api.example.test".to_string()).is_err());
     }
 
     #[test]
