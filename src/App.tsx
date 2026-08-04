@@ -86,7 +86,6 @@ export default function App() {
   const [logPassword, setLogPassword] = useState("");
   const [hostname, setHostname] = useState("sigil");
   const [serialNumber, setSerialNumber] = useState("");
-  const [deviceId, setDeviceId] = useState("");
   const [sigilModel, setSigilModel] = useState("Sigil-Streamer");
   const [sigilModelVersion, setSigilModelVersion] = useState("v1");
   const [wifiSsid, setWifiSsid] = useState("");
@@ -145,7 +144,6 @@ export default function App() {
       panelPin: normalizedPanelPin,
       hostname,
       serialNumber,
-      deviceId,
     });
     if (validationError) {
       addLog(validationError, "error");
@@ -163,13 +161,6 @@ export default function App() {
     setLogs([]);
     setProgress(null);
     addLog(`Iniciando flasheo: ${image.name} → ${device.path}`, "info");
-    const boundMac = normalizeDeviceId(deviceId);
-    addLog(
-      boundMac
-        ? `Clave de enrolamiento ligada a ${boundMac}: la imagen no servirá en otro equipo.`
-        : "Sin MAC: la clave de enrolamiento servirá en cualquier equipo hasta que caduque.",
-      boundMac ? "info" : "warning",
-    );
     addLog("Solicitando permisos de administrador...", "warning");
     try {
       const normalizedPanelPin = pinPanel.trim();
@@ -182,7 +173,6 @@ export default function App() {
         sshEnabled,
         rpiModel,
         serialNumber: serialNumber || null,
-        deviceId: normalizeDeviceId(deviceId) ?? null,
         sigilModel: sigilModel || null,
         sigilModelVersion: sigilModelVersion || null,
         panelPin: normalizedPanelPin || null,
@@ -260,7 +250,6 @@ export default function App() {
           logPassword={logPassword} setLogPassword={setLogPassword}
           hostname={hostname} setHostname={setHostname}
           serialNumber={serialNumber} setSerialNumber={setSerialNumber}
-          deviceId={deviceId} setDeviceId={setDeviceId}
           sigilModel={sigilModel} setSigilModel={setSigilModel}
           sigilModelVersion={sigilModelVersion} setSigilModelVersion={setSigilModelVersion}
           wifiSsid={wifiSsid} setWifiSsid={setWifiSsid}
@@ -325,19 +314,6 @@ interface ManufacturingInputs {
   panelPin: string;
   hostname: string;
   serialNumber: string;
-  deviceId: string;
-}
-
-/**
- * Forma canónica de la MAC: minúsculas y separada por `:`.
- *
- * Se acepta `-` porque es como Raspberry Pi la imprime en la etiqueta. Debe
- * coincidir con `normalize_device_id` en Rust y con `normalizeDeviceId` en
- * sigil-system; si divergieran, la clave ligada nunca podría consumirse.
- */
-export function normalizeDeviceId(value: string): string | null {
-  const normalized = value.trim().toLowerCase().replace(/-/g, ":");
-  return /^[0-9a-f]{2}(?::[0-9a-f]{2}){5}$/.test(normalized) ? normalized : null;
 }
 
 export function validateManufacturingInputs(inputs: ManufacturingInputs): string | null {
@@ -352,12 +328,6 @@ export function validateManufacturingInputs(inputs: ManufacturingInputs): string
   }
   if (!/^[A-Za-z0-9._-]{1,64}$/.test(inputs.serialNumber)) {
     return "El número de serie es obligatorio y solo admite letras, números, punto, guion y guion bajo.";
-  }
-  // La MAC es opcional mientras la fábrica migra a claves ligadas, pero una MAC
-  // mal tecleada produce una clave que el equipo nunca podrá consumir, y el
-  // fallo aparecería recién en el primer arranque.
-  if (inputs.deviceId.trim() && !normalizeDeviceId(inputs.deviceId)) {
-    return "La MAC del dispositivo debe tener el formato aa:bb:cc:dd:ee:ff.";
   }
   if (!/^\d{6,12}$/.test(inputs.panelPin)) {
     return "El PIN del panel debe contener entre 6 y 12 dígitos.";

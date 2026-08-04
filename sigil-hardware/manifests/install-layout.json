@@ -45,6 +45,7 @@
         "scripts/wifi-manager.sh",
         "scripts/audio-manager.sh",
         "scripts/radio-fetcher.sh",
+        "scripts/sigil-event-listener.sh",
         "scripts/audio-player.sh",
         "scripts/sigil-validate-state.sh",
         "scripts/sigil-healthcheck.sh",

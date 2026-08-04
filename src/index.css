@@ -508,6 +508,26 @@ body {
   gap: 4px;
   width: max-content;
 }
+.tab-button {
+  padding: 8px 16px;
+  border: none;
+  border-radius: var(--radius-full);
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all var(--transition);
+  white-space: nowrap;
+}
+.tab-button:hover:not(.active):not(:disabled) { color: var(--text-primary); }
+.tab-button:disabled { opacity: 0.45; cursor: not-allowed; }
+.tab-button.active {
+  background: var(--surface);
+  color: var(--accent);
+  box-shadow: var(--shadow-raised-sm);
+}
 
 /* ============================================================
    FORM CONTROLS
@@ -788,55 +808,92 @@ html[data-style="glow1"] .btn-flash:hover:not(:disabled) {
    NEON BORDER THEME (data-style="glow2")
    ============================================================ */
 html[data-style="glow2"] {
-  --bg: #030206;
+  --bg: #050408;
   --bg-deep: #000000;
-  --surface: rgba(8, 6, 14, 0.85);
+  --surface: rgba(10, 8, 14, 0.9);
+  --surface-gradient: linear-gradient(180deg, #120e1a, #08060c);
 
   --shadow-dark: rgba(0, 0, 0, 0.98);
   --shadow-light: rgba(255, 255, 255, 0.005);
 
-  --border-light: rgba(255, 255, 255, 0.02);
+  --border-light: rgba(255, 255, 255, 0.03);
   --border-dark: rgba(0, 0, 0, 0.8);
 
   --text-primary: #f0edf6;
   --text-secondary: #9b94b0;
-  --text-muted: #4b435e;
+  --text-muted: #55506a;
 
-  --accent: #e01e5a; /* Ruby Pink */
-  --accent-glow: rgba(224, 30, 90, 0.55);
+  --accent: #ff6a3d; /* Warm amber-red — cards, CTA, primary accent */
+  --accent-light: #ff8a4d;
+  --accent-dark: #e01e5a;
+  --accent-glow: rgba(255, 106, 61, 0.5);
+  --accent-bg: rgba(255, 106, 61, 0.12);
 
-  --flash: #00f0d2; /* Cyan */
-  --flash-glow: rgba(0, 240, 210, 0.55);
+  --flash: #00d8c8; /* Teal — nav / secondary accent */
+  --flash-light: #33e6c4;
+  --flash-dark: #00a89a;
+  --flash-glow: rgba(0, 216, 200, 0.5);
+
+  --warning: #f5b400; /* Gold — selected states */
+  --warning-bg: rgba(245, 180, 0, 0.12);
+
+  /* Rounder, softer geometry for this theme */
+  --radius-md: 14px;
+  --radius-lg: 22px;
+  --radius-xl: 26px;
 }
 
-/* Glassmorphism Background Ambient Orbs */
 html[data-style="glow2"] body {
   background-image: none !important;
-  background-color: #030206 !important;
+  background-color: #050408 !important;
 }
 
-/* Fix CSS border clashing with padding-box/border-box gradient trick */
-html[data-style="glow2"] .card,
-html[data-style="glow2"] .sidebar,
-html[data-style="glow2"] .tabs-container,
-html[data-style="glow2"] .app-header {
-  border-top: none !important;
-  border-left: none !important;
-  border-bottom: none !important;
-  border-right: none !important;
-  border: 1px solid transparent !important;
-  background:
-    linear-gradient(#0b0a0f, #0b0a0f) padding-box,
-    linear-gradient(135deg, #7a22e8 0%, #e01e5a 50%, #ff8a00 100%) border-box !important;
+/* Cards — dark glass body, barely-there hairline, soft ambient glow bleeding outward */
+html[data-style="glow2"] .card {
+  border: 1px solid rgba(255, 120, 80, 0.18) !important;
+  background: linear-gradient(180deg, #100c0e, #08060a) !important;
   box-shadow:
-    0 8px 30px rgba(0, 0, 0, 0.95),
-    0 0 20px rgba(224, 30, 90, 0.08) !important;
+    0 1px 0 rgba(255, 255, 255, 0.03) inset,
+    0 18px 40px rgba(0, 0, 0, 0.65),
+    0 0 46px rgba(255, 106, 61, 0.09) !important;
+}
+
+/* Chrome (sidebar / header) — neutral dark, no competing color */
+html[data-style="glow2"] .sidebar,
+html[data-style="glow2"] .app-header {
+  border-color: rgba(255, 255, 255, 0.06) !important;
+  background: #08060b !important;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.9) !important;
+}
+
+/* Tab bar — no boxed chrome, buttons float directly on the dark background */
+html[data-style="glow2"] .tabs-container {
+  border: none !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  padding: 4px 0 !important;
+}
+html[data-style="glow2"] .tab-button.active {
+  background: rgba(0, 216, 200, 0.10);
+  color: var(--flash);
+  box-shadow: 0 0 16px rgba(0, 216, 200, 0.22);
+}
+
+/* Selected model tile — gold highlight */
+html[data-style="glow2"] .model-card.selected {
+  border: 1px solid rgba(245, 180, 0, 0.5) !important;
+  background: #171006 !important;
+  box-shadow: 0 0 22px rgba(245, 180, 0, 0.22) !important;
+}
+html[data-style="glow2"] .model-card.selected .model-card-badge {
+  background: var(--warning);
+  color: #1a1200;
 }
 
 /* Inputs under Neon */
 html[data-style="glow2"] .form-input {
   background: rgba(4, 3, 7, 0.75) !important;
-  border: 1px solid rgba(122, 34, 232, 0.3) !important;
+  border: 1px solid rgba(255, 255, 255, 0.08) !important;
   box-shadow: none !important;
 }
 html[data-style="glow2"] .form-input:focus {
@@ -844,61 +901,27 @@ html[data-style="glow2"] .form-input:focus {
   box-shadow: 0 0 12px var(--accent-glow) !important;
 }
 
-/* Buttons under Neon — dark pill body, hairline gradient rim,
-   soft diffused halo bleeding out underneath (not a hard ring) */
-html[data-style="glow2"] .btn-primary,
-html[data-style="glow2"] .btn-flash {
-  position: relative;
-  isolation: isolate;
+/* Buttons under Neon */
+html[data-style="glow2"] .btn-primary {
   border: 1px solid transparent !important;
-  box-shadow:
-    0 1px 0 rgba(255, 255, 255, 0.07) inset,
-    0 10px 24px rgba(0, 0, 0, 0.55) !important;
-  transition: transform var(--transition), box-shadow var(--transition);
+  background:
+    linear-gradient(rgba(8, 6, 14, 0.9), rgba(8, 6, 14, 0.9)) padding-box,
+    linear-gradient(135deg, #7a22e8, #e01e5a) border-box !important;
+  box-shadow: 0 5px 15px rgba(224, 30, 90, 0.4) !important;
 }
-html[data-style="glow2"] .btn-primary::before,
-html[data-style="glow2"] .btn-flash::before {
-  content: "";
-  position: absolute;
-  z-index: -1;
-  left: 10%;
-  right: 10%;
-  bottom: -8px;
-  height: 55%;
-  border-radius: 50%;
-  filter: blur(16px);
-  opacity: 0.45;
-  transition: opacity var(--transition), filter var(--transition);
-}
-html[data-style="glow2"] .btn-primary:hover,
-html[data-style="glow2"] .btn-flash:hover:not(:disabled) {
+html[data-style="glow2"] .btn-primary:hover {
+  box-shadow: 0 7px 22px rgba(224, 30, 90, 0.75) !important;
   transform: translateY(-1px);
 }
-html[data-style="glow2"] .btn-primary:hover::before,
-html[data-style="glow2"] .btn-flash:hover:not(:disabled)::before {
-  opacity: 0.75;
-  filter: blur(20px);
-}
 
-html[data-style="glow2"] .btn-primary {
-  background:
-    linear-gradient(180deg, #14111c, #0a0810) padding-box,
-    linear-gradient(90deg, #7a22e8, #e01e5a, #ff8a00) border-box !important;
-}
-html[data-style="glow2"] .btn-primary::before {
-  background: linear-gradient(90deg, #7a22e8, #e01e5a, #ff8a00);
-}
-
-/* Flash button — cyan/violet gradient rim under Neon */
+/* Flash button — cyan gradient border under Neon */
 html[data-style="glow2"] .btn-flash {
+  border: 1px solid transparent !important;
   background:
-    linear-gradient(180deg, #0c1614, #06100e) padding-box,
-    linear-gradient(90deg, #33e6a0, #00d8c8, #7a5cff) border-box !important;
+    linear-gradient(rgba(8, 6, 14, 0.9), rgba(8, 6, 14, 0.9)) padding-box,
+    linear-gradient(135deg, #00bfa6, #00f0d2) border-box !important;
+  box-shadow: 0 5px 15px rgba(0, 240, 210, 0.4) !important;
 }
-html[data-style="glow2"] .btn-flash::before {
-  background: linear-gradient(90deg, #33e6a0, #00d8c8, #7a5cff);
-}
-html[data-style="glow2"] .btn-flash:disabled::before {
-  opacity: 0.15;
-  filter: blur(10px);
+html[data-style="glow2"] .btn-flash:hover:not(:disabled) {
+  box-shadow: 0 7px 25px rgba(0, 240, 210, 0.75) !important;
 }

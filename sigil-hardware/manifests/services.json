@@ -9,6 +9,7 @@
       "bt-connect",
       "sigil-pulseaudio",
       "radio-fetcher",
+      "sigil-event-listener",
       "audio-manager",
       "audio-player",
       "sigil-leds",
@@ -30,6 +31,7 @@
     "NetworkManager is enabled; dhcpcd should have wlan0 in denyinterfaces",
     "bluetooth-panel requires /etc/sigil/panel.env (created by firstboot or flasher)",
     "audio-manager, radio-fetcher and audio-player are the production autonomous playback runtime",
+    "sigil-event-listener holds an SSE connection to the backend and wakes radio-fetcher early via a FIFO; radio-fetcher's own poll cycle is the fallback if this service is down or the connection drops",
     "legacy radio-stream is not installed because it bypasses the production license gate"
   ]
 }
