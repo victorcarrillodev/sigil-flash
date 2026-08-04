@@ -5,6 +5,7 @@ import Header from "./components/Header";
 import Sidebar from "./components/Sidebar";
 import CenterPanel from "./components/CenterPanel";
 import ConfirmModal from "./components/ConfirmModal";
+import ServerLoginModal from "./components/ServerLoginModal";
 
 export interface ImageInfo {
   path: string;
@@ -61,24 +62,20 @@ export function formatSize(bytes: number): string {
   const k = 1024;
   const sizes = ["B", "KB", "MB", "GB", "TB"];
   const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return `${(bytes / Math.pow(k, i)).toFixed(1)} ${sizes[i]}`;
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
 }
 
 export default function App() {
-  const [step, setStep] = useState<AppStep>("select-image");
   const [image, setImage] = useState<ImageInfo | null>(null);
   const [device, setDevice] = useState<Device | null>(null);
-  const [showConfirm, setShowConfirm] = useState(false);
+  const [step, setStep] = useState<AppStep>("select-image");
   const [progress, setProgress] = useState<FlashProgress | null>(null);
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [isFlashing, setIsFlashing] = useState(false);
-  const flashRequestActive = useRef(false);
+  const [showConfirm, setShowConfirm] = useState(false);
+  const [showServerLogin, setShowServerLogin] = useState(false);
+  const [serverLoginError, setServerLoginError] = useState<string | null>(null);
   const [rpiModel, setRpiModel] = useState<RPiModel>("Raspberry Pi 4 (64-bit)");
-
-  // Custom visual tab states
-  const [activeTab, setActiveTab] = useState<"vista-previa" | "ssh" | "historial" | "motor">("vista-previa");
-
-  // Custom OS configuration states
   const [sshEnabled, setSshEnabled] = useState(true);
   const [username, setUsername] = useState("sigil");
   const [password, setPassword] = useState("");
@@ -90,58 +87,59 @@ export default function App() {
   const [sigilModelVersion, setSigilModelVersion] = useState("v1");
   const [wifiSsid, setWifiSsid] = useState("");
   const [wifiPassword, setWifiPassword] = useState("");
+  const [activeTab, setActiveTab] = useState<"vista-previa" | "ssh" | "historial" | "motor">("vista-previa");
+  const flashRequestActive = useRef(false);
 
   const addLog = useCallback((msg: string, type: LogEntry["type"] = "info") => {
-    const now = new Date();
-    const time = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}:${String(now.getSeconds()).padStart(2, "0")}`;
-    setLogs(prev => [...prev.slice(-200), { time, msg, type }]);
+    const time = new Date().toLocaleTimeString();
+    setLogs((prev) => [...prev, { time, msg, type }]);
   }, []);
 
   useEffect(() => {
-    let disposed = false;
     let unlisten: UnlistenFn | undefined;
-    const setup = async () => {
-      const listener = await listen<FlashProgress>("flash-progress", (event) => {
-        setProgress(event.payload);
-        if (event.payload.message) {
-          const t = event.payload.status === "error" ? "error"
-            : event.payload.status === "done" ? "success" : "info";
-          addLog(event.payload.message, t);
-        }
-        if (event.payload.status === "error") { setIsFlashing(false); }
-        if (event.payload.status === "cancelled") {
+    async function setupListener() {
+      unlisten = await listen<FlashProgress>("flash-progress", (event) => {
+        const payload = event.payload;
+        setProgress(payload);
+        if (payload.status === "error") {
+          addLog(payload.message || "Error en la verificación o escritura", "error");
           setIsFlashing(false);
-          addLog("Flasheo cancelado por el usuario.", "warning");
+        } else if (payload.status === "done") {
+          addLog("Operación finalizada correctamente.", "success");
+          setIsFlashing(false);
+        } else if (payload.status === "cancelled") {
+          addLog("Operación cancelada por el usuario.", "warning");
+          setIsFlashing(false);
         }
       });
-      if (disposed) {
-        listener();
-      } else {
-        unlisten = listener;
-      }
-    };
-    void setup();
+    }
+    setupListener();
     return () => {
-      disposed = true;
-      unlisten?.();
+      if (unlisten) unlisten();
     };
   }, [addLog]);
 
   const handleImageSelected = (info: ImageInfo) => {
     setImage(info);
-    setStep("select-device");
-    addLog(`Imagen seleccionada: ${info.name} (${formatSize(info.size)})`, "success");
+    addLog(`Imagen seleccionada: ${info.name} (${formatSize(info.size)})`, "info");
+    if (step === "select-image") setStep("select-device");
   };
 
   const handleFlashClick = () => {
-    if (!image || !device || isFlashing || flashRequestActive.current) return;
-    const normalizedPanelPin = pinPanel.trim();
+    if (!image) {
+      addLog("Selecciona una imagen primero", "warning");
+      return;
+    }
+    if (!device) {
+      addLog("Selecciona un dispositivo primero", "warning");
+      return;
+    }
     const validationError = validateManufacturingInputs({
       rpiModel,
       sshEnabled,
       username,
       password,
-      panelPin: normalizedPanelPin,
+      panelPin: pinPanel.trim(),
       hostname,
       serialNumber,
     });
@@ -161,7 +159,6 @@ export default function App() {
     setLogs([]);
     setProgress(null);
     addLog(`Iniciando flasheo: ${image.name} → ${device.path}`, "info");
-    addLog("Solicitando permisos de administrador...", "warning");
     try {
       const normalizedPanelPin = pinPanel.trim();
       const config = {
@@ -188,8 +185,19 @@ export default function App() {
       setPinPanel("");
       setLogPassword("");
       addLog("¡Proceso completado exitosamente!", "success");
-    } catch (err) {
-      addLog(`Error: ${err}`, "error");
+    } catch (err: any) {
+      const errStr = typeof err === "string" ? err : String(err?.message || err);
+      addLog(`Error: ${errStr}`, "error");
+
+      if (
+        errStr.includes("Falta server_url") ||
+        errStr.includes("GNOME Keyring") ||
+        errStr.includes("Login de fabricación rechazado") ||
+        errStr.includes("credencial de fabricación")
+      ) {
+        setServerLoginError(errStr);
+        setShowServerLogin(true);
+      }
     } finally {
       flashRequestActive.current = false;
       setIsFlashing(false);
@@ -229,10 +237,9 @@ export default function App() {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100vh", overflow: "hidden" }}>
-      <Header />
+      <Header onOpenLoginModal={() => { setServerLoginError(null); setShowServerLogin(true); }} />
 
       <div className="app-shell" style={{ marginTop: 0 }}>
-        {/* Left Column: configuration parameters */}
         <Sidebar
           image={image}
           device={device}
@@ -256,7 +263,6 @@ export default function App() {
           wifiPassword={wifiPassword} setWifiPassword={setWifiPassword}
         />
 
-        {/* Unified Main Content View */}
         <main className="main-content" style={{ padding: "0 16px 16px 16px", flex: 1, overflow: "hidden" }}>
           <CenterPanel
             image={image}
@@ -302,6 +308,12 @@ export default function App() {
           onCancel={() => setShowConfirm(false)}
         />
       )}
+
+      <ServerLoginModal
+        isOpen={showServerLogin}
+        onClose={() => setShowServerLogin(false)}
+        initialError={serverLoginError}
+      />
     </div>
   );
 }

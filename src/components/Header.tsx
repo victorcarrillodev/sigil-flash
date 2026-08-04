@@ -1,6 +1,10 @@
 import { useState, useEffect } from "react";
 
-export default function Header() {
+interface HeaderProps {
+  onOpenLoginModal?: () => void;
+}
+
+export default function Header({ onOpenLoginModal }: HeaderProps) {
   const [pulse, setPulse] = useState(false);
   const [theme, setTheme] = useState<'light' | 'dark'>(() => {
     const saved = localStorage.getItem("theme");
@@ -84,7 +88,33 @@ export default function Header() {
         <span style={{ fontSize: "11px", fontWeight: 600, color: "var(--text-secondary)" }}>Sistema listo</span>
       </div>
 
-
+      {/* Server & Factory Login button */}
+      {onOpenLoginModal && (
+        <button
+          onClick={onOpenLoginModal}
+          className="btn-icon"
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 6,
+            padding: "0 12px",
+            height: 36,
+            borderRadius: "12px",
+            border: "none",
+            cursor: "pointer",
+            background: "var(--surface)",
+            boxShadow: "var(--shadow-raised-sm)",
+            transition: "all var(--transition)",
+            fontSize: "12px",
+            fontWeight: 600,
+            color: "var(--text-primary)",
+          }}
+          title="Configurar Servidor SIGIL y Credenciales de Fabricación"
+        >
+          <span>🔑</span>
+          <span>Credenciales</span>
+        </button>
+      )}
 
       {/* Theme selector button */}
       <button

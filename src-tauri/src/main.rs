@@ -79,6 +79,8 @@ pub fn run() {
             commands::downloads::cancel_download,
             commands::downloads::verify_image,
             commands::config::save_device_config,
+            commands::config::get_server_config,
+            commands::config::save_server_config,
             commands::offline_packages::offline_packages_status,
             commands::offline_packages::offline_packages_validate,
             commands::offline_packages::offline_packages_build,
