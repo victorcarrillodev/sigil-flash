@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 
 interface ServerConfig {
   server_url: string;
+  factory_user: string;
   has_keyring_password: boolean;
 }
 
@@ -15,6 +16,7 @@ interface Props {
 
 export default function ServerLoginModal({ isOpen, onClose, initialError, onSuccess }: Props) {
   const [serverUrl, setServerUrl] = useState("");
+  const [factoryUser, setFactoryUser] = useState("");
   const [factoryPassword, setFactoryPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [hasKeyringPassword, setHasKeyringPassword] = useState(false);
@@ -35,6 +37,7 @@ export default function ServerLoginModal({ isOpen, onClose, initialError, onSucc
     try {
       const config = await invoke<ServerConfig>("get_server_config");
       setServerUrl(config.server_url || "https://sigil-server.sphinx-pickerel.ts.net");
+      setFactoryUser(config.factory_user || "fabrica@sigil.local");
       setHasKeyringPassword(config.has_keyring_password);
     } catch (err) {
       console.error("Error al cargar configuración del servidor:", err);
@@ -49,6 +52,10 @@ export default function ServerLoginModal({ isOpen, onClose, initialError, onSucc
       setErrorMsg("La URL del servidor no puede estar vacía.");
       return;
     }
+    if (!factoryUser.trim()) {
+      setErrorMsg("El usuario o email de fabricación no puede estar vacío.");
+      return;
+    }
 
     setLoading(true);
     setErrorMsg(null);
@@ -57,6 +64,7 @@ export default function ServerLoginModal({ isOpen, onClose, initialError, onSucc
     try {
       await invoke("save_server_config", {
         serverUrl: serverUrl.trim(),
+        factoryUser: factoryUser.trim(),
         factoryPassword: factoryPassword.trim() || null,
       });
 
@@ -103,7 +111,7 @@ export default function ServerLoginModal({ isOpen, onClose, initialError, onSucc
               Servidor de Fabricación SIGIL
             </h2>
             <p className="text-xs text-secondary mt-xs" style={{ margin: 0 }}>
-              Configura la URL de la API backend y la contraseña de provisión (`fabrica`)
+              Configura la URL de la API backend y el usuario/contraseña de provisión
             </p>
           </div>
         </div>
@@ -160,18 +168,23 @@ export default function ServerLoginModal({ isOpen, onClose, initialError, onSucc
               </span>
             </div>
 
-            {/* Factory Username */}
+            {/* Factory Username / Email */}
             <div>
               <label style={{ display: "block", fontSize: 12, fontWeight: 600, color: "var(--text-primary)", marginBottom: 6 }}>
-                Usuario de Provisión
+                Usuario / Email de Fabricación
               </label>
               <input
                 type="text"
                 className="input-text"
-                value="fabrica"
-                disabled
-                style={{ width: "100%", padding: "10px 14px", fontSize: 13, borderRadius: "var(--radius-md)", opacity: 0.75, cursor: "not-allowed" }}
+                placeholder="fabrica@sigil.local"
+                value={factoryUser}
+                onChange={(e) => setFactoryUser(e.target.value)}
+                style={{ width: "100%", padding: "10px 14px", fontSize: 13, borderRadius: "var(--radius-md)" }}
+                required
               />
+              <span style={{ fontSize: 10, color: "var(--text-muted)", display: "block", marginTop: 4 }}>
+                Ejemplo: <code style={{ fontFamily: "var(--font-mono)" }}>fabrica@sigil.local</code> o <code style={{ fontFamily: "var(--font-mono)" }}>fabrica</code>
+              </span>
             </div>
 
             {/* Factory Password */}
@@ -190,7 +203,7 @@ export default function ServerLoginModal({ isOpen, onClose, initialError, onSucc
                 <input
                   type={showPassword ? "text" : "password"}
                   className="input-text"
-                  placeholder={hasKeyringPassword ? "•••••••• (Dejar en blanco para mantener actual)" : "Ingresa la contraseña del usuario fabrica"}
+                  placeholder={hasKeyringPassword ? "•••••••• (Dejar en blanco para mantener actual)" : "Ingresa la contraseña de provisión"}
                   value={factoryPassword}
                   onChange={(e) => setFactoryPassword(e.target.value)}
                   style={{ width: "100%", padding: "10px 40px 10px 14px", fontSize: 13, borderRadius: "var(--radius-md)" }}

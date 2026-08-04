@@ -8,48 +8,65 @@ use tauri::State;
 #[derive(Serialize)]
 pub struct ServerConfigResponse {
     pub server_url: String,
+    pub factory_user: String,
     pub has_keyring_password: bool,
 }
 
 #[tauri::command]
 pub async fn get_server_config() -> AppResult<ServerConfigResponse> {
-    let server_url = match std::env::var("SIGIL_SERVER_URL") {
-        Ok(val) => val,
-        Err(_) => {
-            let mut url = String::new();
-            if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
-                let config_path = home.join(".config/sigil-flash/config.toml");
-                if let Ok(contents) = std::fs::read_to_string(config_path) {
-                    for line in contents.lines() {
-                        if let Some(value) = line.trim().strip_prefix("server_url") {
-                            if let Some((_, value)) = value.split_once('=') {
-                                url = value
-                                    .trim()
-                                    .trim_matches('"')
-                                    .trim_matches('\'')
-                                    .to_string();
-                                break;
-                            }
+    let mut server_url = std::env::var("SIGIL_SERVER_URL").unwrap_or_default();
+    let mut factory_user = std::env::var("SIGIL_FACTORY_USER").unwrap_or_default();
+
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        let config_path = home.join(".config/sigil-flash/config.toml");
+        if let Ok(contents) = std::fs::read_to_string(config_path) {
+            for line in contents.lines() {
+                let trimmed = line.trim();
+                if server_url.is_empty() {
+                    if let Some(value) = trimmed.strip_prefix("server_url") {
+                        if let Some((_, value)) = value.split_once('=') {
+                            server_url = value.trim().trim_matches('"').trim_matches('\'').to_string();
+                        }
+                    }
+                }
+                if factory_user.is_empty() {
+                    if let Some(value) = trimmed.strip_prefix("factory_user") {
+                        if let Some((_, value)) = value.split_once('=') {
+                            factory_user = value.trim().trim_matches('"').trim_matches('\'').to_string();
                         }
                     }
                 }
             }
-            url
         }
-    };
+    }
+
+    if factory_user.is_empty() {
+        factory_user = "fabrica@sigil.local".to_string();
+    }
 
     let keyring_output = tokio::process::Command::new("secret-tool")
-        .args(["lookup", "service", "sigil-flash", "username", "fabrica"])
+        .args(["lookup", "service", "sigil-flash", "username", &factory_user])
         .output()
         .await;
 
-    let has_keyring_password = match keyring_output {
+    let mut has_keyring_password = match keyring_output {
         Ok(out) => out.status.success() && !out.stdout.is_empty(),
         Err(_) => false,
     };
 
+    if !has_keyring_password && factory_user != "fabrica" {
+        let fallback_output = tokio::process::Command::new("secret-tool")
+            .args(["lookup", "service", "sigil-flash", "username", "fabrica"])
+            .output()
+            .await;
+        if let Ok(out) = fallback_output {
+            has_keyring_password = out.status.success() && !out.stdout.is_empty();
+        }
+    }
+
     Ok(ServerConfigResponse {
         server_url,
+        factory_user,
         has_keyring_password,
     })
 }
@@ -57,6 +74,7 @@ pub async fn get_server_config() -> AppResult<ServerConfigResponse> {
 #[tauri::command]
 pub async fn save_server_config(
     server_url: String,
+    factory_user: Option<String>,
     factory_password: Option<String>,
 ) -> AppResult<()> {
     let trimmed_url = server_url.trim();
@@ -65,6 +83,12 @@ pub async fn save_server_config(
             "La URL del servidor no puede estar vacía.".into(),
         ));
     }
+
+    let user_name = factory_user
+        .as_deref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("fabrica@sigil.local");
 
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
@@ -78,7 +102,10 @@ pub async fn save_server_config(
     })?;
 
     let config_file = config_dir.join("config.toml");
-    let content = format!("server_url = \"{}\"\n", trimmed_url);
+    let content = format!(
+        "server_url = \"{}\"\nfactory_user = \"{}\"\n",
+        trimmed_url, user_name
+    );
     std::fs::write(&config_file, content).map_err(|e| {
         AppError::Config(format!(
             "No se pudo guardar ~/.config/sigil-flash/config.toml: {e}"
@@ -95,7 +122,7 @@ pub async fn save_server_config(
                     "service",
                     "sigil-flash",
                     "username",
-                    "fabrica",
+                    user_name,
                 ])
                 .stdin(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())

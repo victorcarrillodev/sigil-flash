@@ -374,14 +374,20 @@ pub fn validate_payload(payload: &Path, items: &mut Vec<ValidationItem>) {
             "payload source_commit must be a 40-character Git commit ID",
         );
     }
+    let is_valid_arch = matches!(
+        manifest.target.architecture.as_str(),
+        "arm64" | "armhf" | "armel" | "armv7l" | "armv6l" | "arm32" | "all" | "any"
+    );
+    let is_valid_hw = manifest.target.hardware == "raspberry-pi-zero-2-w"
+        || manifest.target.hardware.starts_with("raspberry-pi");
     if manifest.target.os != "raspberry-pi-os-lite"
         || manifest.target.release != "trixie"
-        || manifest.target.architecture != "arm64"
-        || manifest.target.hardware != "raspberry-pi-zero-2-w"
+        || !is_valid_arch
+        || !is_valid_hw
     {
         error(
             items,
-            "payload target must be raspberry-pi-os-lite/trixie/arm64/raspberry-pi-zero-2-w",
+            "payload target must be raspberry-pi-os-lite/trixie with valid ARM architecture (32/64-bit) and Raspberry Pi hardware",
         );
     }
     if manifest.files.is_empty() {

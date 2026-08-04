@@ -510,11 +510,18 @@ fn validate_device_config(config: &DeviceConfig) -> AppResult<()> {
         rpi_model,
         "Raspberry Pi 5 (64-bit)"
             | "Raspberry Pi 4 (64-bit)"
+            | "Raspberry Pi 4 (32-bit)"
             | "Raspberry Pi 3 (64-bit)"
+            | "Raspberry Pi 3 (32-bit)"
+            | "Raspberry Pi 2"
+            | "Raspberry Pi 1"
             | "Raspberry Pi Zero 2 W (64-bit)"
+            | "Raspberry Pi Zero 2 W (32-bit)"
+            | "Raspberry Pi Zero W (32-bit)"
+            | "Raspberry Pi Zero (32-bit)"
     ) {
         return Err(AppError::Validation(
-            "El bundle ARM64 solo admite modelos Raspberry Pi de 64 bits compatibles".into(),
+            "El modelo de Raspberry Pi seleccionado no es válido o no está soportado".into(),
         ));
     }
     validate_panel_pin(config.panel_pin.as_deref())?;
@@ -608,6 +615,33 @@ fn manufacturing_server_url() -> AppResult<String> {
     ))
 }
 
+fn manufacturing_factory_user() -> String {
+    if let Ok(value) = std::env::var("SIGIL_FACTORY_USER") {
+        let trimmed = value.trim().to_string();
+        if !trimmed.is_empty() {
+            return trimmed;
+        }
+    }
+    let config_path = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|path| path.join(".config/sigil-flash/config.toml"));
+    if let Some(path) = config_path {
+        if let Ok(contents) = std::fs::read_to_string(path) {
+            for line in contents.lines() {
+                if let Some(value) = line.trim().strip_prefix("factory_user") {
+                    if let Some((_, value)) = value.split_once('=') {
+                        let trimmed = value.trim().trim_matches('"').trim_matches('\'').to_string();
+                        if !trimmed.is_empty() {
+                            return trimmed;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    "fabrica@sigil.local".to_string()
+}
+
 /// `true` cuando el operario aceptó explícitamente usar HTTP en claro.
 ///
 /// Por esta conexión viaja la contraseña de fabricación y la enrollment key que
@@ -628,18 +662,18 @@ fn normalize_server_url(value: String) -> AppResult<String> {
             })
         {
             return Err(AppError::Validation(
-                "server_url contiene caracteres no permitidos".into(),
+                "La URL del servidor contiene caracteres no permitidos".into(),
             ));
         }
         if value.starts_with("http://") && !insecure_transport_allowed() {
             return Err(AppError::Validation(
-                "server_url debe usar https://: por esa conexión viajan la contraseña de fabricación y la enrollment key. Para un entorno de pruebas, exporta SIGIL_ALLOW_INSECURE_TRANSPORT=1".into(),
+                "SIGIL Flash no envía credenciales de fabricación por HTTP en claro. Usa HTTPS o define SIGIL_ALLOW_INSECURE_TRANSPORT=1 solo para pruebas locales.".into(),
             ));
         }
         return Ok(value);
     }
     Err(AppError::Validation(
-        "server_url debe usar http:// o https://".into(),
+        "La URL del servidor debe comenzar con https:// (o http:// con SIGIL_ALLOW_INSECURE_TRANSPORT=1)".into(),
     ))
 }
 
@@ -650,13 +684,18 @@ fn normalize_server_url(value: String) -> AppResult<String> {
 /// Debe coincidir con `normalizeDeviceId` de sigil-system: si divergieran, una
 /// enrollment key ligada no podría consumirse nunca.
 pub fn normalize_device_id(value: &str) -> AppResult<String> {
-    let normalized = value.trim().to_ascii_lowercase().replace('-', ":");
-    let octets: Vec<&str> = normalized.split(':').collect();
-    let well_formed = octets.len() == 6
-        && octets.iter().all(|octet| {
-            octet.len() == 2 && octet.chars().all(|character| character.is_ascii_hexdigit())
-        });
-    if !well_formed {
+    let raw = value.trim();
+    if raw.len() != 17 {
+        return Err(AppError::Validation(
+            "La MAC del dispositivo debe tener 17 caracteres (ej: dc:a6:32:04:05:06)".into(),
+        ));
+    }
+    let normalized = raw.replace('-', ":").to_lowercase();
+    let is_valid = normalized.split(':').count() == 6
+        && normalized
+            .split(':')
+            .all(|hex_byte| hex_byte.len() == 2 && hex_byte.chars().all(|c| c.is_ascii_hexdigit()));
+    if !is_valid {
         return Err(AppError::Validation(
             "La MAC del dispositivo debe tener el formato aa:bb:cc:dd:ee:ff".into(),
         ));
@@ -664,9 +703,9 @@ pub fn normalize_device_id(value: &str) -> AppResult<String> {
     Ok(normalized)
 }
 
-async fn keyring_password() -> AppResult<String> {
+async fn keyring_password(factory_user: &str) -> AppResult<String> {
     let output = tokio::process::Command::new("secret-tool")
-        .args(["lookup", "service", "sigil-flash", "username", "fabrica"])
+        .args(["lookup", "service", "sigil-flash", "username", factory_user])
         .output()
         .await
         .map_err(|error| {
@@ -674,18 +713,31 @@ async fn keyring_password() -> AppResult<String> {
                 "No se pudo ejecutar secret-tool: {error}. Instala libsecret-tools"
             ))
         })?;
-    if !output.status.success() {
-        return Err(AppError::Validation(
-            "No hay credencial de fabricación en GNOME Keyring para service=sigil-flash username=fabrica".into(),
-        ));
+    if output.status.success() {
+        let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !value.is_empty() {
+            return Ok(value);
+        }
     }
-    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if value.is_empty() {
-        return Err(AppError::Validation(
-            "La credencial de fabricación está vacía".into(),
-        ));
+
+    if factory_user != "fabrica" {
+        if let Ok(fallback_output) = tokio::process::Command::new("secret-tool")
+            .args(["lookup", "service", "sigil-flash", "username", "fabrica"])
+            .output()
+            .await
+        {
+            if fallback_output.status.success() {
+                let value = String::from_utf8_lossy(&fallback_output.stdout).trim().to_string();
+                if !value.is_empty() {
+                    return Ok(value);
+                }
+            }
+        }
     }
-    Ok(value)
+
+    Err(AppError::Validation(format!(
+        "No hay credencial de fabricación en GNOME Keyring para service=sigil-flash username={factory_user}",
+    )))
 }
 
 /// Pide al servidor una enrollment key de un solo uso.
@@ -711,13 +763,14 @@ async fn obtain_enrollment_key(
         keys: Vec<EnrollmentKey>,
     }
 
-    let password = keyring_password().await?;
+    let factory_user = manufacturing_factory_user();
+    let password = keyring_password(&factory_user).await?;
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(20))
         .build()
         .map_err(|error| AppError::Flash(format!("No se pudo crear cliente HTTPS: {error}")))?;
     let login_body =
-        serde_json::to_string(&serde_json::json!({"username": "fabrica", "password": password}))
+        serde_json::to_string(&serde_json::json!({"username": factory_user, "password": password}))
             .map_err(|error| AppError::Internal(format!("No se pudo serializar login: {error}")))?;
     let login = client
         .post(format!("{server_url}/api/login"))
@@ -1436,12 +1489,21 @@ fn apply_rpi_model_optimizations(boot: &Path, rpi_model: Option<&str>) -> AppRes
     let settings = match rpi_model {
         Some("Raspberry Pi 5 (64-bit)") => "arm_64bit=1\ndtparam=pciex1_gen=3\ngpu_mem=64\n",
         Some("Raspberry Pi 4 (64-bit)") => "arm_64bit=1\ngpu_mem=64\n",
+        Some("Raspberry Pi 4 (32-bit)") => "arm_64bit=0\ngpu_mem=64\n",
         Some("Raspberry Pi 3 (64-bit)" | "Raspberry Pi Zero 2 W (64-bit)") => {
             "arm_64bit=1\ngpu_mem=32\nmax_usb_current=1\n"
         }
+        Some(
+            "Raspberry Pi 3 (32-bit)"
+            | "Raspberry Pi Zero 2 W (32-bit)"
+            | "Raspberry Pi Zero W (32-bit)"
+            | "Raspberry Pi Zero (32-bit)"
+            | "Raspberry Pi 2"
+            | "Raspberry Pi 1",
+        ) => "arm_64bit=0\ngpu_mem=16\nmax_usb_current=1\n",
         _ => {
             return Err(AppError::Validation(
-                "El modelo físico no es compatible con la imagen ARM64".into(),
+                "El modelo físico de Raspberry Pi no es válido o no está soportado".into(),
             ));
         }
     };
@@ -1976,16 +2038,25 @@ fn install_sigil_hardware(
         }
 
         let qemu_target = mount_dir.join("usr/bin/qemu-aarch64-static");
+        let candidate_qemu_paths = [
+            Path::new("/usr/bin/qemu-aarch64-static"),
+            Path::new("/usr/local/bin/qemu-aarch64-static"),
+            Path::new("/usr/bin/qemu-aarch64"),
+        ];
+        let found_qemu = candidate_qemu_paths.iter().find(|p| p.is_file()).copied();
+
         let copied_qemu = std::env::consts::ARCH != "aarch64" && !qemu_target.exists();
         let install_result = (|| -> AppResult<()> {
             if copied_qemu {
-                let qemu_source = Path::new("/usr/bin/qemu-aarch64-static");
-                if !qemu_source.is_file() {
-                    return Err(AppError::Flash(
-                        "qemu-aarch64-static es obligatorio para preparar una imagen ARM64 desde este host"
-                            .into(),
-                    ));
-                }
+                let qemu_source = match found_qemu {
+                    Some(path) => path,
+                    None => {
+                        return Err(AppError::Flash(
+                            "qemu-aarch64-static es obligatorio para preparar una imagen ARM64 desde este host. Instálalo con 'sudo pacman -S qemu-user-static qemu-user-static-binfmt' (Arch/Manjaro) o 'sudo apt install qemu-user-static' (Debian/Ubuntu)."
+                                .into(),
+                        ));
+                    }
+                };
                 std::fs::copy(qemu_source, &qemu_target)?;
             }
 
@@ -2163,21 +2234,36 @@ fn expand_root_filesystem(device: &str) -> AppResult<()> {
     )?;
     settle_udev()?;
 
-    let growpart = std::process::Command::new("growpart")
+    let growpart_res = std::process::Command::new("growpart")
         .args([device, "2"])
         .env("LC_ALL", "C")
-        .output()
-        .map_err(|error| {
-            AppError::Flash(format!(
-                "No se pudo ejecutar growpart para ampliar rootfs: {error}"
-            ))
-        })?;
-    if !growpart.status.success() && !growpart_reports_no_change(&growpart.stdout, &growpart.stderr)
-    {
-        return Err(command_output_error(
-            "No se pudo ampliar la partición rootfs",
-            &growpart,
-        ));
+        .output();
+
+    let growpart_success = match growpart_res {
+        Ok(ref output) if output.status.success() || growpart_reports_no_change(&output.stdout, &output.stderr) => true,
+        _ => false,
+    };
+
+    if !growpart_success {
+        let parted_res = std::process::Command::new("parted")
+            .args(["-s", device, "resizepart", "2", "100%"])
+            .env("LC_ALL", "C")
+            .output();
+
+        let parted_success = match parted_res {
+            Ok(ref output) if output.status.success() => true,
+            _ => false,
+        };
+
+        if !parted_success {
+            let err_msg = match growpart_res {
+                Ok(output) => command_output_error("No se pudo ampliar la partición rootfs", &output),
+                Err(error) => AppError::Flash(format!(
+                    "No se pudo ejecutar growpart ni parted para ampliar rootfs: {error}"
+                )),
+            };
+            return Err(err_msg);
+        }
     }
 
     run_storage_command(
@@ -3292,5 +3378,58 @@ mod tests {
         assert_eq!(actual.status, "error");
         assert!(actual.message.contains("dpkg failed"));
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn validate_device_config_should_accept_both_32bit_and_64bit_models() {
+        let models = [
+            "Raspberry Pi 5 (64-bit)",
+            "Raspberry Pi 4 (64-bit)",
+            "Raspberry Pi 4 (32-bit)",
+            "Raspberry Pi 3 (64-bit)",
+            "Raspberry Pi 3 (32-bit)",
+            "Raspberry Pi 2",
+            "Raspberry Pi 1",
+            "Raspberry Pi Zero 2 W (64-bit)",
+            "Raspberry Pi Zero 2 W (32-bit)",
+            "Raspberry Pi Zero W (32-bit)",
+            "Raspberry Pi Zero (32-bit)",
+        ];
+
+        for model in models {
+            let mut config = manufacturing_config();
+            config.rpi_model = Some(model.to_string());
+            assert!(
+                validate_device_config(&config).is_ok(),
+                "Model {} should be valid",
+                model
+            );
+        }
+    }
+
+    #[test]
+    fn apply_rpi_model_optimizations_should_support_32bit_and_64bit_models() {
+        let temp_dir = isolated_lock_dir("rpi-opts-test");
+        let boot_path = temp_dir.join("boot");
+        std::fs::create_dir_all(&boot_path).expect("create boot dir");
+
+        let models_32bit = [
+            "Raspberry Pi 4 (32-bit)",
+            "Raspberry Pi 3 (32-bit)",
+            "Raspberry Pi Zero 2 W (32-bit)",
+            "Raspberry Pi Zero W (32-bit)",
+            "Raspberry Pi Zero (32-bit)",
+            "Raspberry Pi 2",
+            "Raspberry Pi 1",
+        ];
+
+        for model in models_32bit {
+            std::fs::write(boot_path.join("config.txt"), "disable_overscan=1\n").unwrap();
+            apply_rpi_model_optimizations(&boot_path, Some(model)).expect("apply 32bit opt");
+            let contents = std::fs::read_to_string(boot_path.join("config.txt")).unwrap();
+            assert!(contents.contains("arm_64bit=0"), "Model {} should set arm_64bit=0", model);
+        }
+
+        let _ = std::fs::remove_dir_all(temp_dir);
     }
 }

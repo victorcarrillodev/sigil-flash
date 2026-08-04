@@ -695,22 +695,87 @@ fn validate_repository_signature(repository: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn read_deb_control_fallback(path: &Path, field: &str) -> Result<String, String> {
+    for member in ["control.tar.gz", "control.tar.xz", "control.tar.zst"] {
+        let ar_out = Command::new("ar")
+            .args(["p"])
+            .arg(path)
+            .arg(member)
+            .output();
+        if let Ok(out) = ar_out {
+            if out.status.success() && !out.stdout.is_empty() {
+                let mut child = Command::new("tar")
+                    .args(["-xO", "./control"])
+                    .stdin(std::process::Stdio::piped())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::null())
+                    .spawn();
+                
+                let tar_stdout = match child {
+                    Ok(mut c) => {
+                        if let Some(mut stdin) = c.stdin.take() {
+                            use std::io::Write;
+                            let _ = stdin.write_all(&out.stdout);
+                        }
+                        c.wait_with_output().map(|res| res.stdout).ok()
+                    }
+                    Err(_) => None,
+                };
+
+                let tar_stdout = match tar_stdout {
+                    Some(stdout) if !stdout.is_empty() => stdout,
+                    _ => {
+                        let mut c2 = Command::new("tar")
+                            .args(["-xO", "control"])
+                            .stdin(std::process::Stdio::piped())
+                            .stdout(std::process::Stdio::piped())
+                            .stderr(std::process::Stdio::null())
+                            .spawn()
+                            .map_err(|e| format!("cannot spawn tar: {e}"))?;
+                        if let Some(mut stdin) = c2.stdin.take() {
+                            use std::io::Write;
+                            let _ = stdin.write_all(&out.stdout);
+                        }
+                        let res2 = c2.wait_with_output().map_err(|e| format!("tar failed: {e}"))?;
+                        if res2.status.success() {
+                            res2.stdout
+                        } else {
+                            continue;
+                        }
+                    }
+                };
+
+                if let Ok(text) = String::from_utf8(tar_stdout) {
+                    let prefix = format!("{field}: ");
+                    for line in text.lines() {
+                        if let Some(val) = line.strip_prefix(&prefix) {
+                            return Ok(val.trim().to_owned());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Err(format!("cannot inspect Debian package metadata (dpkg-deb and ar/tar failed): {}", path.display()))
+}
+
 fn validate_deb_metadata(path: &Path, expected: &ManifestPackage) -> Result<(), String> {
     let mut fields = Vec::with_capacity(3);
     for field in ["Package", "Version", "Architecture"] {
-        let output = Command::new("dpkg-deb")
+        let value = match Command::new("dpkg-deb")
             .args(["-f"])
             .arg(path)
             .arg(field)
             .output()
-            .map_err(|error| format!("cannot execute dpkg-deb: {error}"))?;
-        if !output.status.success() {
-            return Err(format!("invalid Debian package: {}", path.display()));
-        }
-        let value = String::from_utf8(output.stdout)
-            .map_err(|error| format!("invalid dpkg-deb output: {error}"))?
-            .trim()
-            .to_owned();
+        {
+            Ok(output) if output.status.success() => {
+                String::from_utf8(output.stdout)
+                    .map_err(|error| format!("invalid dpkg-deb output: {error}"))?
+                    .trim()
+                    .to_owned()
+            }
+            _ => read_deb_control_fallback(path, field)?,
+        };
         if value.is_empty() || value.contains('\n') {
             return Err(format!("invalid {field} metadata: {}", path.display()));
         }

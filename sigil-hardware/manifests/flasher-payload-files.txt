@@ -37,6 +37,7 @@ scripts/sigil-license-purge.sh
 scripts/sigil-cache-wipe.sh
 scripts/sigil-healthcheck.sh
 scripts/sigil-leds.sh
+scripts/sigil-event-listener.sh
 scripts/sigil-logout-fetch-operation.sh
 scripts/sigil-pulseaudio-supervisor.sh
 scripts/sigil-validate-state.sh
