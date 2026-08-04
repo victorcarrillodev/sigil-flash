@@ -201,7 +201,7 @@ function DonutGauge({
   pctMusic: number;
   pctFree: number;
 }) {
-  const R = 40;
+  const R = 42;
   const circ = 2 * Math.PI * R;
 
   const filledBoot = (pctBoot / 100) * circ;
@@ -219,124 +219,150 @@ function DonutGauge({
       alignItems: "center",
       justifyContent: "center",
       position: "relative",
-      width: 165,
-      height: 165,
+      width: 170,
+      height: 170,
       flexShrink: 0,
+      borderRadius: "50%",
+      background: "var(--surface-gradient)",
+      boxShadow: "var(--shadow-raised-sm)",
+      border: "1px solid var(--border-light)",
+      padding: "8px",
     }}>
-      <svg width="100%" height="100%" viewBox="0 0 100 100" style={{ transform: "rotate(-90deg)" }}>
-        {/* Círculo base gris */}
-        <circle
-          cx="50"
-          cy="50"
-          r={R}
-          fill="transparent"
-          stroke="var(--bg-deep)"
-          strokeWidth="14"
-        />
-        {pct > 0 ? (
-          <>
-            {/* Segmento 6: Libre (Gris) */}
-            <circle
-              cx="50"
-              cy="50"
-              r={R}
-              fill="transparent"
-              stroke="#475569"
-              strokeWidth="14"
-              strokeDasharray={`${filledFree} ${circ - filledFree}`}
-              strokeDashoffset={-(filledBoot + filledOS + filledPanel + filledServices + filledMusic)}
-              strokeLinecap="butt"
-              style={{ transition: "all 0.4s ease-out" }}
-            />
-            {/* Segmento 5: Música (Verde) */}
-            <circle
-              cx="50"
-              cy="50"
-              r={R}
-              fill="transparent"
-              stroke="#10b981"
-              strokeWidth="14"
-              strokeDasharray={`${filledMusic} ${circ - filledMusic}`}
-              strokeDashoffset={-(filledBoot + filledOS + filledPanel + filledServices)}
-              strokeLinecap="butt"
-              style={{ transition: "all 0.4s ease-out" }}
-            />
-            {/* Segmento 4: Servicios (Púrpura) */}
-            <circle
-              cx="50"
-              cy="50"
-              r={R}
-              fill="transparent"
-              stroke="#a855f7"
-              strokeWidth="14"
-              strokeDasharray={`${filledServices} ${circ - filledServices}`}
-              strokeDashoffset={-(filledBoot + filledOS + filledPanel)}
-              strokeLinecap="butt"
-              style={{ transition: "all 0.4s ease-out" }}
-            />
-            {/* Segmento 3: Panel (Naranja) */}
-            <circle
-              cx="50"
-              cy="50"
-              r={R}
-              fill="transparent"
-              stroke="#f97316"
-              strokeWidth="14"
-              strokeDasharray={`${filledPanel} ${circ - filledPanel}`}
-              strokeDashoffset={-(filledBoot + filledOS)}
-              strokeLinecap="butt"
-              style={{ transition: "all 0.4s ease-out" }}
-            />
-            {/* Segmento 2: OS Base (Magenta) */}
-            <circle
-              cx="50"
-              cy="50"
-              r={R}
-              fill="transparent"
-              stroke="var(--accent)"
-              strokeWidth="14"
-              strokeDasharray={`${filledOS} ${circ - filledOS}`}
-              strokeDashoffset={-filledBoot}
-              strokeLinecap="butt"
-              style={{ transition: "all 0.4s ease-out" }}
-            />
-            {/* Segmento 1: Boot (Cian) */}
-            <circle
-              cx="50"
-              cy="50"
-              r={R}
-              fill="transparent"
-              stroke="var(--info)"
-              strokeWidth="14"
-              strokeDasharray={`${filledBoot} ${circ - filledBoot}`}
-              strokeDashoffset={0}
-              strokeLinecap="butt"
-              style={{ transition: "all 0.4s ease-out" }}
-            />
-          </>
-        ) : (
-          /* Si no hay datos, mostramos un círculo vacío */
+      {/* Neumorphic Inset Ring Track */}
+      <div style={{
+        width: "100%",
+        height: "100%",
+        borderRadius: "50%",
+        position: "relative",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        background: "var(--bg-deep)",
+        boxShadow: "var(--shadow-inset-sm)",
+        border: "1px solid var(--border-dark)",
+      }}>
+        <svg width="100%" height="100%" viewBox="0 0 100 100" style={{ transform: "rotate(-90deg)" }}>
+          {/* Base track */}
           <circle
             cx="50"
             cy="50"
             r={R}
             fill="transparent"
-            stroke="var(--text-muted)"
-            strokeWidth="3"
-            opacity="0.2"
+            stroke="var(--surface)"
+            strokeWidth="10"
           />
-        )}
-      </svg>
+          {pct > 0 ? (
+            <>
+              {/* Segmento 6: Libre (Gris) */}
+              <circle
+                cx="50"
+                cy="50"
+                r={R}
+                fill="transparent"
+                stroke="#475569"
+                strokeWidth="10"
+                strokeDasharray={`${filledFree} ${circ - filledFree}`}
+                strokeDashoffset={-(filledBoot + filledOS + filledPanel + filledServices + filledMusic)}
+                strokeLinecap="butt"
+                style={{ transition: "all 0.4s ease-out" }}
+              />
+              {/* Segmento 5: Música (Verde) */}
+              <circle
+                cx="50"
+                cy="50"
+                r={R}
+                fill="transparent"
+                stroke="#10b981"
+                strokeWidth="10"
+                strokeDasharray={`${filledMusic} ${circ - filledMusic}`}
+                strokeDashoffset={-(filledBoot + filledOS + filledPanel + filledServices)}
+                strokeLinecap="butt"
+                style={{ transition: "all 0.4s ease-out" }}
+              />
+              {/* Segmento 4: Servicios (Púrpura) */}
+              <circle
+                cx="50"
+                cy="50"
+                r={R}
+                fill="transparent"
+                stroke="#a855f7"
+                strokeWidth="10"
+                strokeDasharray={`${filledServices} ${circ - filledServices}`}
+                strokeDashoffset={-(filledBoot + filledOS + filledPanel)}
+                strokeLinecap="butt"
+                style={{ transition: "all 0.4s ease-out" }}
+              />
+              {/* Segmento 3: Panel (Naranja) */}
+              <circle
+                cx="50"
+                cy="50"
+                r={R}
+                fill="transparent"
+                stroke="#f97316"
+                strokeWidth="10"
+                strokeDasharray={`${filledPanel} ${circ - filledPanel}`}
+                strokeDashoffset={-(filledBoot + filledOS)}
+                strokeLinecap="butt"
+                style={{ transition: "all 0.4s ease-out" }}
+              />
+              {/* Segmento 2: OS Base (Magenta) */}
+              <circle
+                cx="50"
+                cy="50"
+                r={R}
+                fill="transparent"
+                stroke="var(--accent)"
+                strokeWidth="10"
+                strokeDasharray={`${filledOS} ${circ - filledOS}`}
+                strokeDashoffset={-filledBoot}
+                strokeLinecap="butt"
+                style={{ transition: "all 0.4s ease-out" }}
+              />
+              {/* Segmento 1: Boot (Cian) */}
+              <circle
+                cx="50"
+                cy="50"
+                r={R}
+                fill="transparent"
+                stroke="var(--info)"
+                strokeWidth="10"
+                strokeDasharray={`${filledBoot} ${circ - filledBoot}`}
+                strokeDashoffset={0}
+                strokeLinecap="butt"
+                style={{ transition: "all 0.4s ease-out" }}
+              />
+            </>
+          ) : (
+            <circle
+              cx="50"
+              cy="50"
+              r={R}
+              fill="transparent"
+              stroke="var(--border-dark)"
+              strokeWidth="6"
+              strokeDasharray="4 4"
+              opacity="0.6"
+            />
+          )}
+        </svg>
 
-      <div style={{
-        position: "absolute",
-        display: "flex",
-        flexDirection: "column",
-        alignItems: "center",
-        justifyContent: "center",
-      }}>
-        <span className={pctClass} style={{ fontSize: 28, fontWeight: 800 }}>{pct}%</span>
-        <span style={{ fontSize: 11, color: "var(--text-muted)", fontWeight: 600, textTransform: "uppercase" }}>{sublabel}</span>
+        {/* Center Raised Neumorphic Badge */}
+        <div style={{
+          position: "absolute",
+          width: 96,
+          height: 96,
+          borderRadius: "50%",
+          background: "var(--surface-gradient)",
+          boxShadow: "var(--shadow-raised-sm)",
+          border: "1px solid var(--border-light)",
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+          justifyContent: "center",
+        }}>
+          <span className={pctClass} style={{ fontSize: 26, fontWeight: 800, lineHeight: 1.1 }}>{pct}%</span>
+          <span style={{ fontSize: 10, color: "var(--text-muted)", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", marginTop: 2 }}>{sublabel}</span>
+        </div>
       </div>
     </div>
   );
@@ -627,8 +653,8 @@ export default function CenterPanel({
               display: "flex",
               flexDirection: "column",
               gap: "16px",
-              flex: "0 0 58%",
-              maxWidth: "58%",
+              flex: "1.3 1 0px",
+              minWidth: 0,
             }}>
 
               {/* Card 1: RPi illustration + model name + specs */}
@@ -640,17 +666,18 @@ export default function CenterPanel({
                 padding: "20px",
                 flex: "0 0 auto",
               }}>
-                {/* Board image with inset background */}
+                {/* Board image with sleek Neumorphic inset background */}
                 <div style={{
-                  background: "var(--bg-deep)",
-                  boxShadow: "var(--shadow-inset)",
+                  background: "var(--surface-gradient)",
+                  boxShadow: "var(--shadow-inset-sm)",
+                  border: "1px solid var(--border-dark)",
                   borderRadius: "var(--radius-lg)",
                   padding: "16px",
                   display: "flex",
                   alignItems: "center",
                   justifyContent: "center",
                   flex: "1 1 50%",
-                  height: "240px",
+                  minHeight: "190px",
                   overflow: "hidden",
                 }}>
                   <BoardSVG model={rpiModel} />
@@ -788,8 +815,7 @@ export default function CenterPanel({
               display: "flex",
               flexDirection: "column",
               gap: "16px",
-              flex: "0 0 42%",
-              maxWidth: "42%",
+              flex: "1 1 0px",
               minWidth: 0,
             }}>
 
