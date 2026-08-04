@@ -32,6 +32,10 @@ LOG_DIR="/var/log/sigil"
 LOG="${LOG_DIR}/radio-fetcher.log"
 LOCK_FILE="/var/lock/sigil-radio-fetcher.lock"
 RUN_SIGIL_DIR="${SIGIL_RUN_DIR:-/run/sigil}"
+# Escrito por sigil-event-listener.sh cuando el servidor anuncia un cambio de
+# playlist por SSE. El sondeo periódico sigue siendo la fuente de verdad; este
+# FIFO sólo lo adelanta.
+WAKE_FIFO="${SIGIL_WAKE_FIFO:-${RUN_SIGIL_DIR}/playlist-wake}"
 CACHE_OP_LOCK="${RUN_SIGIL_DIR}/cache-operation.lock"
 SSH_ACTIVE_MARKER="${RUN_SIGIL_DIR}/ssh-active"
 LOGOUT_FETCH_MARKER="${RUN_SIGIL_DIR}/logout-fetch-active"
@@ -514,7 +518,29 @@ ensure_dirs() {
         log "DRY" "Would create: ${LOG_DIR}, ${MUSIC_STAGING}/tracks, ${MUSIC_ARCHIVE}"
         return 0
     fi
-    mkdir -p "$LOG_DIR" "$MUSIC_STAGING/tracks" "$MUSIC_ARCHIVE"
+    mkdir -p "$LOG_DIR" "$MUSIC_STAGING/tracks" "$MUSIC_ARCHIVE" "$RUN_SIGIL_DIR"
+    if [ ! -p "$WAKE_FIFO" ]; then
+        rm -f "$WAKE_FIFO"
+        mkfifo -m 0660 "$WAKE_FIFO" 2>/dev/null || true
+    fi
+}
+
+# Duerme hasta `timeout_seconds`, pero corta antes si sigil-event-listener.sh
+# escribe en el FIFO. Se abre en lectura-escritura en el descriptor 203: así
+# `read` nunca bloquea por falta de escritor, y una reconexión del listener no
+# dispara un despertar espurio por el simple hecho de reabrir su extremo.
+sleep_or_wake() {
+    local timeout_seconds="$1"
+    if [ ! -p "$WAKE_FIFO" ]; then
+        sleep "$timeout_seconds"
+        return 0
+    fi
+    exec 203<>"$WAKE_FIFO"
+    local reason=""
+    if read -r -t "$timeout_seconds" -u 203 reason; then
+        log "INFO" "Sincronización adelantada por evento del servidor (${reason:-playlist_changed})"
+    fi
+    exec 203>&-
 }
 
 clean_staging() {
@@ -2253,8 +2279,8 @@ main() {
         # tight reconnect loop: 30, 60, 120, then at most 300 seconds.
         if license_allows_media; then
             reauthorization_backoff=30
-            log "DEBUG" "Sleeping ${PLAYLIST_SYNC_INTERVAL}s until next sync"
-            sleep "$PLAYLIST_SYNC_INTERVAL"
+            log "DEBUG" "Sleeping up to ${PLAYLIST_SYNC_INTERVAL}s until next sync (or server event)"
+            sleep_or_wake "$PLAYLIST_SYNC_INTERVAL"
         else
             log "INFO" "License blocked; retrying authenticated validation in ${reauthorization_backoff}s"
             sleep "$reauthorization_backoff"

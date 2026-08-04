@@ -227,6 +227,7 @@ SCRIPTS=(
     wifi-manager.sh
     audio-manager.sh
     radio-fetcher.sh
+    sigil-event-listener.sh
     audio-player.sh
     sigil-validate-state.sh
     sigil-healthcheck.sh
@@ -508,7 +509,7 @@ else
     fi
     cat > /etc/sigil/panel.env << ENVEOF
 SIGIL_SECRET_KEY=${_secret_key}
-SIGIL_SERVER_URL=https://sigil-server.tail942ea3.ts.net
+SIGIL_SERVER_URL=https://sigil-server.sphinx-pickerel.ts.net
 ENVEOF
     chmod 600 /etc/sigil/panel.env
     chown root:root /etc/sigil/panel.env

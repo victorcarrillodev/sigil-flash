@@ -1,0 +1,20 @@
+[Unit]
+Description=Sigil Event Listener — SSE channel from the backend, wakes radio-fetcher early
+After=sigil-local-bootstrap.service network.target
+Wants=sigil-local-bootstrap.service
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=sigil
+Group=sigil
+Environment=AUDIO_CONF=/etc/sigil/audio.conf
+ExecStart=/usr/local/bin/sigil-event-listener.sh
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
