@@ -59,12 +59,19 @@ if set(contract) != contract_keys or contract["schema_version"] != "2.0":
     raise SystemExit("unsupported canonical package contract")
 if not re.fullmatch(r"[0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[1-9][0-9]*", contract["bundle_version"]):
     raise SystemExit("invalid canonical bundle version")
+known_distribution = contract["distribution"] in ("debian", "raspbian")
+architecture_ok = contract["architecture"] in ("arm64", "armhf")
+# Raspbian (RPi Foundation's ARMv6-compatible rebuild of the archive) only
+# ships alongside their 32-bit official images.
+raspbian_matches_armhf = contract["distribution"] != "raspbian" or contract["architecture"] == "armhf"
+expected_allowed = {contract["architecture"], "all"}
 if (
-    contract["distribution"] != "debian"
+    not known_distribution
     or contract["distribution_version"] != "13"
     or contract["distribution_codename"] != "trixie"
-    or contract["architecture"] != "arm64"
-    or set(contract["allowed_package_architectures"]) != {"arm64", "all"}
+    or not architecture_ok
+    or not raspbian_matches_armhf
+    or set(contract["allowed_package_architectures"]) != expected_allowed
 ):
     raise SystemExit("unsupported distribution or architecture contract")
 if contract["install_recommends"] is not False or contract["version_policy"] != "distribution-candidate":
