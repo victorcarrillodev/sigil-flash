@@ -1,26 +1,70 @@
 # Offline package manufacturing
 
 SIGIL Flash owns the complete lifecycle of the offline APT repository used to
-manufacture Raspberry Pi OS images. SIGIL Hardware supplies only the canonical
-contract at `sigil-hardware/manifests/offline-package-contract.json`.
+manufacture Raspberry Pi OS images. SIGIL Hardware supplies the package
+contracts under `sigil-hardware/manifests/offline-package-contract*.json`:
+the canonical `offline-package-contract.json` (Debian, arm64, official
+64-bit image) and any `offline-package-contract.<variant>.json` sibling
+(e.g. `.armhf.json` -- Raspbian, armhf, official 32-bit image). Raspbian is
+Raspberry Pi Foundation's own ARMv6-compatible rebuild of the full archive;
+it exists because vanilla Debian armhf targets ARMv7+ and would not run on
+the original Pi Zero/Zero W/1. Add a new architecture by dropping in another
+`offline-package-contract.<variant>.json` -- the build and payload scripts
+pick it up automatically, nothing else needs to change.
 
 ## Build
 
 The builder uses isolated APT state and an empty dpkg status database so APT
-resolves the full ARM64 dependency closure instead of relying on packages
+resolves the full dependency closure instead of relying on packages
 installed on the manufacturing host.
 
 ```bash
 ./scripts/build-offline-repository.sh \
-  --base-image ../artifacts/base-images/2026-06-18-raspios-trixie-arm64-lite.img.xz
-./scripts/build-offline-repository.sh --rebuild
+  --contract sigil-hardware/manifests/offline-package-contract.json \
+  --base-image ../artifacts/base-images/2026-06-18-raspios-trixie-arm64-lite.img.xz \
+  --output artifacts/offline-packages/trixie-arm64
+./scripts/build-offline-repository.sh --output artifacts/offline-packages/trixie-arm64 --rebuild
+
+# 32-bit / armhf (Zero W, Zero 2 W in 32-bit mode, Pi 1-4 in 32-bit mode):
+./scripts/build-offline-repository.sh \
+  --contract sigil-hardware/manifests/offline-package-contract.armhf.json \
+  --base-image ../artifacts/base-images/2026-06-18-raspios-trixie-armhf-lite.img.xz \
+  --output artifacts/offline-packages/trixie-armhf
 ```
 
+This needs real `apt-get`, `dpkg-scanpackages`, `apt-ftparchive` and
+`dpkg-deb` -- Debian packaging tools with no native equivalent on non-Debian
+distros. On a host missing any of them, the script detects that automatically
+and re-executes itself inside a throwaway `debian:trixie` Docker container
+(same arguments, output still lands owned by your user); it prints which
+path it took. `setup.sh` installs Docker on non-Debian systems for exactly
+this. Set `SIGIL_OFFLINE_BUILDER_IN_CONTAINER=1` yourself only if you're
+already inside an equivalent Debian environment and want to skip the
+re-exec check.
+
 The builder verifies the exact base-image filename and SHA-256 from the
-canonical contract, then extracts its Deb822 source definitions and Debian /
+contract, then extracts its Deb822 source definitions and Debian/Raspbian /
 Raspberry Pi archive keyrings read-only. The primary Raspberry Pi archive may
 use a documented mirror transport, but its `InRelease` must authenticate with
 the keyring from the official image. Host keyrings are not trusted implicitly.
+
+## Payloads go stale -- always rebuild after touching sigil-hardware/
+
+`build-flasher-payload.sh` copies files into `artifacts/payloads/*` at build
+time; it does not link them. Editing anything under `sigil-hardware/` (e.g.
+`scripts/install-offline-packages.sh`, which runs *inside the chroot at flash
+time*) has no effect until the payload is rebuilt. Run this after every
+change, before flashing:
+
+```bash
+./scripts/rebuild-payloads.sh
+```
+
+It rebuilds `sigil-hardware-payload` (canonical) plus one
+`sigil-hardware-payload-<variant>` per `offline-package-contract.<variant>.json`
+found. Use `SIGIL_PAYLOAD_ALLOW_DIRTY=true` while iterating locally with
+uncommitted `sigil-hardware/` changes; leave it unset for a real
+manufacturing build so the payload's `source_commit` is trustworthy.
 
 Generated output is ignored by Git:
 

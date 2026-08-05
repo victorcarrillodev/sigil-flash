@@ -32,16 +32,11 @@ prerrequisitos de fabricación.
 bash setup.sh
 ```
 
-O manualmente:
-
-```bash
-sudo apt-get install -y \
-  libwebkit2gtk-4.1-dev \
-  libssl-dev \
-  libgtk-3-dev \
-  librsvg2-dev \
-  build-essential
-```
+Detecta el gestor de paquetes (`apt`, `pacman`, `dnf`, `zypper` o `apk`) e instala
+WebKitGTK, OpenSSL, GTK3, librsvg, herramientas de compilación, utilitarios de
+disco, Polkit, QEMU estático y Rust (si falta). En distros no basadas en Debian
+también instala Docker, necesario solo para construir el repositorio APT offline
+de fabricación (ver [`docs/OFFLINE_PACKAGES.md`](docs/OFFLINE_PACKAGES.md)).
 
 ### 2. Instalar dependencias de Node/Bun
 
@@ -114,8 +109,12 @@ sigil-flash/
 
 ## 📋 Requisitos del Sistema
 
-- Linux (Ubuntu/Debian recomendado)
+- Linux — `setup.sh` detecta y soporta Debian/Ubuntu (apt), Arch/Manjaro (pacman),
+  Fedora/RHEL (dnf), openSUSE (zypper) y Alpine (apk)
 - Polkit instalado (para `pkexec`)
 - `dd` disponible (incluido en coreutils)
 - `lsblk` disponible (incluido en util-linux)
-- Rust 1.80+ (instalado automáticamente si usas `setup.sh`)
+- Rust 1.80+ (instalado automáticamente por `setup.sh` si falta `cargo`)
+- Docker — solo necesario para construir el repositorio APT offline de fabricación
+  en distros no basadas en Debian (`setup.sh` lo instala; ver
+  [`docs/OFFLINE_PACKAGES.md`](docs/OFFLINE_PACKAGES.md))

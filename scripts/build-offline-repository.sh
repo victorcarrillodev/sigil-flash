@@ -39,6 +39,66 @@ done
 
 [ -f "$CONTRACT" ] || die "canonical package contract is missing: ${CONTRACT}"
 [ -x "$KEYRING_HELPER" ] || die "official-image keyring helper is missing: ${KEYRING_HELPER}"
+
+# apt-get, dpkg-scanpackages and apt-ftparchive are Debian packaging tools with
+# no native equivalent on non-Debian distros (Arch, Fedora, openSUSE, ...).
+# Building a real Debian/Raspbian APT repository fundamentally needs them, so
+# on a host that lacks them this re-executes the exact same build inside a
+# throwaway debian:trixie container instead of failing outright. Every other
+# required tool (gpg, python3, sfdisk, debugfs, ...) is a normal package on
+# every distro and setup.sh already installs it -- see docs/OFFLINE_PACKAGES.md.
+NEEDS_DEBIAN_TOOLING=false
+for command in "$APT_GET" "$DPKG_SCANPACKAGES" apt-ftparchive dpkg-deb; do
+    command -v "$command" >/dev/null 2>&1 || NEEDS_DEBIAN_TOOLING=true
+done
+
+if $NEEDS_DEBIAN_TOOLING && [ -z "${SIGIL_OFFLINE_BUILDER_IN_CONTAINER:-}" ]; then
+    command -v docker >/dev/null 2>&1 || die \
+        "apt-get/dpkg-scanpackages/apt-ftparchive are unavailable on this host and docker is not installed. Install Docker, or run this on a Debian/Ubuntu host -- see docs/OFFLINE_PACKAGES.md."
+    [ -n "$BASE_IMAGE" ] || die "--base-image (or SIGIL_BASE_IMAGE) is required to build inside a container"
+    [ -f "$BASE_IMAGE" ] || die "verified official base image is missing: ${BASE_IMAGE}"
+
+    ABS_CONTRACT="$(cd "$(dirname "$CONTRACT")" && pwd)/$(basename "$CONTRACT")"
+    ABS_BASE_IMAGE="$(cd "$(dirname "$BASE_IMAGE")" && pwd)/$(basename "$BASE_IMAGE")"
+    mkdir -p -- "$(dirname "$OUTPUT")"
+    ABS_OUTPUT="$(cd "$(dirname "$OUTPUT")" && pwd)/$(basename "$OUTPUT")"
+    case "$ABS_OUTPUT" in
+        "${ROOT}"/*) ;;
+        *) die "--output must live under ${ROOT} to build inside a container (got: ${ABS_OUTPUT})" ;;
+    esac
+    case "$ABS_CONTRACT" in
+        "${ROOT}"/*) ;;
+        *) die "--contract must live under ${ROOT} to build inside a container (got: ${ABS_CONTRACT})" ;;
+    esac
+
+    printf 'apt-get/dpkg-scanpackages/apt-ftparchive are unavailable on this host; building inside a debian:trixie container instead...\n' >&2
+
+    DOCKER_ARGS=(run --rm
+        -e "SIGIL_OFFLINE_BUILDER_IN_CONTAINER=1"
+        -e "HOST_UID=$(id -u)" -e "HOST_GID=$(id -g)" -e "HOME=/tmp"
+        -v "${ROOT}:${ROOT}"
+    )
+    BASE_IMAGE_DIR="$(dirname "$ABS_BASE_IMAGE")"
+    case "$BASE_IMAGE_DIR" in
+        "${ROOT}"/*|"${ROOT}") ;;
+        *) DOCKER_ARGS+=(-v "${BASE_IMAGE_DIR}:${BASE_IMAGE_DIR}:ro") ;;
+    esac
+
+    REBUILD_ARGS=()
+    $REBUILD && REBUILD_ARGS+=(--rebuild)
+
+    exec docker "${DOCKER_ARGS[@]}" debian:trixie bash -c '
+        set -euo pipefail
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update -qq
+        apt-get install -y -qq --no-install-recommends \
+            apt-utils dpkg-dev gnupg xz-utils util-linux fdisk e2fsprogs python3 ca-certificates >/dev/null
+        exec setpriv --reuid="$HOST_UID" --regid="$HOST_GID" --clear-groups "$@"
+    ' sh "${ROOT}/scripts/build-offline-repository.sh" \
+        --contract "$ABS_CONTRACT" --base-image "$ABS_BASE_IMAGE" --output "$ABS_OUTPUT" \
+        "${REBUILD_ARGS[@]}"
+fi
+
 for command in "$APT_GET" "$DPKG_SCANPACKAGES" dpkg-deb apt-ftparchive gpg gzip python3; do
     command -v "$command" >/dev/null || die "required command is unavailable: ${command}"
 done
