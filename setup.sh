@@ -124,7 +124,9 @@ elif command -v zypper &>/dev/null; then
   NEEDS_MANUFACTURING_DOCKER_NOTE=true
 elif command -v apk &>/dev/null; then
   echo "📦 Detectado sistema basado en Alpine (apk)..."
+  echo "   Nota: Alpine usa musl libc; no está tan probado como las demás distros."
   sudo apk add \
+    bash \
     webkit2gtk-4.1-dev \
     openssl-dev \
     libappindicator-dev \
