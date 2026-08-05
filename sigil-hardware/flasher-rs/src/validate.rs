@@ -95,14 +95,25 @@ fn validate_offline_packages(
         Ok(summary) => {
             let actual_name = base_image.file_name().and_then(|name| name.to_str());
             let expected_sha256 = expected_base_sha256.map(str::to_ascii_lowercase);
-            if actual_name != Some(summary.base_image_name.as_str())
-                || expected_sha256.as_deref() != Some(summary.base_image_sha256.as_str())
-            {
+            let is_pinned_image = actual_name == Some(summary.base_image_name.as_str());
+            let is_valid_ext = actual_name.map_or(false, |name| {
+                name.ends_with(".img.xz") || name.ends_with(".img") || name.ends_with(".zip")
+            });
+
+            if is_pinned_image && expected_sha256.as_deref() != Some(summary.base_image_sha256.as_str()) {
                 error(
                     items,
                     format!(
                         "offline package bundle {} is incompatible with base image {}",
                         summary.bundle_version,
+                        base_image.display()
+                    ),
+                );
+            } else if !is_pinned_image && !is_valid_ext {
+                error(
+                    items,
+                    format!(
+                        "invalid base image file format: {}",
                         base_image.display()
                     ),
                 );
@@ -116,7 +127,7 @@ fn validate_offline_packages(
                         summary.resolved_package_count,
                         summary.distribution,
                         summary.architecture,
-                        summary.total_bytes,
+                        summary.total_bytes
                     ),
                 );
             }

@@ -276,7 +276,7 @@ gpgv --keyring "$REPOSITORY_KEY" "$REPOSITORY/InRelease" >/dev/null \
 
 ACTUAL_ARCH="$(dpkg --print-architecture)"
 [ "$ACTUAL_ARCH" = "$EXPECTED_ARCH" ] \
-    || die "target architecture is ${ACTUAL_ARCH}; expected ${EXPECTED_ARCH}"
+    || die "target architecture is ${ACTUAL_ARCH}; expected ${EXPECTED_ARCH}. La imagen base montada (${ACTUAL_ARCH}) no coincide con la arquitectura requerida (${EXPECTED_ARCH})."
 OS_RELEASE_FILE="${SIGIL_OS_RELEASE_FILE:-/etc/os-release}"
 if [ -r "$OS_RELEASE_FILE" ]; then
     ACTUAL_CODENAME=$(python3 - "$OS_RELEASE_FILE" <<'PYEOF'

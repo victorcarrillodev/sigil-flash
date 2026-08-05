@@ -84,16 +84,39 @@ extract_file() {
     [ -s "$destination" ] || die "official image file is missing or empty: ${source}"
 }
 
-extract_file /etc/apt/sources.list.d/debian.sources "$EXTRACTED/debian.sources"
+# The 64-bit official image ships debian.sources (vanilla Debian, ARMv7+/
+# arm64 baseline). The 32-bit official image ships raspbian.sources instead:
+# Raspberry Pi Foundation's own ARMv6-compatible rebuild of the full archive,
+# required because the original Pi Zero/Zero W/1 cannot run vanilla Debian
+# armhf binaries. Try both known-good candidates; never fall back to an
+# unpinned source.
+BASE_SOURCE_FILE=""
+for candidate in debian.sources raspbian.sources; do
+    debugfs -R "dump -p /etc/apt/sources.list.d/${candidate} ${EXTRACTED}/${candidate}" \
+        "$ROOTFS" >/dev/null 2>&1
+    if [ -s "${EXTRACTED}/${candidate}" ]; then
+        BASE_SOURCE_FILE="$candidate"
+        break
+    fi
+    rm -f "${EXTRACTED}/${candidate}"
+done
+[ -n "$BASE_SOURCE_FILE" ] \
+    || die "official image ships neither debian.sources nor raspbian.sources"
+case "$BASE_SOURCE_FILE" in
+    debian.sources) BASE_KEYRING_ARTIFACT=debian-archive-keyring.pgp ;;
+    raspbian.sources) BASE_KEYRING_ARTIFACT=raspbian-archive-keyring.gpg ;;
+esac
+
 extract_file /etc/apt/sources.list.d/raspi.sources "$EXTRACTED/raspi.sources"
-extract_file /usr/share/keyrings/debian-archive-keyring.pgp \
-    "$EXTRACTED/keyrings/debian-archive-keyring.pgp"
+extract_file "/usr/share/keyrings/${BASE_KEYRING_ARTIFACT}" \
+    "$EXTRACTED/keyrings/${BASE_KEYRING_ARTIFACT}"
 extract_file /usr/share/keyrings/raspberrypi-archive-keyring.pgp \
     "$EXTRACTED/keyrings/raspberrypi-archive-keyring.pgp"
 extract_file /usr/lib/os-release "$EXTRACTED/os-release"
 extract_file /var/lib/dpkg/status "$WORK/dpkg-status"
 
-python3 - "$CONTRACT" "$BASE_IMAGE" "$EXTRACTED" "$WORK/dpkg-status" <<'PYEOF'
+python3 - "$CONTRACT" "$BASE_IMAGE" "$EXTRACTED" "$WORK/dpkg-status" \
+    "$BASE_SOURCE_FILE" "$BASE_KEYRING_ARTIFACT" <<'PYEOF'
 import hashlib
 import json
 import pathlib
@@ -105,7 +128,42 @@ contract_path = pathlib.Path(sys.argv[1]).resolve()
 base_image = pathlib.Path(sys.argv[2]).resolve()
 snapshot = pathlib.Path(sys.argv[3]).resolve()
 status_path = pathlib.Path(sys.argv[4])
+base_source_file = sys.argv[5]
+base_keyring_artifact = sys.argv[6]
 contract = json.loads(contract_path.read_text(encoding="utf-8"))
+
+# 64-bit official images ship debian.sources (vanilla Debian). 32-bit official
+# images ship raspbian.sources: Raspberry Pi Foundation's own ARMv6-compatible
+# rebuild of the full archive, required because vanilla Debian armhf targets
+# ARMv7+ only. Both are pinned exactly; only the selection between them is
+# dynamic, driven by which file the verified image actually contains.
+base_source_expectations = {
+    "debian.sources": {
+        "signed_by": "/usr/share/keyrings/debian-archive-keyring.pgp",
+        "uris": {"http://deb.debian.org/debian/", "http://deb.debian.org/debian-security/"},
+        "scope": "Debian 13 Trixie and security archives",
+        "distribution": "debian",
+        "keyring_package": "debian-archive-keyring",
+    },
+    "raspbian.sources": {
+        "signed_by": "/usr/share/keyrings/raspbian-archive-keyring.gpg",
+        "uris": {"http://raspbian.raspberrypi.com/raspbian/"},
+        "scope": "Raspbian (Raspberry Pi ARMv6-compatible) Trixie archive",
+        "distribution": "raspbian",
+        "keyring_package": "raspbian-archive-keyring",
+    },
+}
+if base_source_file not in base_source_expectations:
+    raise SystemExit(f"unsupported base source file: {base_source_file}")
+base_expectation = base_source_expectations[base_source_file]
+if base_expectation["signed_by"] != f"/usr/share/keyrings/{base_keyring_artifact}":
+    raise SystemExit("base source keyring artifact does not match its pinned expectation")
+if contract["distribution"] != base_expectation["distribution"]:
+    raise SystemExit(
+        f"package contract distribution {contract['distribution']!r} does not match "
+        f"the official image's base source ({base_source_file} implies "
+        f"{base_expectation['distribution']!r})"
+    )
 
 os_release = {}
 for line in (snapshot / "os-release").read_text(encoding="utf-8").splitlines():
@@ -130,11 +188,7 @@ for stanza in status_path.read_text(encoding="utf-8", errors="strict").split("\n
         status[fields["Package"]] = fields
 
 source_expectations = {
-    "debian.sources": {
-        "signed_by": "/usr/share/keyrings/debian-archive-keyring.pgp",
-        "uris": {"http://deb.debian.org/debian/", "http://deb.debian.org/debian-security/"},
-        "scope": "Debian 13 Trixie and security archives",
-    },
+    base_source_file: base_expectation,
     "raspi.sources": {
         "signed_by": "/usr/share/keyrings/raspberrypi-archive-keyring.pgp",
         "uris": {"http://archive.raspberrypi.com/debian/"},
@@ -174,10 +228,10 @@ for filename, expectation in source_expectations.items():
 
 keyring_specs = [
     (
-        "debian-archive-keyring",
-        "/usr/share/keyrings/debian-archive-keyring.pgp",
-        "keyrings/debian-archive-keyring.pgp",
-        "Debian 13 Trixie and security archives",
+        base_expectation["keyring_package"],
+        base_expectation["signed_by"],
+        f"keyrings/{base_keyring_artifact}",
+        base_expectation["scope"],
     ),
     (
         "raspberrypi-archive-keyring",

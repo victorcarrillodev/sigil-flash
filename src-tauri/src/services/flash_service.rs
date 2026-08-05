@@ -27,9 +27,9 @@ pub struct FlashService {
     active_process: Arc<Mutex<Option<tokio::process::Child>>>,
     // Serializes flash requests inside this application process.
     operation_lock: Arc<Mutex<()>>,
+    flash_root: PathBuf,
     offline_packages: PathBuf,
     hardware_payload: PathBuf,
-    package_contract: PathBuf,
     api_key_file: PathBuf,
 }
 
@@ -170,9 +170,6 @@ impl FlashService {
             .join("artifacts")
             .join("payloads")
             .join("sigil-hardware-payload");
-        let package_contract = hardware_payload
-            .join("manifests")
-            .join("offline-package-contract.json");
         Self {
             active_process: Arc::new(Mutex::new(None)),
             operation_lock: Arc::new(Mutex::new(())),
@@ -181,12 +178,29 @@ impl FlashService {
                 .join("offline-packages")
                 .join("trixie-arm64"),
             hardware_payload,
-            package_contract,
             api_key_file: flash_root
                 .join("artifacts")
                 .join("secrets")
                 .join("enrollment-key"),
+            flash_root,
         }
+    }
+
+    /// Picks the offline-packages/hardware-payload pair matching the selected
+    /// base image. Architecture-specific bundles live at fixed sibling paths
+    /// (`trixie-<arch>`, `sigil-hardware-payload-<arch>`); this only decides
+    /// *which* pair to hand to the elevated writer. The mounted rootfs's real
+    /// ELF architecture is still verified against the chosen bundle's own
+    /// contract inside `install_sigil_hardware`, so a wrong guess here fails
+    /// closed with a clear error instead of silently installing foreign-arch
+    /// packages.
+    fn resolve_architecture_bundle(&self, image_path: &Path) -> (PathBuf, PathBuf) {
+        resolve_architecture_bundle_paths(
+            &self.flash_root,
+            image_path,
+            &self.offline_packages,
+            &self.hardware_payload,
+        )
     }
 
     /// Spawns the elevated writer child process and polls its progress file.
@@ -214,11 +228,15 @@ impl FlashService {
         }
         let manufacturing_config =
             manufacturing_config_with_api_key(config, &self.api_key_file).await?;
+        let (offline_packages, hardware_payload) = self.resolve_architecture_bundle(&image_p);
+        let package_contract = hardware_payload
+            .join("manifests")
+            .join("offline-package-contract.json");
         validate_bundle_for_image(
             &image_p,
-            &self.hardware_payload,
-            &self.offline_packages,
-            &self.package_contract,
+            &hardware_payload,
+            &offline_packages,
+            &package_contract,
         )?;
         let private_config = PrivateConfigFile::create(&manufacturing_config)?;
 
@@ -250,9 +268,9 @@ impl FlashService {
             "--progress-file".to_string(),
             progress_file.to_string_lossy().to_string(),
             "--offline-packages".to_string(),
-            self.offline_packages.to_string_lossy().to_string(),
+            offline_packages.to_string_lossy().to_string(),
             "--payload".to_string(),
-            self.hardware_payload.to_string_lossy().to_string(),
+            hardware_payload.to_string_lossy().to_string(),
             "--config-file".to_string(),
             private_config.path().to_string_lossy().to_string(),
         ];
@@ -1551,16 +1569,192 @@ fn erase_plaintext_file(path: &Path) {
     let _ = std::fs::remove_file(path);
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TargetElfArch {
+    Arm32,   // EM_ARM = 40 (armhf / armv7l)
+    Arm64,   // EM_AARCH64 = 183 (aarch64 / arm64)
+    X86_64,  // EM_X86_64 = 62
+    X86,     // EM_386 = 3
+}
+
+fn resolve_target_symlink(root: &Path, rel_path: &str) -> Option<PathBuf> {
+    let mut current = root.join(rel_path);
+    for _ in 0..5 {
+        let meta = std::fs::symlink_metadata(&current).ok()?;
+        if meta.file_type().is_symlink() {
+            let target = std::fs::read_link(&current).ok()?;
+            if target.is_absolute() {
+                let rel = target.strip_prefix("/").ok()?;
+                current = root.join(rel);
+            } else {
+                let parent = current.parent()?;
+                current = parent.join(target);
+            }
+        } else if meta.is_file() {
+            return Some(current);
+        } else {
+            return None;
+        }
+    }
+    if current.is_file() {
+        Some(current)
+    } else {
+        None
+    }
+}
+
+fn get_file_elf_arch(file_path: &Path) -> Option<TargetElfArch> {
+    let mut file = std::fs::File::open(file_path).ok()?;
+    let mut buf = [0u8; 20];
+    use std::io::Read;
+    if file.read_exact(&mut buf).is_err() {
+        return None;
+    }
+    if &buf[0..4] != b"\x7fELF" {
+        return None;
+    }
+    let data = buf[5]; // 1 = LSB, 2 = MSB
+    let machine = if data == 1 {
+        u16::from_le_bytes([buf[18], buf[19]])
+    } else if data == 2 {
+        u16::from_be_bytes([buf[18], buf[19]])
+    } else {
+        return None;
+    };
+
+    match machine {
+        40 => Some(TargetElfArch::Arm32),
+        183 => Some(TargetElfArch::Arm64),
+        62 => Some(TargetElfArch::X86_64),
+        3 => Some(TargetElfArch::X86),
+        _ => None,
+    }
+}
+
+fn detect_rootfs_elf_arch(root: &Path) -> TargetElfArch {
+    let candidate_rel_paths = [
+        "bin/bash",
+        "usr/bin/bash",
+        "bin/sh",
+        "usr/bin/sh",
+        "lib/systemd/systemd",
+        "usr/lib/systemd/systemd",
+    ];
+
+    for rel in candidate_rel_paths {
+        if let Some(real_path) = resolve_target_symlink(root, rel) {
+            if let Some(arch) = get_file_elf_arch(&real_path) {
+                return arch;
+            }
+        }
+    }
+
+    TargetElfArch::Arm64
+}
+
+#[derive(Debug, Clone)]
+struct QemuInfo {
+    target_rel_path: PathBuf,
+    host_source_path: PathBuf,
+    qemu_name: String,
+}
+
+fn determine_required_qemu(root: &Path) -> AppResult<Option<QemuInfo>> {
+    let target_arch = detect_rootfs_elf_arch(root);
+    let host_arch = std::env::consts::ARCH;
+
+    let matches_host = match (host_arch, target_arch) {
+        ("x86_64", TargetElfArch::X86_64) => true,
+        ("aarch64", TargetElfArch::Arm64) => true,
+        ("arm" | "armhf", TargetElfArch::Arm32) => true,
+        ("x86", TargetElfArch::X86) => true,
+        _ => false,
+    };
+
+    if matches_host {
+        return Ok(None);
+    }
+
+    let (qemu_name, candidate_host_paths) = match target_arch {
+        TargetElfArch::Arm32 => (
+            "qemu-arm-static",
+            vec![
+                Path::new("/usr/bin/qemu-arm-static"),
+                Path::new("/usr/local/bin/qemu-arm-static"),
+                Path::new("/usr/bin/qemu-arm"),
+            ],
+        ),
+        TargetElfArch::Arm64 => (
+            "qemu-aarch64-static",
+            vec![
+                Path::new("/usr/bin/qemu-aarch64-static"),
+                Path::new("/usr/local/bin/qemu-aarch64-static"),
+                Path::new("/usr/bin/qemu-aarch64"),
+            ],
+        ),
+        TargetElfArch::X86_64 => (
+            "qemu-x86_64-static",
+            vec![
+                Path::new("/usr/bin/qemu-x86_64-static"),
+                Path::new("/usr/local/bin/qemu-x86_64-static"),
+                Path::new("/usr/bin/qemu-x86_64"),
+            ],
+        ),
+        TargetElfArch::X86 => (
+            "qemu-i386-static",
+            vec![
+                Path::new("/usr/bin/qemu-i386-static"),
+                Path::new("/usr/local/bin/qemu-i386-static"),
+                Path::new("/usr/bin/qemu-i386"),
+            ],
+        ),
+    };
+
+    let found_host_path = candidate_host_paths
+        .iter()
+        .find(|p| p.is_file())
+        .copied();
+
+    let host_source = match found_host_path {
+        Some(path) => path.to_path_buf(),
+        None => {
+            let msg = if qemu_name == "qemu-aarch64-static" {
+                "qemu-aarch64-static es obligatorio para preparar una imagen ARM64 desde este host. Instálalo con 'sudo pacman -S qemu-user-static qemu-user-static-binfmt' (Arch/Manjaro) o 'sudo apt install qemu-user-static' (Debian/Ubuntu).".to_string()
+            } else {
+                let arch_label = match target_arch {
+                    TargetElfArch::Arm64 => "ARM64",
+                    TargetElfArch::Arm32 => "ARM32 (armhf)",
+                    TargetElfArch::X86_64 => "x86_64",
+                    TargetElfArch::X86 => "x86",
+                };
+                format!(
+                    "{qemu_name} es obligatorio para preparar una imagen {arch_label} desde este host. Instálalo con 'sudo pacman -S qemu-user-static qemu-user-static-binfmt' (Arch/Manjaro) o 'sudo apt install qemu-user-static' (Debian/Ubuntu)."
+                )
+            };
+            return Err(AppError::Flash(msg));
+        }
+    };
+
+    let target_rel_path = PathBuf::from("usr/bin").join(qemu_name);
+
+    Ok(Some(QemuInfo {
+        target_rel_path,
+        host_source_path: host_source,
+        qemu_name: qemu_name.to_string(),
+    }))
+}
+
 fn run_target_command(
     root: &Path,
     program: &str,
     args: &[&str],
     stdin: Option<&[u8]>,
+    qemu_cmd: Option<&str>,
 ) -> AppResult<Output> {
     let mut command = std::process::Command::new("chroot");
     command.arg(root);
-    if std::env::consts::ARCH != "aarch64" {
-        command.arg("/usr/bin/qemu-aarch64-static");
+    if let Some(qemu) = qemu_cmd {
+        command.arg(qemu);
     }
     command
         .arg(program)
@@ -1593,7 +1787,7 @@ fn run_target_command(
         .map_err(|error| AppError::Flash(format!("No se pudo esperar a {program}: {error}")))
 }
 
-fn provision_panel_credential(root: &Path, config: &DeviceConfig) -> AppResult<()> {
+fn provision_panel_credential(root: &Path, config: &DeviceConfig, qemu_cmd: Option<&str>) -> AppResult<()> {
     let pin = normalized_panel_pin(config.panel_pin.as_deref())?;
     let manufacturing_dir = root.join("etc/sigil/manufacturing");
     std::fs::create_dir_all(&manufacturing_dir)?;
@@ -1622,6 +1816,7 @@ fn provision_panel_credential(root: &Path, config: &DeviceConfig) -> AppResult<(
             "/etc/sigil/secrets/panel-pin.length",
         ],
         None,
+        qemu_cmd,
     );
     let output = match output {
         Ok(output) => output,
@@ -1842,7 +2037,7 @@ fn configure_ssh_service(root: &Path, action: &str) -> AppResult<()> {
     )))
 }
 
-fn provision_ssh_access(root: &Path, config: &DeviceConfig) -> AppResult<()> {
+fn provision_ssh_access(root: &Path, config: &DeviceConfig, qemu_cmd: Option<&str>) -> AppResult<()> {
     write_ssh_dropin(root, config.ssh_enabled)?;
 
     if !config.ssh_enabled {
@@ -1874,6 +2069,7 @@ fn provision_ssh_access(root: &Path, config: &DeviceConfig) -> AppResult<()> {
         "/usr/sbin/chpasswd",
         &["-c", "YESCRYPT"],
         Some(credential.as_bytes()),
+        qemu_cmd,
     )?;
     if !output.status.success() {
         let detail = summarize_command_failure(&output.stdout, &output.stderr);
@@ -1883,7 +2079,7 @@ fn provision_ssh_access(root: &Path, config: &DeviceConfig) -> AppResult<()> {
     }
 
     let sudo_output =
-        run_target_command(root, "/usr/sbin/usermod", &["-aG", "sudo", "sigil"], None)?;
+        run_target_command(root, "/usr/sbin/usermod", &["-aG", "sudo", "sigil"], None, qemu_cmd)?;
     if !sudo_output.status.success() {
         let detail = summarize_command_failure(&sudo_output.stdout, &sudo_output.stderr);
         return Err(AppError::Flash(format!(
@@ -1891,11 +2087,11 @@ fn provision_ssh_access(root: &Path, config: &DeviceConfig) -> AppResult<()> {
         )));
     }
 
-    validate_ssh_configuration(root)?;
+    validate_ssh_configuration(root, qemu_cmd)?;
     configure_ssh_service(root, "enable")
 }
 
-fn validate_ssh_configuration(root: &Path) -> AppResult<()> {
+fn validate_ssh_configuration(root: &Path, qemu_cmd: Option<&str>) -> AppResult<()> {
     let run_sshd = root.join("run/sshd");
     let created_run_sshd = !run_sshd.exists();
     std::fs::create_dir_all(&run_sshd)?;
@@ -1917,6 +2113,7 @@ fn validate_ssh_configuration(root: &Path) -> AppResult<()> {
                 SSH_VALIDATION_HOST_KEY,
             ],
             None,
+            qemu_cmd,
         )?;
         if !key_generation.status.success() {
             let detail = summarize_command_failure(&key_generation.stdout, &key_generation.stderr);
@@ -1925,7 +2122,7 @@ fn validate_ssh_configuration(root: &Path) -> AppResult<()> {
             )));
         }
 
-        let validation = run_target_command(root, "/usr/sbin/sshd", &sshd_validation_args(), None)?;
+        let validation = run_target_command(root, "/usr/sbin/sshd", &sshd_validation_args(), None, qemu_cmd)?;
         if !validation.status.success() {
             let detail = summarize_command_failure(&validation.stdout, &validation.stderr);
             return Err(AppError::Flash(format!(
@@ -1953,7 +2150,7 @@ fn install_sigil_hardware(
         .join("manifests")
         .join("offline-package-contract.json");
 
-    flasher_rs::offline::validate_repository(offline_packages, &package_contract)
+    let repository_summary = flasher_rs::offline::validate_repository(offline_packages, &package_contract)
         .map_err(|error| AppError::Validation(format!("Bundle offline inválido: {error}")))?;
 
     println!("Recargando tabla de particiones en {device}...");
@@ -1977,6 +2174,20 @@ fn install_sigil_hardware(
     mounted.push(mount_dir.clone());
 
     let preparation = (|| -> AppResult<()> {
+        let rootfs_elf_arch = detect_rootfs_elf_arch(&mount_dir);
+        let actual_arch_code = match rootfs_elf_arch {
+            TargetElfArch::Arm32 => "armhf",
+            TargetElfArch::Arm64 => "arm64",
+            TargetElfArch::X86_64 => "x86_64",
+            TargetElfArch::X86 => "x86",
+        };
+        if repository_summary.architecture != actual_arch_code {
+            return Err(AppError::Validation(format!(
+                "Incompatibilidad de arquitectura: La imagen base del sistema montada es {actual_arch_code}, pero el repositorio offline de Sigil está compilado para {}. Asegúrate de usar una imagen base y un paquete offline con la misma arquitectura.",
+                repository_summary.architecture
+            )));
+        }
+
         let boot_mount = mount_dir.join("boot/firmware");
         std::fs::create_dir_all(&boot_mount)?;
         mount_checked(&boot_partition, &boot_mount)?;
@@ -2037,34 +2248,29 @@ fn install_sigil_hardware(
             std::fs::set_permissions(&policy_path, std::fs::Permissions::from_mode(0o755))?;
         }
 
-        let qemu_target = mount_dir.join("usr/bin/qemu-aarch64-static");
-        let candidate_qemu_paths = [
-            Path::new("/usr/bin/qemu-aarch64-static"),
-            Path::new("/usr/local/bin/qemu-aarch64-static"),
-            Path::new("/usr/bin/qemu-aarch64"),
-        ];
-        let found_qemu = candidate_qemu_paths.iter().find(|p| p.is_file()).copied();
-
-        let copied_qemu = std::env::consts::ARCH != "aarch64" && !qemu_target.exists();
-        let install_result = (|| -> AppResult<()> {
-            if copied_qemu {
-                let qemu_source = match found_qemu {
-                    Some(path) => path,
-                    None => {
-                        return Err(AppError::Flash(
-                            "qemu-aarch64-static es obligatorio para preparar una imagen ARM64 desde este host. Instálalo con 'sudo pacman -S qemu-user-static qemu-user-static-binfmt' (Arch/Manjaro) o 'sudo apt install qemu-user-static' (Debian/Ubuntu)."
-                                .into(),
-                        ));
+        let qemu_info = determine_required_qemu(&mount_dir)?;
+        let (qemu_cmd_str, qemu_target_path, copied_qemu) = match &qemu_info {
+            Some(info) => {
+                let target_path = mount_dir.join(&info.target_rel_path);
+                let needs_copy = !target_path.exists();
+                if needs_copy {
+                    if let Some(parent) = target_path.parent() {
+                        let _ = std::fs::create_dir_all(parent);
                     }
-                };
-                std::fs::copy(qemu_source, &qemu_target)?;
+                    std::fs::copy(&info.host_source_path, &target_path)?;
+                }
+                let cmd_str = format!("/{}", info.target_rel_path.display());
+                (Some(cmd_str), Some(target_path), needs_copy)
             }
+            None => (None, None, false),
+        };
 
+        let install_result = (|| -> AppResult<()> {
             println!("Instalando dependencias y configuración dentro de la imagen (sin red)...");
             let mut command = std::process::Command::new("chroot");
             command.arg(&mount_dir);
-            if std::env::consts::ARCH != "aarch64" {
-                command.arg("/usr/bin/qemu-aarch64-static");
+            if let Some(ref qemu_cmd) = qemu_cmd_str {
+                command.arg(qemu_cmd);
             }
             let output = command
                 .args([
@@ -2086,9 +2292,9 @@ fn install_sigil_hardware(
                     output.status
                 )));
             }
-            provision_panel_credential(&mount_dir, config)?;
+            provision_panel_credential(&mount_dir, config, qemu_cmd_str.as_deref())?;
             provision_wifi_profile(&mount_dir, config)?;
-            provision_ssh_access(&mount_dir, config)?;
+            provision_ssh_access(&mount_dir, config, qemu_cmd_str.as_deref())?;
             provision_server_url(&mount_dir, config)?;
 
             // `install.sh` habilita los servicios con `systemctl enable`
@@ -2105,7 +2311,9 @@ fn install_sigil_hardware(
             std::fs::rename(&policy_backup, &policy_path)?;
         }
         if copied_qemu {
-            let _ = std::fs::remove_file(&qemu_target);
+            if let Some(target_path) = qemu_target_path {
+                let _ = std::fs::remove_file(&target_path);
+            }
         }
         install_result?;
 
@@ -2180,22 +2388,65 @@ fn validate_bundle_for_image(
         .ok_or_else(|| {
             AppError::Validation("La imagen base no tiene un nombre de archivo válido".into())
         })?;
-    if image_name != summary.base_image_name {
+    let is_image_ext = image_name.ends_with(".img.xz")
+        || image_name.ends_with(".img")
+        || image_name.ends_with(".iso")
+        || image_name.ends_with(".zip");
+
+    if !is_image_ext {
         return Err(AppError::Validation(format!(
-            "El bundle {} requiere la imagen {}, no {}",
-            summary.bundle_version, summary.base_image_name, image_name
+            "El archivo seleccionado {} debe ser una imagen de disco válida (.img, .img.xz, .zip)",
+            image_name
         )));
     }
 
-    let image_sha256 = sha256_file(image)?;
-    if image_sha256 != summary.base_image_sha256 {
-        return Err(AppError::Validation(format!(
-            "La imagen base {} no coincide con el SHA-256 requerido por el bundle {}",
-            image.display(),
-            summary.bundle_version
-        )));
+    if image_name == summary.base_image_name {
+        let image_sha256 = sha256_file(image)?;
+        if image_sha256 != summary.base_image_sha256 {
+            return Err(AppError::Validation(format!(
+                "La imagen base {} no coincide con el SHA-256 requerido por el bundle {}",
+                image.display(),
+                summary.bundle_version
+            )));
+        }
     }
     Ok(())
+}
+
+/// Picks the offline-packages/hardware-payload pair matching the selected base
+/// image. Architecture-specific bundles live at fixed sibling paths
+/// (`trixie-<arch>`, `sigil-hardware-payload-<arch>`); this only decides
+/// *which* pair to hand to the elevated writer. The mounted rootfs's real ELF
+/// architecture is still verified against the chosen bundle's own contract
+/// inside `install_sigil_hardware`, so a wrong guess here fails closed with a
+/// clear error instead of silently installing foreign-arch packages.
+fn resolve_architecture_bundle_paths(
+    flash_root: &Path,
+    image_path: &Path,
+    default_offline_packages: &Path,
+    default_hardware_payload: &Path,
+) -> (PathBuf, PathBuf) {
+    let looks_armhf = image_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map_or(false, |name| name.to_ascii_lowercase().contains("armhf"));
+    if looks_armhf {
+        let offline_packages = flash_root
+            .join("artifacts")
+            .join("offline-packages")
+            .join("trixie-armhf");
+        let hardware_payload = flash_root
+            .join("artifacts")
+            .join("payloads")
+            .join("sigil-hardware-payload-armhf");
+        if offline_packages.is_dir() && hardware_payload.is_dir() {
+            return (offline_packages, hardware_payload);
+        }
+    }
+    (
+        default_offline_packages.to_path_buf(),
+        default_hardware_payload.to_path_buf(),
+    )
 }
 
 fn sha256_file(path: &Path) -> AppResult<String> {
@@ -2687,6 +2938,72 @@ mod tests {
     }
 
     #[test]
+    fn resolve_architecture_bundle_paths_prefers_armhf_siblings_when_present() {
+        let root = isolated_lock_dir("resolve-bundle-armhf-present");
+        std::fs::create_dir_all(root.join("artifacts/offline-packages/trixie-armhf")).unwrap();
+        std::fs::create_dir_all(root.join("artifacts/payloads/sigil-hardware-payload-armhf"))
+            .unwrap();
+        let default_offline = root.join("artifacts/offline-packages/trixie-arm64");
+        let default_payload = root.join("artifacts/payloads/sigil-hardware-payload");
+
+        let (offline_packages, hardware_payload) = resolve_architecture_bundle_paths(
+            &root,
+            Path::new("32bits2026-06-18-raspios-trixie-armhf-lite.img.xz"),
+            &default_offline,
+            &default_payload,
+        );
+
+        assert_eq!(
+            offline_packages,
+            root.join("artifacts/offline-packages/trixie-armhf")
+        );
+        assert_eq!(
+            hardware_payload,
+            root.join("artifacts/payloads/sigil-hardware-payload-armhf")
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn resolve_architecture_bundle_paths_falls_back_when_armhf_bundle_missing() {
+        let root = isolated_lock_dir("resolve-bundle-armhf-missing");
+        let default_offline = root.join("artifacts/offline-packages/trixie-arm64");
+        let default_payload = root.join("artifacts/payloads/sigil-hardware-payload");
+
+        let (offline_packages, hardware_payload) = resolve_architecture_bundle_paths(
+            &root,
+            Path::new("32bits2026-06-18-raspios-trixie-armhf-lite.img.xz"),
+            &default_offline,
+            &default_payload,
+        );
+
+        assert_eq!(offline_packages, default_offline);
+        assert_eq!(hardware_payload, default_payload);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn resolve_architecture_bundle_paths_uses_default_for_arm64_image() {
+        let root = isolated_lock_dir("resolve-bundle-arm64");
+        std::fs::create_dir_all(root.join("artifacts/offline-packages/trixie-armhf")).unwrap();
+        std::fs::create_dir_all(root.join("artifacts/payloads/sigil-hardware-payload-armhf"))
+            .unwrap();
+        let default_offline = root.join("artifacts/offline-packages/trixie-arm64");
+        let default_payload = root.join("artifacts/payloads/sigil-hardware-payload");
+
+        let (offline_packages, hardware_payload) = resolve_architecture_bundle_paths(
+            &root,
+            Path::new("64bits2026-06-18-raspios-trixie-arm64-lite.img.xz"),
+            &default_offline,
+            &default_payload,
+        );
+
+        assert_eq!(offline_packages, default_offline);
+        assert_eq!(hardware_payload, default_payload);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn manufacturing_contract_accepts_complete_configuration() {
         assert!(validate_device_config(&manufacturing_config()).is_ok());
     }
@@ -3029,7 +3346,7 @@ mod tests {
     fn ssh_provisioning_rejects_image_without_server_unit() {
         let root = isolated_lock_dir("ssh-server-unit-missing");
 
-        let error = provision_ssh_access(&root, &manufacturing_config())
+        let error = provision_ssh_access(&root, &manufacturing_config(), None)
             .expect_err("missing openssh-server must fail before systemctl");
 
         assert!(error.to_string().contains("openssh-server"));
@@ -3429,6 +3746,36 @@ mod tests {
             let contents = std::fs::read_to_string(boot_path.join("config.txt")).unwrap();
             assert!(contents.contains("arm_64bit=0"), "Model {} should set arm_64bit=0", model);
         }
+
+        let _ = std::fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn detect_rootfs_elf_arch_identifies_arm32_arm64_and_x86() {
+        let temp_dir = isolated_lock_dir("elf-arch-test");
+        let bin_dir = temp_dir.join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let bash_path = bin_dir.join("bash");
+
+        // Create dummy ARM32 ELF header (e_ident magic + ELFCLASS32 + LSB + e_machine 40)
+        let mut arm32_header = vec![0u8; 20];
+        arm32_header[0..4].copy_from_slice(b"\x7fELF");
+        arm32_header[4] = 1; // 32-bit
+        arm32_header[5] = 1; // LSB
+        arm32_header[18..20].copy_from_slice(&40u16.to_le_bytes()); // EM_ARM = 40
+        std::fs::write(&bash_path, &arm32_header).unwrap();
+
+        assert_eq!(detect_rootfs_elf_arch(&temp_dir), TargetElfArch::Arm32);
+
+        // Create dummy ARM64 ELF header (e_ident magic + ELFCLASS64 + LSB + e_machine 183)
+        let mut arm64_header = vec![0u8; 20];
+        arm64_header[0..4].copy_from_slice(b"\x7fELF");
+        arm64_header[4] = 2; // 64-bit
+        arm64_header[5] = 1; // LSB
+        arm64_header[18..20].copy_from_slice(&183u16.to_le_bytes()); // EM_AARCH64 = 183
+        std::fs::write(&bash_path, &arm64_header).unwrap();
+
+        assert_eq!(detect_rootfs_elf_arch(&temp_dir), TargetElfArch::Arm64);
 
         let _ = std::fs::remove_dir_all(temp_dir);
     }

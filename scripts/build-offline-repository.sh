@@ -68,14 +68,18 @@ if contract["schema_version"] != "2.0":
 if not re.fullmatch(r"[0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[1-9][0-9]*", contract["bundle_version"]):
     raise SystemExit("bundle_version must be YYYY.MM.DD.N")
 if (
-    contract["distribution"] != "debian"
+    contract["distribution"] not in ("debian", "raspbian")
     or contract["distribution_version"] != "13"
     or contract["distribution_codename"] != "trixie"
-    or contract["architecture"] != "arm64"
+    or contract["architecture"] not in ("arm64", "armhf")
+    or (contract["distribution"] == "raspbian" and contract["architecture"] != "armhf")
 ):
-    raise SystemExit("only the Debian 13 Trixie ARM64 contract is supported")
-if set(contract["allowed_package_architectures"]) != {"arm64", "all"}:
-    raise SystemExit("allowed package architectures must be arm64 and all")
+    raise SystemExit(
+        "only Debian 13 Trixie (arm64 or armhf) or Raspbian 13 Trixie (armhf) contracts are supported"
+    )
+expected_allowed = {contract["architecture"], "all"}
+if set(contract["allowed_package_architectures"]) != expected_allowed:
+    raise SystemExit(f"allowed package architectures must match contract architecture ({contract['architecture']}) and all")
 if contract["install_recommends"] is not False or contract["version_policy"] != "distribution-candidate":
     raise SystemExit("unsupported package installation policy")
 if not re.fullmatch(r"[0-9a-f]{64}", contract["base_image_sha256"]):
@@ -170,11 +174,21 @@ import json, pathlib, sys
 snapshot = pathlib.Path(sys.argv[1]).resolve()
 destination = pathlib.Path(sys.argv[2])
 replacements = {
-    "/usr/share/keyrings/debian-archive-keyring.pgp": str(snapshot / "keyrings/debian-archive-keyring.pgp"),
-    "/usr/share/keyrings/raspberrypi-archive-keyring.pgp": str(snapshot / "keyrings/raspberrypi-archive-keyring.pgp"),
+    f"/usr/share/keyrings/{path.name}": str(path)
+    for path in sorted((snapshot / "keyrings").iterdir())
 }
+# 64-bit official images ship debian.sources; 32-bit official images ship
+# raspbian.sources (Raspberry Pi Foundation's ARMv6-compatible rebuild of the
+# full archive). extract-official-apt-metadata.sh already picked exactly one.
+base_candidates = [
+    name for name in ("debian.sources", "raspbian.sources") if (snapshot / name).is_file()
+]
+if len(base_candidates) != 1:
+    raise SystemExit(f"expected exactly one base source file, found {base_candidates}")
+base_filename = base_candidates[0]
+
 parts = []
-for filename in ("debian.sources", "raspi.sources"):
+for filename in (base_filename, "raspi.sources"):
     text = (snapshot / filename).read_text(encoding="utf-8")
     # Some manufacturing networks cannot reach the primary Pi archive. This
     # university mirror serves the same archive; APT must still authenticate

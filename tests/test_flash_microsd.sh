@@ -16,7 +16,10 @@ section() { echo -e "\n${BLUE}━━━━━━━━━━━━━━━━�
 
 PROJECT_DIR="/home/vic/Escritorio/Proyectos/sigil-flash"
 BINARY="${PROJECT_DIR}/src-tauri/target/release/sigil-flash"
-IMAGE_PATH="/home/vic/Descargas/2026-06-18-raspios-trixie-arm64-lite.img.xz"
+IMAGE_PATH="${IMAGE_PATH:-"/home/vic/Descargas/64bits2026-06-18-raspios-trixie-arm64-lite.img.xz"}"
+if [ ! -f "$IMAGE_PATH" ] && [ -f "/home/vic/Descargas/2026-06-18-raspios-trixie-arm64-lite.img.xz" ]; then
+    IMAGE_PATH="/home/vic/Descargas/2026-06-18-raspios-trixie-arm64-lite.img.xz"
+fi
 DEVICE="/dev/sdb"
 PAYLOAD_DIR="${PROJECT_DIR}/artifacts/payloads/sigil-hardware-payload"
 OFFLINE_PACKAGES="${PROJECT_DIR}/artifacts/offline-packages/trixie-arm64"

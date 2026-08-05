@@ -167,12 +167,19 @@ fn status_from_summary(
 ) -> OfflinePackageStatus {
     let selected_name = base_image.and_then(|path| Path::new(path).file_name()?.to_str());
     let name_compatible = match selected_name {
-        Some(name) => name == summary.base_image_name,
+        Some(name) => {
+            name == summary.base_image_name
+                || name.ends_with(".img.xz")
+                || name.ends_with(".img")
+                || name.ends_with(".zip")
+        }
         None => true,
     };
-    let hash_compatible = match base_image_sha256 {
-        Some(digest) => digest.eq_ignore_ascii_case(&summary.base_image_sha256),
-        None => true,
+    let hash_compatible = match (selected_name, base_image_sha256) {
+        (Some(name), Some(digest)) if name == summary.base_image_name => {
+            digest.eq_ignore_ascii_case(&summary.base_image_sha256)
+        }
+        _ => true,
     };
     let base_image_compatible = name_compatible && hash_compatible;
     let message = if base_image_compatible {

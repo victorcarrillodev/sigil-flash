@@ -323,20 +323,36 @@ fn validate_contract(contract: &PackageContract) -> Result<(), String> {
     if !valid_bundle_version(&contract.bundle_version) {
         return Err("bundle version must use YYYY.MM.DD.N".into());
     }
-    if contract.distribution != "debian"
+    let known_distribution = contract.distribution == "debian" || contract.distribution == "raspbian";
+    // Raspbian is Raspberry Pi Foundation's own ARMv6-compatible rebuild of the
+    // full archive, shipped only alongside their 32-bit official images; vanilla
+    // Debian armhf targets ARMv7+ and would be unsafe on the original Pi
+    // Zero/Zero W/1.
+    let raspbian_matches_armhf =
+        contract.distribution != "raspbian" || contract.architecture == "armhf";
+    if !known_distribution
         || contract.distribution_version != "13"
         || contract.distribution_codename != "trixie"
-        || contract.architecture != "arm64"
+        || (contract.architecture != "arm64" && contract.architecture != "armhf")
+        || !raspbian_matches_armhf
     {
-        return Err("package contract must target Debian 13 Trixie arm64".into());
+        return Err(
+            "package contract must target Debian 13 Trixie (arm64 or armhf) or Raspbian 13 Trixie (armhf)"
+                .into(),
+        );
     }
     let allowed: BTreeSet<_> = contract
         .allowed_package_architectures
         .iter()
         .cloned()
         .collect();
-    if allowed != BTreeSet::from(["all".to_string(), "arm64".to_string()]) {
-        return Err("allowed package architectures must be arm64 and all".into());
+    let expected_allowed = if contract.architecture == "armhf" {
+        BTreeSet::from(["all".to_string(), "armhf".to_string()])
+    } else {
+        BTreeSet::from(["all".to_string(), "arm64".to_string()])
+    };
+    if allowed != expected_allowed {
+        return Err("allowed package architectures must match contract architecture and all".into());
     }
     if !is_sha256(&contract.base_image_sha256)
         || contract.base_image_name.is_empty()
@@ -496,6 +512,12 @@ fn validate_source_and_keyring_metadata(
     repository: &Path,
     manifest: &PackageManifest,
 ) -> Result<(), String> {
+    // 64-bit official images ship debian.sources (vanilla Debian). 32-bit
+    // official images ship raspbian.sources instead: Raspberry Pi Foundation's
+    // own ARMv6-compatible rebuild of the full archive, required because
+    // vanilla Debian armhf targets ARMv7+ only. Both are pinned exactly; a
+    // bundle must carry exactly one of them, plus raspi.sources.
+    const BASE_SOURCE_NAMES: [&str; 2] = ["debian.sources", "raspbian.sources"];
     let expected_sources = BTreeMap::from([
         (
             "debian.sources",
@@ -503,6 +525,14 @@ fn validate_source_and_keyring_metadata(
                 "/usr/share/keyrings/debian-archive-keyring.pgp",
                 "http://deb.debian.org/debian/",
                 "http://deb.debian.org/debian/",
+            ),
+        ),
+        (
+            "raspbian.sources",
+            (
+                "/usr/share/keyrings/raspbian-archive-keyring.gpg",
+                "http://raspbian.raspberrypi.com/raspbian/",
+                "http://raspbian.raspberrypi.com/raspbian/",
             ),
         ),
         (
@@ -514,8 +544,14 @@ fn validate_source_and_keyring_metadata(
             ),
         ),
     ]);
-    if manifest.sources.len() != expected_sources.len() {
-        return Err("bundle source metadata is incomplete".into());
+    let manifest_names: BTreeSet<&str> = manifest.sources.iter().map(|s| s.file.as_str()).collect();
+    let base_present = manifest_names
+        .iter()
+        .filter(|name| BASE_SOURCE_NAMES.contains(name))
+        .count();
+    if manifest.sources.len() != 2 || base_present != 1 || !manifest_names.contains("raspi.sources")
+    {
+        return Err("bundle source metadata must contain exactly one base archive (debian.sources or raspbian.sources) plus raspi.sources".into());
     }
     for source in &manifest.sources {
         let Some((signed_by, required_uri, effective_uri)) =
@@ -556,18 +592,29 @@ fn validate_source_and_keyring_metadata(
         }
     }
 
-    let expected_keyrings = BTreeSet::from([
-        "keyrings/debian-archive-keyring.pgp".to_string(),
+    const BASE_KEYRING_ARTIFACTS: [&str; 2] = [
+        "keyrings/debian-archive-keyring.pgp",
+        "keyrings/raspbian-archive-keyring.gpg",
+    ];
+    let fixed_keyrings = BTreeSet::from([
         "keyrings/raspberrypi-archive-keyring.pgp".to_string(),
         "keyrings/sigil-offline-repository.gpg".to_string(),
     ]);
-    if manifest
+    let manifest_keyrings: BTreeSet<String> = manifest
         .keyrings
         .iter()
         .map(|keyring| keyring.artifact_path.clone())
-        .collect::<BTreeSet<_>>()
-        != expected_keyrings
-    {
+        .collect();
+    let base_keyrings_present = BASE_KEYRING_ARTIFACTS
+        .iter()
+        .filter(|artifact| manifest_keyrings.contains(**artifact))
+        .count();
+    let rest: BTreeSet<String> = manifest_keyrings
+        .iter()
+        .filter(|artifact| !BASE_KEYRING_ARTIFACTS.contains(&artifact.as_str()))
+        .cloned()
+        .collect();
+    if base_keyrings_present != 1 || rest != fixed_keyrings {
         return Err("bundle keyring metadata is incomplete".into());
     }
     for keyring in &manifest.keyrings {
@@ -1072,5 +1119,44 @@ mod tests {
             .contains("bundle version"));
         contract.bundle_version = "2026.7.15.1".into();
         assert!(validate_contract(&contract).is_err());
+    }
+
+    #[test]
+    fn contract_accepts_armhf_and_arm64_architectures() {
+        let mut contract_arm64 = canonical_contract();
+        contract_arm64.architecture = "arm64".to_string();
+        contract_arm64.allowed_package_architectures = vec!["arm64".to_string(), "all".to_string()];
+        assert!(validate_contract(&contract_arm64).is_ok());
+
+        let mut contract_armhf = canonical_contract();
+        contract_armhf.architecture = "armhf".to_string();
+        contract_armhf.allowed_package_architectures = vec!["armhf".to_string(), "all".to_string()];
+        assert!(validate_contract(&contract_armhf).is_ok());
+
+        let mut contract_invalid = canonical_contract();
+        contract_invalid.architecture = "x86_64".to_string();
+        assert!(validate_contract(&contract_invalid).is_err());
+    }
+
+    #[test]
+    fn contract_accepts_raspbian_only_for_armhf() {
+        let mut contract_raspbian_armhf = canonical_contract();
+        contract_raspbian_armhf.distribution = "raspbian".to_string();
+        contract_raspbian_armhf.architecture = "armhf".to_string();
+        contract_raspbian_armhf.allowed_package_architectures =
+            vec!["armhf".to_string(), "all".to_string()];
+        assert!(validate_contract(&contract_raspbian_armhf).is_ok());
+
+        let mut contract_raspbian_arm64 = canonical_contract();
+        contract_raspbian_arm64.distribution = "raspbian".to_string();
+        contract_raspbian_arm64.architecture = "arm64".to_string();
+        assert!(
+            validate_contract(&contract_raspbian_arm64).is_err(),
+            "raspbian is only shipped alongside 32-bit official images"
+        );
+
+        let mut contract_unknown_distribution = canonical_contract();
+        contract_unknown_distribution.distribution = "ubuntu".to_string();
+        assert!(validate_contract(&contract_unknown_distribution).is_err());
     }
 }

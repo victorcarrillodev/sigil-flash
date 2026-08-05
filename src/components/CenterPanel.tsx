@@ -1033,18 +1033,18 @@ export default function CenterPanel({
       {/* Bottom Panel: Log de sistema (Console Terminal) */}
       <div className="card" style={{
         padding: "16px",
-        height: "220px",
+        height: "320px",
         display: "flex",
         flexDirection: "column",
-        gap: "6px",
+        gap: "8px",
         flexShrink: 0,
         margin: "0 12px 12px 12px"
       }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <span style={{ fontSize: "11px", fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.05em" }}>
+          <span style={{ fontSize: "12px", fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.05em" }}>
             Log de sistema
           </span>
-          <span className="badge" style={{ fontSize: "11px", padding: "2px 8px", background: "var(--bg-deep)", color: "var(--text-secondary)" }}>
+          <span className="badge" style={{ fontSize: "12px", padding: "3px 10px", background: "var(--bg-deep)", color: "var(--text-secondary)" }}>
             {logs.length} entradas
           </span>
         </div>
@@ -1055,22 +1055,22 @@ export default function CenterPanel({
             background: "var(--bg-deep)",
             boxShadow: "var(--shadow-inset)",
             borderRadius: "var(--radius-md)",
-            padding: "10px",
+            padding: "12px 14px",
             fontFamily: "var(--font-mono)",
-            fontSize: "12px",
+            fontSize: "14px",
             overflowY: "auto",
             display: "flex",
             flexDirection: "column",
-            gap: "4px",
+            gap: "6px",
             color: "#34d399",
           }}
         >
           {logs.length === 0 ? (
-            <span style={{ color: "var(--text-muted)", fontStyle: "italic" }}>Consola inactiva. Esperando escritura...</span>
+            <span style={{ color: "var(--text-muted)", fontStyle: "italic", fontSize: "13.5px" }}>Consola inactiva. Esperando escritura...</span>
           ) : (
             logs.map((log, i) => (
-              <div key={i} style={{ display: "flex", gap: "8px", lineHeight: "1.4" }}>
-                <span style={{ color: "var(--text-muted)", flexShrink: 0 }}>[{log.time}]</span>
+              <div key={i} style={{ display: "flex", gap: "10px", lineHeight: "1.5" }}>
+                <span style={{ color: "var(--text-muted)", flexShrink: 0, fontWeight: 500 }}>[{log.time}]</span>
                 <span style={{
                   color: log.type === "success" ? "#10b981" :
                          log.type === "error" ? "#ef4444" :
