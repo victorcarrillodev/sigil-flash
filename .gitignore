@@ -1,12 +1,16 @@
+# Dependencias y compilación
 node_modules/
 dist/
 src-tauri/target/
-.tauri/
-*.log
-artifacts/secrets/
-artifacts/offline-packages/
-artifacts/payloads/
-*.deb
-.DS_Store
-bun.lockb
-graphify-out/
+
+# Artefactos de fabricación: se generan, no se versionan.
+# Un bundle pesa cientos de MB y una imagen base varios GB.
+artifacts/
+!artifacts/.gitkeep
+
+# Caché local de construcción
+.cache/
+
+# Directorios de trabajo temporales de los constructores
+.sigil-build.*/
+sigil-image-extract.*/

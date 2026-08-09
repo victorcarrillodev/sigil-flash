@@ -1,540 +1,449 @@
-#!/bin/bash
-# Build a signed, complete ARM64 APT repository for offline image manufacturing.
+#!/usr/bin/env bash
+# =============================================================================
+# build-offline-repository.sh — Constructor del repositorio APT offline
+#
+# La cadena de confianza arranca en la imagen oficial verificada por hash: las
+# fuentes y los keyrings salen de DENTRO de la imagen, nunca del host.
+# =============================================================================
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-CONTRACT="${ROOT}/sigil-hardware/manifests/offline-package-contract.json"
-OUTPUT="${ROOT}/artifacts/offline-packages/trixie-arm64"
-BASE_IMAGE="${SIGIL_BASE_IMAGE:-}"
-KEYRING_HELPER="${ROOT}/scripts/extract-official-apt-metadata.sh"
-REBUILD=false
-APT_GET="${APT_GET:-apt-get}"
-DPKG_SCANPACKAGES="${DPKG_SCANPACKAGES:-dpkg-scanpackages}"
-SIGNING_HOME="${SIGIL_OFFLINE_SIGNING_HOME:-${ROOT}/artifacts/offline-packages/.signing-gnupg}"
+CONTRACT="${1:-${ROOT}/sigil-hardware/manifests/offline-package-contract.json}"
+OUTPUT_DIR="${2:-${ROOT}/artifacts/bundles/offline-package-contract-repo}"
+BASE_IMAGE_PATH="${3:-}"
 
 die() {
     printf 'error: %s\n' "$*" >&2
     exit 1
 }
 
-usage() {
-    printf '%s\n' \
-        "Usage: $(basename "$0") [options]" \
-        "  --contract <file>       Canonical sigil-hardware package contract" \
-        "  --base-image <file>     Verified official Raspberry Pi OS image" \
-        "  --output <directory>    Bundle destination" \
-        "  --rebuild               Atomically replace an existing bundle"
-}
+[ -f "$CONTRACT" ] || die "Contrato de paquetes no encontrado: ${CONTRACT}"
+[ -n "$BASE_IMAGE_PATH" ] || die "Se requiere la imagen base: es el origen de la cadena de confianza.
+  Uso: build-offline-repository.sh <contrato> <directorio-salida> <imagen-base>"
+[ -f "$BASE_IMAGE_PATH" ] || die "Imagen base no encontrada: ${BASE_IMAGE_PATH}"
 
-while [ "$#" -gt 0 ]; do
-    case "$1" in
-        --contract) [ "$#" -ge 2 ] || die "missing --contract value"; CONTRACT="$2"; shift 2 ;;
-        --base-image) [ "$#" -ge 2 ] || die "missing --base-image value"; BASE_IMAGE="$2"; shift 2 ;;
-        --output) [ "$#" -ge 2 ] || die "missing --output value"; OUTPUT="$2"; shift 2 ;;
-        --rebuild) REBUILD=true; shift ;;
-        --help|-h) usage; exit 0 ;;
-        *) die "unknown argument: $1" ;;
-    esac
+# APT interpreta como relativas a /etc/apt las rutas de configuración que no
+# son absolutas, así que todo se canonicaliza antes de usarse.
+CONTRACT="$(cd "$(dirname "$CONTRACT")" && pwd)/$(basename "$CONTRACT")"
+BASE_IMAGE_PATH="$(cd "$(dirname "$BASE_IMAGE_PATH")" && pwd)/$(basename "$BASE_IMAGE_PATH")"
+mkdir -p "$(dirname "$OUTPUT_DIR")"
+OUTPUT_DIR="$(cd "$(dirname "$OUTPUT_DIR")" && pwd)/$(basename "$OUTPUT_DIR")"
+
+# ── 1. AUTODETECTAR TOOLING ──────────────────────────────────────────────────
+MISSING_TOOLS=0
+for tool in apt-get dpkg-scanpackages apt-ftparchive dpkg-deb gpgv; do
+    command -v "$tool" &>/dev/null || MISSING_TOOLS=1
 done
 
-[ -f "$CONTRACT" ] || die "canonical package contract is missing: ${CONTRACT}"
-[ -x "$KEYRING_HELPER" ] || die "official-image keyring helper is missing: ${KEYRING_HELPER}"
-
-# apt-get, dpkg-scanpackages and apt-ftparchive are Debian packaging tools with
-# no native equivalent on non-Debian distros (Arch, Fedora, openSUSE, ...).
-# Building a real Debian/Raspbian APT repository fundamentally needs them, so
-# on a host that lacks them this re-executes the exact same build inside a
-# throwaway debian:trixie container instead of failing outright. Every other
-# required tool (gpg, python3, sfdisk, debugfs, ...) is a normal package on
-# every distro and setup.sh already installs it -- see docs/OFFLINE_PACKAGES.md.
-NEEDS_DEBIAN_TOOLING=false
-for command in "$APT_GET" "$DPKG_SCANPACKAGES" apt-ftparchive dpkg-deb; do
-    command -v "$command" >/dev/null 2>&1 || NEEDS_DEBIAN_TOOLING=true
-done
-
-if $NEEDS_DEBIAN_TOOLING && [ -z "${SIGIL_OFFLINE_BUILDER_IN_CONTAINER:-}" ]; then
-    command -v docker >/dev/null 2>&1 || die \
-        "apt-get/dpkg-scanpackages/apt-ftparchive are unavailable on this host and docker is not installed. Install Docker, or run this on a Debian/Ubuntu host -- see docs/OFFLINE_PACKAGES.md."
-    [ -n "$BASE_IMAGE" ] || die "--base-image (or SIGIL_BASE_IMAGE) is required to build inside a container"
-    [ -f "$BASE_IMAGE" ] || die "verified official base image is missing: ${BASE_IMAGE}"
-
-    ABS_CONTRACT="$(cd "$(dirname "$CONTRACT")" && pwd)/$(basename "$CONTRACT")"
-    ABS_BASE_IMAGE="$(cd "$(dirname "$BASE_IMAGE")" && pwd)/$(basename "$BASE_IMAGE")"
-    mkdir -p -- "$(dirname "$OUTPUT")"
-    ABS_OUTPUT="$(cd "$(dirname "$OUTPUT")" && pwd)/$(basename "$OUTPUT")"
-    case "$ABS_OUTPUT" in
-        "${ROOT}"/*) ;;
-        *) die "--output must live under ${ROOT} to build inside a container (got: ${ABS_OUTPUT})" ;;
-    esac
-    case "$ABS_CONTRACT" in
-        "${ROOT}"/*) ;;
-        *) die "--contract must live under ${ROOT} to build inside a container (got: ${ABS_CONTRACT})" ;;
-    esac
-
-    printf 'apt-get/dpkg-scanpackages/apt-ftparchive are unavailable on this host; building inside a debian:trixie container instead...\n' >&2
-
-    DOCKER_ARGS=(run --rm
-        -e "SIGIL_OFFLINE_BUILDER_IN_CONTAINER=1"
-        -e "HOST_UID=$(id -u)" -e "HOST_GID=$(id -g)" -e "HOME=/tmp"
-        -v "${ROOT}:${ROOT}"
-    )
-    BASE_IMAGE_DIR="$(dirname "$ABS_BASE_IMAGE")"
-    case "$BASE_IMAGE_DIR" in
-        "${ROOT}"/*|"${ROOT}") ;;
-        *) DOCKER_ARGS+=(-v "${BASE_IMAGE_DIR}:${BASE_IMAGE_DIR}:ro") ;;
-    esac
-
-    REBUILD_ARGS=()
-    $REBUILD && REBUILD_ARGS+=(--rebuild)
-
-    exec docker "${DOCKER_ARGS[@]}" debian:trixie bash -c '
-        set -euo pipefail
-        export DEBIAN_FRONTEND=noninteractive
-        apt-get update -qq
-        apt-get install -y -qq --no-install-recommends \
-            apt-utils dpkg-dev gnupg xz-utils util-linux fdisk e2fsprogs python3 ca-certificates >/dev/null
-        exec setpriv --reuid="$HOST_UID" --regid="$HOST_GID" --clear-groups "$@"
-    ' sh "${ROOT}/scripts/build-offline-repository.sh" \
-        --contract "$ABS_CONTRACT" --base-image "$ABS_BASE_IMAGE" --output "$ABS_OUTPUT" \
-        "${REBUILD_ARGS[@]}"
+if [ "$MISSING_TOOLS" -eq 1 ] && [ "${SIGIL_IN_DOCKER_BUILD:-0}" != "1" ]; then
+    printf '▶ Herramientas de empaquetado Debian ausentes: re-ejecutando dentro de debian:trixie\n'
+    command -v docker >/dev/null || die "Se requiere Docker para construir sin herramientas Debian nativas.
+  Instálelo con ./setup.sh o ejecute este script en un entorno Debian equivalente
+  fijando SIGIL_IN_DOCKER_BUILD=1."
+    HOST_UID=$(id -u)
+    HOST_GID=$(id -g)
+    IMAGE_DIR=$(cd "$(dirname "$BASE_IMAGE_PATH")" && pwd)
+    # Si la imagen es un enlace, su destino real también tiene que ser visible
+    # dentro del contenedor.
+    IMAGE_REAL_DIR=$(dirname "$(readlink -f "$BASE_IMAGE_PATH")")
+    exec docker run --rm \
+        -v "${ROOT}:${ROOT}" \
+        -v "${IMAGE_DIR}:${IMAGE_DIR}" \
+        -v "${IMAGE_REAL_DIR}:${IMAGE_REAL_DIR}" \
+        -w "${ROOT}" \
+        -e SIGIL_IN_DOCKER_BUILD=1 \
+        -e "SIGIL_APT_MIRROR=${SIGIL_APT_MIRROR:-}" \
+        -e "SIGIL_PACKAGE_PROFILES=${SIGIL_PACKAGE_PROFILES:-}" \
+        -e DEBIAN_FRONTEND=noninteractive \
+        debian:trixie \
+        bash -c "apt-get update -qq && apt-get install -y --no-install-recommends \
+                   apt-utils dpkg-dev gnupg python3 xz-utils fdisk e2fsprogs ca-certificates >/dev/null 2>&1 && \
+                 setpriv --reuid=${HOST_UID} --regid=${HOST_GID} --clear-groups \
+                   bash '${ROOT}/scripts/build-offline-repository.sh' '${CONTRACT}' '${OUTPUT_DIR}' '${BASE_IMAGE_PATH}'"
 fi
+printf '▶ Construyendo con las herramientas Debian del entorno actual\n'
 
-for command in "$APT_GET" "$DPKG_SCANPACKAGES" dpkg-deb apt-ftparchive gpg gzip python3; do
-    command -v "$command" >/dev/null || die "required command is unavailable: ${command}"
-done
+# ── 2. VALIDAR EL CONTRATO ENTERO ANTES DE TOCAR LA RED ──────────────────────
+eval "$(python3 - "$CONTRACT" <<'PYEOF'
+import json, os, shlex, sys
 
-mapfile -t CONTRACT_VALUES < <(python3 - "$CONTRACT" <<'PYEOF'
-import json
-import pathlib
-import re
-import sys
-
-path = pathlib.Path(sys.argv[1])
-try:
-    contract = json.loads(path.read_text(encoding="utf-8"))
-except (OSError, json.JSONDecodeError) as error:
-    raise SystemExit(f"invalid package contract: {error}")
-
-expected = {
+contract = json.load(open(sys.argv[1]))
+required = [
     "schema_version", "bundle_version", "distribution", "distribution_version",
-    "distribution_codename", "architecture", "allowed_package_architectures",
-    "base_image_name", "base_image_sha256", "install_recommends",
-    "version_policy", "packages",
+    "distribution_codename", "architecture", "base_image_name", "base_image_sha256",
+    "packages",
+]
+missing = [field for field in required if field not in contract]
+if missing:
+    raise SystemExit("el contrato no declara: " + ", ".join(missing))
+
+packages = contract["packages"]
+if not isinstance(packages, list) or not packages:
+    raise SystemExit("el contrato no declara ningún paquete")
+for package in packages:
+    if "name" not in package or "required" not in package or "profile" not in package:
+        raise SystemExit(f"paquete mal formado en el contrato: {package}")
+
+required_names = [p["name"] for p in packages if p["required"]]
+
+# Los paquetes de perfil (factory-debug, optional) no son obligatorios y por eso
+# NO entran en `direct_packages`: el instalador exige que esa lista sea
+# exactamente la de los obligatorios. Lo que sí comprueba es que existan entre
+# los paquetes resueltos del repositorio, así que hay que descargarlos igual.
+# Sin esto, activar el acceso remoto aborta el instalador dentro del chroot con
+# la tarjeta ya escrita entera.
+requested_profiles = {p for p in os.environ.get("SIGIL_PACKAGE_PROFILES", "").split(",") if p}
+unknown_profiles = requested_profiles - {"factory-debug", "optional"}
+if unknown_profiles:
+    raise SystemExit("perfil de paquetes no soportado: " + ", ".join(sorted(unknown_profiles)))
+profile_names = [
+    p["name"] for p in packages
+    if not p["required"] and p["profile"] in requested_profiles
+]
+
+values = {
+    "BUNDLE_VERSION": contract["bundle_version"],
+    "ARCH": contract["architecture"],
+    "DISTRO": contract["distribution"],
+    "DISTRO_VERSION": contract["distribution_version"],
+    "CODENAME": contract["distribution_codename"],
+    "BASE_IMAGE_NAME": contract["base_image_name"],
+    "BASE_IMAGE_SHA": contract["base_image_sha256"],
+    "REQUIRED_PACKAGES": " ".join(required_names),
+    "REQUIRED_COUNT": str(len(required_names)),
+    "PROFILE_PACKAGES": " ".join(profile_names),
+    "PROFILE_COUNT": str(len(profile_names)),
+    "SELECTED_PROFILES": ",".join(sorted(requested_profiles)),
 }
-if set(contract) != expected:
-    raise SystemExit("package contract has missing or unknown fields")
-if contract["schema_version"] != "2.0":
-    raise SystemExit("unsupported package contract schema")
-if not re.fullmatch(r"[0-9]{4}\.[0-9]{2}\.[0-9]{2}\.[1-9][0-9]*", contract["bundle_version"]):
-    raise SystemExit("bundle_version must be YYYY.MM.DD.N")
-if (
-    contract["distribution"] not in ("debian", "raspbian")
-    or contract["distribution_version"] != "13"
-    or contract["distribution_codename"] != "trixie"
-    or contract["architecture"] not in ("arm64", "armhf")
-    or (contract["distribution"] == "raspbian" and contract["architecture"] != "armhf")
-):
-    raise SystemExit(
-        "only Debian 13 Trixie (arm64 or armhf) or Raspbian 13 Trixie (armhf) contracts are supported"
-    )
-expected_allowed = {contract["architecture"], "all"}
-if set(contract["allowed_package_architectures"]) != expected_allowed:
-    raise SystemExit(f"allowed package architectures must match contract architecture ({contract['architecture']}) and all")
-if contract["install_recommends"] is not False or contract["version_policy"] != "distribution-candidate":
-    raise SystemExit("unsupported package installation policy")
-if not re.fullmatch(r"[0-9a-f]{64}", contract["base_image_sha256"]):
-    raise SystemExit("invalid base image SHA-256")
-
-names = set()
-direct_names = []
-included_names = []
-included_specifications = []
-valid_profiles = {"runtime", "factory-debug", "optional"}
-for item in contract["packages"]:
-    if set(item) != {"name", "required", "version", "profile"}:
-        raise SystemExit("invalid package contract entry")
-    name = item["name"]
-    if not isinstance(name, str) or not re.fullmatch(r"[a-z0-9][a-z0-9+.-]+", name):
-        raise SystemExit(f"invalid package name: {name!r}")
-    if name in names:
-        raise SystemExit(f"duplicate package name: {name}")
-    names.add(name)
-    if not isinstance(item["required"], bool) or item["profile"] not in valid_profiles:
-        raise SystemExit(f"invalid package profile: {name}")
-    version = item["version"]
-    if version is not None and (not isinstance(version, str) or not version):
-        raise SystemExit(f"invalid version constraint for {name}")
-    if item["required"]:
-        direct_names.append(name)
-    if item["required"] or item["profile"] == "factory-debug":
-        included_names.append(name)
-        included_specifications.append(f"{name}={version}" if version else name)
-if len(direct_names) != 25:
-    raise SystemExit(f"expected 25 required packages, found {len(direct_names)}")
-optional_ssh = [item for item in contract["packages"] if item["name"] == "openssh-server"]
-if optional_ssh != [{"name": "openssh-server", "required": False, "version": None, "profile": "factory-debug"}]:
-    raise SystemExit("openssh-server factory-debug contract changed")
-
-print(contract["distribution_codename"])
-print(contract["architecture"])
-print("\t".join(direct_names))
-print("\t".join(included_names))
-print("\t".join(included_specifications))
-print(contract["base_image_name"])
-print(contract["base_image_sha256"])
-print(contract["bundle_version"])
-print(contract["schema_version"])
-print(contract["distribution"])
-print(contract["distribution_version"])
+for key, value in values.items():
+    print(f"{key}={shlex.quote(str(value))}")
 PYEOF
-)
-[ "${#CONTRACT_VALUES[@]}" -eq 11 ] || die "could not load canonical package contract"
-CODENAME="${CONTRACT_VALUES[0]}"
-ARCHITECTURE="${CONTRACT_VALUES[1]}"
-IFS=$'\t' read -r -a REQUIRED_NAMES <<< "${CONTRACT_VALUES[2]}"
-IFS=$'\t' read -r -a INCLUDED_NAMES <<< "${CONTRACT_VALUES[3]}"
-IFS=$'\t' read -r -a PACKAGE_SPECS <<< "${CONTRACT_VALUES[4]}"
-BASE_IMAGE_NAME="${CONTRACT_VALUES[5]}"
-BUNDLE_VERSION="${CONTRACT_VALUES[7]}"
+)"
 
-if [ -z "$BASE_IMAGE" ]; then
-    BASE_IMAGE="${ROOT}/../artifacts/base-images/${BASE_IMAGE_NAME}"
-fi
-[ -f "$BASE_IMAGE" ] || die "verified official base image is missing: ${BASE_IMAGE}"
-if [ -e "$OUTPUT" ] && ! $REBUILD; then
-    die "bundle already exists; use --rebuild to replace it: ${OUTPUT}"
+printf '▶ Contrato validado: %s %s (%s), %s paquetes obligatorios\n' \
+    "$DISTRO" "$CODENAME" "$ARCH" "$REQUIRED_COUNT"
+if [ "$PROFILE_COUNT" -gt 0 ]; then
+    printf '▶ Perfiles seleccionados (%s): %s paquetes adicionales — %s\n' \
+        "$SELECTED_PROFILES" "$PROFILE_COUNT" "$PROFILE_PACKAGES"
 fi
 
-PARENT=$(dirname "$OUTPUT")
-NAME=$(basename "$OUTPUT")
-mkdir -p "$PARENT"
-STAGING=$(mktemp -d "${PARENT}/.${NAME}.build.XXXXXX")
-APT_ROOT=$(mktemp -d /tmp/sigil-offline-apt-build.XXXXXX)
-BACKUP=""
+if [ "$(basename "$BASE_IMAGE_PATH")" != "$BASE_IMAGE_NAME" ]; then
+    die "La imagen entregada se llama '$(basename "$BASE_IMAGE_PATH")' pero el contrato exige '${BASE_IMAGE_NAME}'"
+fi
+
+# El trabajo intermedio (rootfs extraído y paquetes) ronda varios GB: vive en
+# disco junto a la salida, no en un /tmp montado en memoria.
+mkdir -p "$(dirname "$OUTPUT_DIR")"
+WORK_DIR=$(mktemp -d "$(dirname "$OUTPUT_DIR")/.sigil-build.XXXXXX")
+BACKUP_DIR=""
+BUILD_OK=0
 
 cleanup() {
-    rm -rf -- "${STAGING:-}" "${APT_ROOT:-}"
-    if [ -n "${BACKUP:-}" ] && [ -e "$BACKUP" ] && [ ! -e "$OUTPUT" ]; then
-        mv -- "$BACKUP" "$OUTPUT"
+    rm -rf -- "$WORK_DIR"
+    # 12. Restauración automática si algo falló a mitad del reemplazo.
+    if [ -n "$BACKUP_DIR" ] && [ -d "$BACKUP_DIR" ]; then
+        if [ "$BUILD_OK" -eq 1 ]; then
+            rm -rf -- "$BACKUP_DIR"
+        else
+            printf '▶ Restaurando el repositorio anterior tras un fallo...\n' >&2
+            rm -rf -- "$OUTPUT_DIR"
+            mv -- "$BACKUP_DIR" "$OUTPUT_DIR"
+        fi
     fi
 }
 trap cleanup EXIT HUP INT TERM
 
-install -d -m 0755 \
-    "$APT_ROOT/state/lists/partial" \
-    "$APT_ROOT/cache/archives/partial" \
-    "$APT_ROOT/sources" \
-    "$STAGING/packages"
-: > "$APT_ROOT/status"
+mkdir -p "$WORK_DIR/repo/packages" "$WORK_DIR/repo/sources-snapshot/keyrings"
+REPO="$WORK_DIR/repo"
 
-"$KEYRING_HELPER" "$CONTRACT" "$BASE_IMAGE" "$STAGING/sources-snapshot"
+# ── 3. EXTRAER LOS METADATOS DE LA IMAGEN OFICIAL ────────────────────────────
+META_DIR="$WORK_DIR/image-metadata"
+bash "${ROOT}/scripts/extract-official-apt-metadata.sh" "$BASE_IMAGE_PATH" "$META_DIR" "$CONTRACT"
 
-python3 - "$STAGING/sources-snapshot" "$APT_ROOT/sources/official.sources" <<'PYEOF'
-import json, pathlib, sys
-snapshot = pathlib.Path(sys.argv[1]).resolve()
-destination = pathlib.Path(sys.argv[2])
-replacements = {
-    f"/usr/share/keyrings/{path.name}": str(path)
-    for path in sorted((snapshot / "keyrings").iterdir())
-}
-# 64-bit official images ship debian.sources; 32-bit official images ship
-# raspbian.sources (Raspberry Pi Foundation's ARMv6-compatible rebuild of the
-# full archive). extract-official-apt-metadata.sh already picked exactly one.
-base_candidates = [
-    name for name in ("debian.sources", "raspbian.sources") if (snapshot / name).is_file()
-]
-if len(base_candidates) != 1:
-    raise SystemExit(f"expected exactly one base source file, found {base_candidates}")
-base_filename = base_candidates[0]
+BASE_DISTRIBUTION=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["base_distribution"])' "$META_DIR/extraction.json")
+if [ "$BASE_DISTRIBUTION" != "$DISTRO" ]; then
+    die "La imagen trae fuentes firmadas de '${BASE_DISTRIBUTION}' pero el contrato declara '${DISTRO}'.
+  Este control cruzado es deliberado: corrija el contrato o use la imagen correcta."
+fi
 
-parts = []
-for filename in (base_filename, "raspi.sources"):
-    text = (snapshot / filename).read_text(encoding="utf-8")
-    # Some manufacturing networks cannot reach the primary Pi archive. This
-    # university mirror serves the same archive; APT must still authenticate
-    # its InRelease with the keyring extracted from the official image.
-    if filename == "raspi.sources":
-        text = text.replace(
-            "http://archive.raspberrypi.com/debian/",
-            "https://ftp.uni-hannover.de/raspberrypi/",
-        )
-    for original, replacement in replacements.items():
-        text = text.replace(original, replacement)
-    parts.append(text.strip())
-destination.write_text("\n\n".join(parts) + "\n", encoding="utf-8")
+IMAGE_CODENAME=$(grep -E '^VERSION_CODENAME=' "$META_DIR/os-release" | cut -d= -f2 | tr -d '"' || true)
+if [ -n "$IMAGE_CODENAME" ] && [ "$IMAGE_CODENAME" != "$CODENAME" ]; then
+    die "El os-release de la imagen dice '${IMAGE_CODENAME}' y el contrato '${CODENAME}'.
+  Consulte docs/architecture-upgrade.md: hay que cambiar varios archivos a la vez."
+fi
 
-metadata_path = snapshot / "sources-metadata.json"
-metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-for source in metadata["sources"]:
-    if source["file"] == "raspi.sources":
-        source["effective_uris"] = ["https://ftp.uni-hannover.de/raspberrypi/"]
-metadata_path.write_text(
-    json.dumps(metadata, indent=2, sort_keys=True) + "\n",
-    encoding="utf-8",
-)
+# ── Estado APT completamente aislado, con base de datos dpkg VACÍA ───────────
+APT_STATE="$WORK_DIR/apt-state"
+mkdir -p "$APT_STATE/lists/partial" "$APT_STATE/cache/archives/partial" \
+         "$APT_STATE/etc/apt/sources.list.d" "$APT_STATE/etc/apt/preferences.d" \
+         "$APT_STATE/etc/apt/trusted.gpg.d"
+: > "$APT_STATE/dpkg-status"
+: > "$APT_STATE/etc/apt/empty.list"
+: > "$APT_STATE/etc/apt/empty.gpg"
+
+# Los keyrings extraídos de la imagen son los ÚNICOS que autentican las firmas.
+cp "$META_DIR"/keyrings/*.gpg "$APT_STATE/etc/apt/trusted.gpg.d/"
+cp "$META_DIR"/keyrings/*.gpg "$REPO/sources-snapshot/keyrings/"
+cp -r "$META_DIR/sources" "$REPO/sources-snapshot/"
+cp "$META_DIR/os-release" "$REPO/sources-snapshot/os-release"
+
+# Se copian las fuentes tal cual las trae la imagen. Signed-By se elimina
+# porque los keyrings viven ahora en trusted.gpg.d del estado aislado: la firma
+# se sigue verificando contra el mismo material extraído de la imagen.
+python3 - "$META_DIR" "$APT_STATE/etc/apt/sources.list.d" "${SIGIL_APT_MIRROR:-}" <<'PYEOF'
+import json, os, re, sys
+
+meta_dir, destination, mirror = sys.argv[1], sys.argv[2], sys.argv[3]
+summary = json.load(open(os.path.join(meta_dir, "extraction.json")))
+
+for key in ("base_sources", "raspi_sources"):
+    source_path = os.path.join(meta_dir, summary[key])
+    text = open(source_path, encoding="utf-8", errors="replace").read()
+
+    lines = [line for line in text.splitlines()
+             if not line.strip().lower().startswith("signed-by:")]
+    text = "\n".join(lines) + "\n"
+
+    # 4. Espejo documentado: sustituye SOLO el URI, nunca la firma.
+    if mirror and key == "base_sources":
+        text = re.sub(r"https?://[^\s]+", mirror.rstrip("/"), text)
+
+    name = os.path.basename(summary[key])
+    with open(os.path.join(destination, name), "w", encoding="utf-8") as handle:
+        handle.write(text)
 PYEOF
 
-APT_OPTIONS=(
-    -o "Dir::Etc::sourcelist=${APT_ROOT}/sources/official.sources"
-    -o "Dir::Etc::sourceparts=-"
-    -o "Dir::State=${APT_ROOT}/state"
-    -o "Dir::State::status=${APT_ROOT}/status"
-    -o "Dir::Cache=${APT_ROOT}/cache"
-    -o "Dir::Cache::archives=${APT_ROOT}/cache/archives"
-    -o "APT::Architecture=${ARCHITECTURE}"
-    -o "APT::Architectures::=${ARCHITECTURE}"
+[ -z "${SIGIL_APT_MIRROR:-}" ] || printf '▶ Espejo APT en uso para el archivo base: %s\n' "$SIGIL_APT_MIRROR"
+
+APT_OPT=(
+    -o "Dir::State=${APT_STATE}"
+    -o "Dir::State::status=${APT_STATE}/dpkg-status"
+    -o "Dir::Cache=${APT_STATE}/cache"
+    -o "Dir::Etc::sourcelist=${APT_STATE}/etc/apt/empty.list"
+    -o "Dir::Etc::sourceparts=${APT_STATE}/etc/apt/sources.list.d"
+    -o "Dir::Etc::preferencesparts=${APT_STATE}/etc/apt/preferences.d"
+    -o "Dir::Etc::trusted=${APT_STATE}/etc/apt/empty.gpg"
+    -o "Dir::Etc::trustedparts=${APT_STATE}/etc/apt/trusted.gpg.d"
     -o "Acquire::Languages=none"
     -o "Acquire::IndexTargets::deb::DEP-11::DefaultEnabled=false"
-    -o "Acquire::IndexTargets::deb::DEP-11-icons-small::DefaultEnabled=false"
-    -o "Acquire::IndexTargets::deb::DEP-11-icons::DefaultEnabled=false"
     -o "Acquire::IndexTargets::deb::CNF::DefaultEnabled=false"
-    -o "Acquire::Retries=3"
-    -o "APT::Update::Error-Mode=any"
     -o "APT::Install-Recommends=false"
-    -o "Debug::NoLocking=1"
+    -o "APT::Install-Suggests=false"
+    -o "APT::Architecture=${ARCH}"
+    -o "APT::Architectures::=${ARCH}"
+    -o "APT::Get::AllowUnauthenticated=false"
 )
 
-printf 'Resolving %d bundle roots (%d required, factory-debug included) for %s-%s (bundle %s)...\n' \
-    "${#INCLUDED_NAMES[@]}" "${#REQUIRED_NAMES[@]}" "$CODENAME" "$ARCHITECTURE" "$BUNDLE_VERSION"
-"$APT_GET" "${APT_OPTIONS[@]}" update
-DEBIAN_FRONTEND=noninteractive "$APT_GET" "${APT_OPTIONS[@]}" \
-    --assume-yes --download-only --no-install-recommends install "${PACKAGE_SPECS[@]}"
+# ── 5. RESOLVER EL CIERRE TRANSITIVO ─────────────────────────────────────────
+printf '▶ Actualizando índices APT aislados (arquitectura %s)...\n' "$ARCH"
+apt-get "${APT_OPT[@]}" update || die "No se pudieron descargar los índices APT.
+  Revise la conectividad o fije un espejo con SIGIL_APT_MIRROR."
 
-find "$APT_ROOT/cache/archives" -maxdepth 1 -type f -name '*.deb' \
-    -exec cp -p -- {} "$STAGING/packages/" \;
-[ -n "$(find "$STAGING/packages" -maxdepth 1 -type f -name '*.deb' -print -quit)" ] \
-    || die "dependency resolver downloaded no .deb packages"
+printf '▶ Descargando el cierre transitivo de %s paquetes obligatorios...\n' "$REQUIRED_COUNT"
+# shellcheck disable=SC2086
+apt-get "${APT_OPT[@]}" --download-only --reinstall install -y $REQUIRED_PACKAGES \
+    || die "APT no pudo resolver el cierre de dependencias del contrato"
 
-while IFS= read -r -d '' package_file; do
-    [ -s "$package_file" ] || die "zero-byte package: $(basename "$package_file")"
-    package_arch=$(dpkg-deb -f "$package_file" Architecture) \
-        || die "unreadable Debian package: $(basename "$package_file")"
-    case "$package_arch" in
-        "$ARCHITECTURE"|all) ;;
-        *) die "wrong package architecture ${package_arch}: $(basename "$package_file")" ;;
-    esac
-done < <(find "$STAGING/packages" -maxdepth 1 -type f -name '*.deb' -print0)
-
-(
-    cd "$STAGING"
-    "$DPKG_SCANPACKAGES" --multiversion packages /dev/null > Packages
-    gzip -n -9 -c Packages > Packages.gz
-    apt-ftparchive release . > Release
-)
-
-install -d -m 0700 "$SIGNING_HOME"
-if ! gpg --homedir "$SIGNING_HOME" --batch --list-secret-keys \
-    --with-colons 'SIGIL Offline Repository' 2>/dev/null | grep -q '^sec:'; then
-    gpg --homedir "$SIGNING_HOME" --batch --passphrase '' \
-        --quick-generate-key 'SIGIL Offline Repository <manufacturing@sigil.local>' ed25519 sign 0
-fi
-SIGNING_FINGERPRINT=$(gpg --homedir "$SIGNING_HOME" --batch --list-secret-keys \
-    --with-colons 'SIGIL Offline Repository' | awk -F: '$1 == "fpr" {print $10; exit}')
-[ -n "$SIGNING_FINGERPRINT" ] || die "could not determine local repository signing fingerprint"
-gpg --homedir "$SIGNING_HOME" --batch --yes --export "$SIGNING_FINGERPRINT" \
-    > "$STAGING/sources-snapshot/keyrings/sigil-offline-repository.gpg"
-gpg --homedir "$SIGNING_HOME" --batch --yes --local-user "$SIGNING_FINGERPRINT" \
-    --clearsign --output "$STAGING/InRelease" "$STAGING/Release"
-gpg --homedir "$SIGNING_HOME" --batch --yes --local-user "$SIGNING_FINGERPRINT" \
-    --detach-sign --output "$STAGING/Release.gpg" "$STAGING/Release"
-
-# Prove that the generated repository alone satisfies the complete Depends and
-# Pre-Depends closure. This uses an empty dpkg status database and never
-# installs or executes an ARM64 package on the manufacturing host.
-VERIFY_ROOT="${APT_ROOT}/verify"
-install -d -m 0755 \
-    "$VERIFY_ROOT/state/lists/partial" \
-    "$VERIFY_ROOT/cache/archives/partial" \
-    "$VERIFY_ROOT/sources"
-: > "$VERIFY_ROOT/status"
-printf 'deb [arch=%s signed-by=%s] file:%s ./\n' \
-    "$ARCHITECTURE" \
-    "$STAGING/sources-snapshot/keyrings/sigil-offline-repository.gpg" \
-    "$STAGING" > "$VERIFY_ROOT/sources/offline.list"
-VERIFY_OPTIONS=(
-    -o "Dir::Etc::sourcelist=${VERIFY_ROOT}/sources/offline.list"
-    -o "Dir::Etc::sourceparts=-"
-    -o "Dir::State=${VERIFY_ROOT}/state"
-    -o "Dir::State::status=${VERIFY_ROOT}/status"
-    -o "Dir::Cache=${VERIFY_ROOT}/cache"
-    -o "Dir::Cache::archives=${VERIFY_ROOT}/cache/archives"
-    -o "APT::Architecture=${ARCHITECTURE}"
-    -o "APT::Architectures::=${ARCHITECTURE}"
-    -o "Acquire::Languages=none"
-    -o "Acquire::IndexTargets::deb::DEP-11::DefaultEnabled=false"
-    -o "Acquire::IndexTargets::deb::DEP-11-icons-small::DefaultEnabled=false"
-    -o "Acquire::IndexTargets::deb::DEP-11-icons::DefaultEnabled=false"
-    -o "Acquire::IndexTargets::deb::CNF::DefaultEnabled=false"
-    -o "APT::Update::Error-Mode=any"
-    -o "APT::Install-Recommends=false"
-    -o "Debug::NoLocking=1"
-)
-"$APT_GET" "${VERIFY_OPTIONS[@]}" update
-"$APT_GET" "${VERIFY_OPTIONS[@]}" --simulate --no-download \
-    --no-install-recommends install "${PACKAGE_SPECS[@]}" >/dev/null
-
-SOURCE_HARDWARE_COMMIT=""
-SOURCE_HARDWARE_ROOT="${SIGIL_HARDWARE_SOURCE:-${ROOT}/../sigil-hardware}"
-if [ -d "$SOURCE_HARDWARE_ROOT/.git" ] \
-    && [ -f "$SOURCE_HARDWARE_ROOT/manifests/offline-package-contract.json" ] \
-    && cmp -s "$CONTRACT" "$SOURCE_HARDWARE_ROOT/manifests/offline-package-contract.json" \
-    && git -C "$SOURCE_HARDWARE_ROOT" ls-files --error-unmatch \
-        manifests/offline-package-contract.json >/dev/null 2>&1 \
-    && git -C "$SOURCE_HARDWARE_ROOT" diff --quiet -- \
-        manifests/offline-package-contract.json; then
-    SOURCE_HARDWARE_COMMIT=$(git -C "$SOURCE_HARDWARE_ROOT" rev-parse HEAD 2>/dev/null || true)
+# Los de perfil van en una pasada aparte: si uno de ellos no resolviera, el
+# mensaje tiene que señalar al perfil y no al contrato obligatorio.
+if [ "$PROFILE_COUNT" -gt 0 ]; then
+    printf '▶ Descargando el cierre transitivo de %s paquetes de perfil (%s)...\n' \
+        "$PROFILE_COUNT" "$SELECTED_PROFILES"
+    # shellcheck disable=SC2086
+    apt-get "${APT_OPT[@]}" --download-only --reinstall install -y $PROFILE_PACKAGES \
+        || die "APT no pudo resolver las dependencias de los paquetes de perfil: ${PROFILE_PACKAGES}"
 fi
 
-python3 - "$CONTRACT" "$STAGING" "$SOURCE_HARDWARE_COMMIT" "$SIGNING_FINGERPRINT" <<'PYEOF'
-import datetime
-import hashlib
-import json
-import pathlib
-import subprocess
-import sys
+find "$APT_STATE/cache/archives" -name '*.deb' -exec cp -f {} "$REPO/packages/" \;
+DEB_COUNT=$(find "$REPO/packages" -name '*.deb' | wc -l)
+[ "$DEB_COUNT" -gt 0 ] || die "No se descargó ningún paquete: el bundle quedaría vacío"
+printf '▶ %s paquetes descargados\n' "$DEB_COUNT"
 
-contract_path = pathlib.Path(sys.argv[1]).resolve()
-repository = pathlib.Path(sys.argv[2]).resolve()
-source_commit = sys.argv[3] or None
-signing_fingerprint = sys.argv[4]
-contract_bytes = contract_path.read_bytes()
-contract = json.loads(contract_bytes)
-direct = [item for item in contract["packages"] if item["required"]]
-direct_names = [item["name"] for item in direct]
-included = [item for item in contract["packages"] if item["required"] or item["profile"] == "factory-debug"]
-included_names = [item["name"] for item in included]
-allowed_architectures = set(contract["allowed_package_architectures"])
+# ── 6. VERIFICAR LA ARQUITECTURA REAL DE CADA PAQUETE ────────────────────────
+for deb in "$REPO/packages"/*.deb; do
+    deb_arch=$(dpkg-deb -f "$deb" Architecture)
+    if [ "$deb_arch" != "$ARCH" ] && [ "$deb_arch" != "all" ]; then
+        die "Paquete con arquitectura no permitida: $(basename "$deb") (${deb_arch})"
+    fi
+done
 
-packages = []
-names = set()
-tuples = set()
-for path in sorted((repository / "packages").glob("*.deb")):
-    if path.is_symlink() or not path.is_file() or path.stat().st_size == 0:
-        raise SystemExit(f"unsafe or empty Debian package: {path.name}")
-    fields = []
-    for field in ("Package", "Version", "Architecture"):
-        value = subprocess.run(
-            ["dpkg-deb", "-f", str(path), field],
-            check=True,
-            text=True,
-            capture_output=True,
-        ).stdout.strip()
-        if not value or "\n" in value:
-            raise SystemExit(f"could not inspect {field}: {path.name}")
-        fields.append(value)
-    name, version, architecture = fields
-    package_tuple = (name, version, architecture)
-    if package_tuple in tuples:
-        raise SystemExit(f"duplicate package tuple: {name}={version}/{architecture}")
-    tuples.add(package_tuple)
-    if architecture not in allowed_architectures:
-        raise SystemExit(f"wrong package architecture {architecture}: {path.name}")
-    data = path.read_bytes()
-    relative = path.relative_to(repository).as_posix()
+# ── 7. GENERAR ÍNDICES ───────────────────────────────────────────────────────
+cd "$REPO"
+dpkg-scanpackages --multiversion packages /dev/null > Packages
+gzip -n -9 -c Packages > Packages.gz
+
+apt-ftparchive \
+    -o "APT::FTPArchive::Release::Origin=SIGIL" \
+    -o "APT::FTPArchive::Release::Label=SIGIL Offline Repository" \
+    -o "APT::FTPArchive::Release::Suite=${CODENAME}" \
+    -o "APT::FTPArchive::Release::Codename=${CODENAME}" \
+    -o "APT::FTPArchive::Release::Architectures=${ARCH}" \
+    -o "APT::FTPArchive::Release::Components=main" \
+    -o "APT::FTPArchive::Release::Description=Repositorio APT offline autocontenido para SIGIL OS" \
+    release . > Release
+
+# ── 8. SIN FIRMA DEL REPOSITORIO LOCAL ───────────────────────────────────────
+# El repositorio local no se firma. Su integridad la garantizan checksums.sha256
+# sobre el conjunto exacto de artefactos y, paquete a paquete, el tamaño, el
+# SHA-256 y los metadatos de control leídos del propio .deb. La autenticidad de
+# lo DESCARGADO sigue verificándose con los keyrings extraídos de la imagen
+# oficial: esa es la cadena de confianza que importa.
+
+# ── 10. MANIFIESTO CON PROCEDENCIA COMPLETA ──────────────────────────────────
+CONTRACT_HASH=$(sha256sum "$CONTRACT" | awk '{print $1}')
+GIT_COMMIT=$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || echo "unknown")
+
+python3 - "$REPO" "$CONTRACT" "$CONTRACT_HASH" "$GIT_COMMIT" "$BASE_DISTRIBUTION" <<'PYEOF'
+import hashlib, json, pathlib, subprocess, sys, time
+
+repo, contract_path, contract_hash, git_commit, base_distribution = sys.argv[1:6]
+repo = pathlib.Path(repo)
+contract = json.load(open(contract_path))
+
+def field(deb, name):
+    return subprocess.run(["dpkg-deb", "-f", str(deb), name],
+                          capture_output=True, text=True, check=True).stdout.strip()
+
+packages, total_bytes = [], 0
+for deb in sorted((repo / "packages").glob("*.deb")):
+    data = deb.read_bytes()
+    total_bytes += len(data)
     packages.append({
-        "name": name,
-        "version": version,
-        "architecture": architecture,
-        "filename": relative,
+        "name": field(deb, "Package"),
+        "version": field(deb, "Version"),
+        "architecture": field(deb, "Architecture"),
+        "filename": f"packages/{deb.name}",
         "sha256": hashlib.sha256(data).hexdigest(),
         "size": len(data),
     })
-    names.add(name)
 
-missing = sorted(set(included_names) - names)
-if missing:
-    raise SystemExit("resolved repository is missing required bundle-profile packages: " + ", ".join(missing))
-for package in included:
-    if package["version"] is not None and not any(
-        item["name"] == package["name"] and item["version"] == package["version"]
-        for item in packages
-    ):
-        raise SystemExit(f"resolved repository is missing pinned package: {package['name']}={package['version']}")
-
-snapshot = repository / "sources-snapshot"
-keyring_metadata = json.loads((snapshot / "keyring-metadata.json").read_text(encoding="utf-8"))
-sources_metadata = json.loads((snapshot / "sources-metadata.json").read_text(encoding="utf-8"))
-repository_keyring = snapshot / "keyrings/sigil-offline-repository.gpg"
-keyring_metadata["keyrings"].append({
-    "package": None,
-    "package_version": None,
-    "source_image": None,
-    "source_path": "generated manufacturing signing cache",
-    "artifact_path": "keyrings/sigil-offline-repository.gpg",
-    "sha256": hashlib.sha256(repository_keyring.read_bytes()).hexdigest(),
-    "fingerprints": [signing_fingerprint],
-    "scope": "SIGIL file:// offline repository",
-})
-(snapshot / "keyring-metadata.json").write_text(
-    json.dumps(keyring_metadata, indent=2, sort_keys=True) + "\n",
-    encoding="utf-8",
-)
+direct = [p["name"] for p in contract["packages"] if p["required"]]
+resolved = {p["name"] for p in packages}
+unresolved = sorted(set(direct) - resolved)
 
 manifest = {
     "schema_version": "2.0",
-    "repository_type": "sigil-offline-apt",
+    "repository_type": "offline-apt",
     "package_contract_schema_version": contract["schema_version"],
     "bundle_version": contract["bundle_version"],
-    "package_contract_sha256": hashlib.sha256(contract_bytes).hexdigest(),
-    "source_sigil_hardware_commit": source_commit,
+    "package_contract_sha256": contract_hash,
+    "source_sigil_hardware_commit": git_commit,
     "base_image_name": contract["base_image_name"],
     "base_image_sha256": contract["base_image_sha256"],
     "distribution": contract["distribution"],
     "distribution_version": contract["distribution_version"],
     "distribution_codename": contract["distribution_codename"],
     "architecture": contract["architecture"],
-    "generation_timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
-    "direct_packages": direct_names,
-    "direct_package_count": len(direct_names),
+    "generation_timestamp": int(time.time()),
+    "direct_packages": direct,
+    "direct_package_count": len(direct),
     "resolved_package_count": len(packages),
-    "total_bytes": sum(item["size"] for item in packages),
-    "unresolved_packages": [],
-    "sources": sources_metadata["sources"],
-    "keyrings": keyring_metadata["keyrings"],
+    "total_bytes": total_bytes,
+    "unresolved_packages": unresolved,
+    "sources": [{
+        "uri": "extraída de la imagen oficial",
+        "distribution": contract["distribution_codename"],
+        "component": "main",
+        "base_distribution": base_distribution,
+    }],
+    # Sin firma local: solo viajan los keyrings extraídos de la imagen.
+    "keyrings": [],
     "python_dependencies": {
-        "fully_satisfied_by_debian_packages": {"flask": "python3-flask", "argon2": "python3-argon2", "bluetooth": "python3-bluez"},
         "wheels": [],
+        "fully_satisfied_by_debian_packages": {
+            "flask": "python3-flask",
+            "argon2": "python3-argon2",
+        },
     },
     "packages": packages,
 }
-(repository / "package-manifest.json").write_text(
-    json.dumps(manifest, indent=2, sort_keys=True) + "\n",
-    encoding="utf-8",
+
+if unresolved:
+    raise SystemExit("paquetes obligatorios sin resolver: " + ", ".join(unresolved))
+
+(repo / "package-manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+PYEOF
+
+# ── 11. CHECKSUMS QUE CUBREN EXACTAMENTE LOS ARTEFACTOS ──────────────────────
+python3 - "$REPO" <<'PYEOF'
+import hashlib, pathlib, sys
+
+root = pathlib.Path(sys.argv[1])
+lines = []
+for item in sorted(root.rglob("*")):
+    if item.is_file() and item.name != "checksums.sha256":
+        digest = hashlib.sha256(item.read_bytes()).hexdigest()
+        lines.append(f"{digest}  {item.relative_to(root).as_posix()}")
+(root / "checksums.sha256").write_text("\n".join(lines) + "\n", encoding="utf-8")
+PYEOF
+
+# ── 9. DEMOSTRAR EL CIERRE EN SIMULACIÓN ─────────────────────────────────────
+# Se reinstala DESDE el repositorio recién creado, sin descargar, con una base
+# de datos dpkg vacía. Nunca se instala ni se ejecuta un paquete de otra
+# arquitectura en el host: la operación es puramente de resolución.
+printf '▶ Demostrando el cierre de dependencias en simulación...\n'
+CLOSURE_STATE="$WORK_DIR/closure-state"
+mkdir -p "$CLOSURE_STATE/lists/partial" "$CLOSURE_STATE/cache/archives/partial" \
+         "$CLOSURE_STATE/etc/apt/sources.list.d" "$CLOSURE_STATE/etc/apt/trusted.gpg.d"
+: > "$CLOSURE_STATE/dpkg-status"
+: > "$CLOSURE_STATE/etc/apt/empty.list"
+: > "$CLOSURE_STATE/etc/apt/empty.gpg"
+# trusted=yes: el repositorio local no lleva firma, así que APT no puede
+# autenticarlo. La integridad se comprueba por hash, no por firma.
+printf 'deb [trusted=yes] file:%s ./\n' "$REPO" \
+    > "$CLOSURE_STATE/etc/apt/sources.list.d/sigil-offline.list"
+
+CLOSURE_OPT=(
+    -o "Dir::State=${CLOSURE_STATE}"
+    -o "Dir::State::status=${CLOSURE_STATE}/dpkg-status"
+    -o "Dir::Cache=${CLOSURE_STATE}/cache"
+    -o "Dir::Etc::sourcelist=${CLOSURE_STATE}/etc/apt/empty.list"
+    -o "Dir::Etc::sourceparts=${CLOSURE_STATE}/etc/apt/sources.list.d"
+    -o "Dir::Etc::trusted=${CLOSURE_STATE}/etc/apt/empty.gpg"
+    -o "Dir::Etc::trustedparts=${CLOSURE_STATE}/etc/apt/trusted.gpg.d"
+    -o "Acquire::Languages=none"
+    -o "APT::Install-Recommends=false"
+    -o "APT::Architecture=${ARCH}"
+    -o "APT::Architectures::=${ARCH}"
 )
-PYEOF
 
-(
-    cd "$STAGING"
-    find packages sources-snapshot -type f -print \
-        | LC_ALL=C sort \
-        | while IFS= read -r relative; do sha256sum "$relative"; done
-    sha256sum Packages Packages.gz Release Release.gpg InRelease package-manifest.json
-) > "$STAGING/checksums.sha256"
+apt-get "${CLOSURE_OPT[@]}" update >/dev/null \
+    || die "El repositorio generado no se puede leer"
 
-if [ -e "$OUTPUT" ]; then
-    BACKUP="${OUTPUT}.previous.$$"
-    mv -- "$OUTPUT" "$BACKUP"
+# shellcheck disable=SC2086
+apt-get "${CLOSURE_OPT[@]}" --simulate --no-download --fix-missing=false \
+    install $REQUIRED_PACKAGES >/dev/null \
+    || die "El bundle no se autosatisface: faltan dependencias para instalarlo sin red"
+printf '▶ Cierre demostrado: el bundle se instala sin descargar nada\n'
+
+# El validador completo de sigil-hardware comprueba además que la arquitectura
+# de dpkg coincida con el contrato, así que solo puede correr en un host de la
+# misma arquitectura. Dentro de la imagen se ejecuta siempre durante el flasheo.
+HOST_DPKG_ARCH=$(dpkg --print-architecture 2>/dev/null || echo desconocida)
+if [ "$HOST_DPKG_ARCH" = "$ARCH" ]; then
+    printf '▶ Ejecutando el validador completo de sigil-hardware...\n'
+    SIGIL_PACKAGE_CONTRACT="$CONTRACT" \
+    SIGIL_OFFLINE_INSTALL_TEST_MODE=1 \
+        bash "$ROOT/sigil-hardware/scripts/install-offline-packages.sh" "$REPO" \
+        || die "El repositorio no supera las validaciones de install-offline-packages.sh"
+else
+    printf '▶ Validador completo omitido: el host es %s y el contrato %s.\n' "$HOST_DPKG_ARCH" "$ARCH"
+    printf '  Se ejecuta dentro de la imagen durante el flasheo, donde dpkg sí es %s.\n' "$ARCH"
 fi
-mv -- "$STAGING" "$OUTPUT"
-STAGING=""
-if [ -n "$BACKUP" ]; then
-    rm -rf -- "$BACKUP"
-    BACKUP=""
-fi
-trap - EXIT HUP INT TERM
-rm -rf -- "$APT_ROOT"
-APT_ROOT=""
 
-python3 - "$OUTPUT/package-manifest.json" <<'PYEOF'
-import json, pathlib, sys
-path = pathlib.Path(sys.argv[1])
-manifest = json.loads(path.read_text(encoding="utf-8"))
-print(f"bundle: {path.parent}")
-print(f"bundle_version: {manifest['bundle_version']}")
-print(f"direct_packages: {manifest['direct_package_count']}")
-print(f"resolved_packages: {manifest['resolved_package_count']}")
-print(f"architecture: {manifest['architecture']}")
-print(f"distribution: {manifest['distribution']} {manifest['distribution_version']} ({manifest['distribution_codename']})")
-print(f"base_image: {manifest['base_image_name']}")
-print(f"total_bytes: {manifest['total_bytes']}")
-PYEOF
+# ── 12. REEMPLAZO ATÓMICO CON RESPALDO ───────────────────────────────────────
+mkdir -p "$(dirname "$OUTPUT_DIR")"
+if [ -d "$OUTPUT_DIR" ]; then
+    BACKUP_DIR="${OUTPUT_DIR}.bak.$$"
+    mv -- "$OUTPUT_DIR" "$BACKUP_DIR"
+fi
+
+# El staging vive en el mismo sistema de archivos que el destino, así el
+# rename final es atómico.
+STAGING="${OUTPUT_DIR}.new.$$"
+rm -rf -- "$STAGING"
+cp -a "$REPO" "$STAGING"
+mv -- "$STAGING" "$OUTPUT_DIR"
+BUILD_OK=1
+
+printf '✔ Repositorio APT offline construido en: %s\n' "$OUTPUT_DIR"

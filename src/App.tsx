@@ -1,362 +1,353 @@
-import { useState, useCallback, useEffect, useRef } from "react";
-import { invoke } from "@tauri-apps/api/core";
-import { listen, UnlistenFn } from "@tauri-apps/api/event";
-import Header from "./components/Header";
-import Sidebar from "./components/Sidebar";
-import CenterPanel from "./components/CenterPanel";
-import ConfirmModal from "./components/ConfirmModal";
-import ServerLoginModal from "./components/ServerLoginModal";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { BundlePair, Device, DeviceConfig, FlashProgress, ImageInfo } from './types/models';
+import { ImageSelector } from './components/ImageSelector';
+import { DeviceSelector } from './components/DeviceSelector';
+import { ConfigForm } from './components/ConfigForm';
+import { CredentialPanel } from './components/CredentialPanel';
+import { FlashProgressView } from './components/FlashProgressView';
+import { StepRail } from './components/StepRail';
+import { ContextPanel } from './components/ContextPanel';
+import { ActivityLog, LogEntry, LogLevel } from './components/ActivityLog';
+import { buildPreflight, currentStepId, StepId } from './services/preflight';
+import { formatBytes } from './services/format';
+import {
+  cancelFlash,
+  listFactoryAccounts,
+  onFlashProgress,
+  rebuildPayloads,
+  resolveBundle,
+  startFlash,
+  validateConfig,
+} from './services/tauri';
 
-export interface ImageInfo {
-  path: string;
-  name: string;
-  size: number;
-}
+const CONFIG_INICIAL: DeviceConfig = {
+  hostname: 'sigil-device',
+  username: 'sigil',
+  serialNumber: '',
+  sshEnabled: false,
+  rpiModel: 'raspberry-pi-zero-2-w',
+  serverUrl: 'https://sigil-server.sphinx-pickerel.ts.net',
+};
 
-export interface Device {
-  name: string;
-  path: string;
-  size: string;
-  model: string;
-  type: string;
-  removable: boolean;
-  transport: string;
-}
+// La cuenta del servidor de fabricación se recuerda entre arranques: es un dato
+// de la estación, no del equipo que se fabrica, y volver a teclearla en cada
+// sesión es la vía rápida a un 401 por un carácter mal puesto.
+const CLAVE_CUENTA_FABRICA = 'sigil-flash.factory-account';
 
-export type RPiModel =
-  | "Raspberry Pi 5 (64-bit)"
-  | "Raspberry Pi 4 (64-bit)"
-  | "Raspberry Pi 4 (32-bit)"
-  | "Raspberry Pi 3 (64-bit)"
-  | "Raspberry Pi 3 (32-bit)"
-  | "Raspberry Pi 2"
-  | "Raspberry Pi 1"
-  | "Raspberry Pi Zero 2 W (64-bit)"
-  | "Raspberry Pi Zero 2 W (32-bit)"
-  | "Raspberry Pi Zero W (32-bit)"
-  | "Raspberry Pi Zero (32-bit)"
-  | "Raspberry Pi Pico 2 W"
-  | "Raspberry Pi Pico 2"
-  | "Raspberry Pi Pico W"
-  | "Raspberry Pi Pico";
+// El alias canónico que el backend resuelve a la cuenta con rol FACTORY
+// (`FACTORY_USERNAME` en su entorno). Nunca el usuario del dispositivo: ese es
+// del sistema operativo que se instala y el servidor no lo conoce. Es solo el
+// punto de partida: si el keyring ya tiene una cuenta guardada, manda esa.
+const CUENTA_FABRICA_POR_DEFECTO = 'fabrica';
 
-export interface FlashProgress {
-  bytes_written: number;
-  total_bytes: number;
-  speed_mbps: number;
-  eta_seconds: number;
-  status: "running" | "done" | "error" | "cancelled";
-  message: string;
-}
+const leerCuentaDeFabrica = (): string | null => {
+  try {
+    return localStorage.getItem(CLAVE_CUENTA_FABRICA);
+  } catch {
+    return null;
+  }
+};
 
-export type AppStep = "select-image" | "select-device" | "flashing" | "done";
-
-export interface LogEntry {
-  time: string;
-  msg: string;
-  type: "info" | "success" | "error" | "warning";
-}
-
-export function formatSize(bytes: number): string {
-  if (bytes === 0) return "0 B";
-  const k = 1024;
-  const sizes = ["B", "KB", "MB", "GB", "TB"];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
-}
-
-export default function App() {
+export const App: React.FC = () => {
   const [image, setImage] = useState<ImageInfo | null>(null);
+  const [bundle, setBundle] = useState<BundlePair | null>(null);
+  const [bundleError, setBundleError] = useState<string | null>(null);
   const [device, setDevice] = useState<Device | null>(null);
-  const [step, setStep] = useState<AppStep>("select-image");
+  const [config, setConfig] = useState<DeviceConfig>(CONFIG_INICIAL);
+  const [flashing, setFlashing] = useState(false);
+  const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState<FlashProgress | null>(null);
+  const [failure, setFailure] = useState<string | null>(null);
+  const [manualStep, setManualStep] = useState<StepId | null>(null);
   const [logs, setLogs] = useState<LogEntry[]>([]);
-  const [isFlashing, setIsFlashing] = useState(false);
-  const [showConfirm, setShowConfirm] = useState(false);
-  const [showServerLogin, setShowServerLogin] = useState(false);
-  const [serverLoginError, setServerLoginError] = useState<string | null>(null);
-  const [rpiModel, setRpiModel] = useState<RPiModel>("Raspberry Pi 4 (64-bit)");
-  const [sshEnabled, setSshEnabled] = useState(true);
-  const [username, setUsername] = useState("sigil");
-  const [password, setPassword] = useState("");
-  const [pinPanel, setPinPanel] = useState("");
-  const [logPassword, setLogPassword] = useState("");
-  const [hostname, setHostname] = useState("sigil");
-  const [serialNumber, setSerialNumber] = useState("");
-  const [sigilModel, setSigilModel] = useState("Sigil-Streamer");
-  const [sigilModelVersion, setSigilModelVersion] = useState("v1");
-  const [wifiSsid, setWifiSsid] = useState("");
-  const [wifiPassword, setWifiPassword] = useState("");
-  const [activeTab, setActiveTab] = useState<"vista-previa" | "ssh" | "historial" | "motor">("vista-previa");
-  const flashRequestActive = useRef(false);
+  const logSeq = useRef(0);
+  const prevProgressStatus = useRef<FlashProgress['status']>('idle');
 
-  const addLog = useCallback((msg: string, type: LogEntry["type"] = "info") => {
-    const time = new Date().toLocaleTimeString();
-    setLogs((prev) => [...prev, { time, msg, type }]);
+  // Historial de acciones y errores para el operario, no para depuración: cada
+  // línea es una frase que explica qué pasó, no un volcado técnico. Se acota a
+  // 200 líneas para que una sesión larga no crezca sin límite.
+  const pushLog = useCallback((level: LogLevel, message: string) => {
+    logSeq.current += 1;
+    const entry: LogEntry = {
+      id: logSeq.current,
+      time: new Date().toLocaleTimeString('es-ES'),
+      level,
+      message,
+    };
+    setLogs((prev) => {
+      const next = [...prev, entry];
+      return next.length > 200 ? next.slice(next.length - 200) : next;
+    });
   }, []);
 
+  // Cuenta del servidor de fabricación. Deliberadamente fuera de DeviceConfig:
+  // el usuario del dispositivo es fijo, el del servidor no tiene por qué serlo,
+  // y DeviceConfig viaja dentro de la imagen — la cuenta de fábrica no puede.
+  const [factoryAccount, setFactoryAccount] = useState(
+    () => leerCuentaDeFabrica() ?? CUENTA_FABRICA_POR_DEFECTO
+  );
+
+  // Sin elección previa del operario, manda el keyring: proponer un nombre que
+  // este PC no tiene guardado solo produce un error que parece del servidor.
+  // Con varias cuentas guardadas no hay forma de adivinar cuál toca, así que se
+  // deja el alias canónico y que el operario elija.
   useEffect(() => {
-    let unlisten: UnlistenFn | undefined;
-    async function setupListener() {
-      unlisten = await listen<FlashProgress>("flash-progress", (event) => {
-        const payload = event.payload;
-        setProgress(payload);
-        if (payload.status === "error") {
-          addLog(payload.message || "Error en la verificación o escritura", "error");
-          setIsFlashing(false);
-        } else if (payload.status === "done") {
-          addLog("Operación finalizada correctamente.", "success");
-          setIsFlashing(false);
-        } else if (payload.status === "cancelled") {
-          addLog("Operación cancelada por el usuario.", "warning");
-          setIsFlashing(false);
-        }
+    if (leerCuentaDeFabrica()) return;
+    let cancelado = false;
+    listFactoryAccounts()
+      .then((cuentas) => {
+        if (!cancelado && cuentas.length === 1) setFactoryAccount(cuentas[0]);
+      })
+      .catch(() => {
+        // El keyring es una comodidad para prellenar el campo, no un requisito.
       });
-    }
-    setupListener();
     return () => {
-      if (unlisten) unlisten();
+      cancelado = true;
     };
-  }, [addLog]);
+  }, []);
 
-  const handleImageSelected = (info: ImageInfo) => {
-    setImage(info);
-    addLog(`Imagen seleccionada: ${info.name} (${formatSize(info.size)})`, "info");
-    if (step === "select-image") setStep("select-device");
-  };
-
-  const handleFlashClick = () => {
-    if (!image) {
-      addLog("Selecciona una imagen primero", "warning");
-      return;
-    }
-    if (!device) {
-      addLog("Selecciona un dispositivo primero", "warning");
-      return;
-    }
-    const validationError = validateManufacturingInputs({
-      rpiModel,
-      sshEnabled,
-      username,
-      password,
-      panelPin: pinPanel.trim(),
-      hostname,
-      serialNumber,
-    });
-    if (validationError) {
-      addLog(validationError, "error");
-      return;
-    }
-    setShowConfirm(true);
-  };
-
-  const handleConfirmFlash = async () => {
-    if (!image || !device || flashRequestActive.current) return;
-    flashRequestActive.current = true;
-    setShowConfirm(false);
-    setStep("flashing");
-    setIsFlashing(true);
-    setLogs([]);
-    setProgress(null);
-    addLog(`Iniciando flasheo: ${image.name} → ${device.path}`, "info");
+  const actualizarCuentaDeFabrica = useCallback((cuenta: string) => {
+    setFactoryAccount(cuenta);
     try {
-      const normalizedPanelPin = pinPanel.trim();
-      const config = {
-        hostname,
-        username,
-        password: sshEnabled ? password || null : null,
-        wifiSsid: wifiSsid || null,
-        wifiPassword: wifiSsid ? wifiPassword || null : null,
-        sshEnabled,
-        rpiModel,
-        serialNumber: serialNumber || null,
-        sigilModel: sigilModel || null,
-        sigilModelVersion: sigilModelVersion || null,
-        panelPin: normalizedPanelPin || null,
-      };
-      await invoke("start_flash", {
-        imagePath: image.path,
-        devicePath: device.path,
-        config,
-      });
+      localStorage.setItem(CLAVE_CUENTA_FABRICA, cuenta);
+    } catch {
+      // Un webview sin almacenamiento persistente no debe impedir fabricar: la
+      // cuenta sigue siendo editable, solo no sobrevive al reinicio.
+    }
+  }, []);
 
-      setStep("done");
-      setPassword("");
-      setPinPanel("");
-      setLogPassword("");
-      addLog("¡Proceso completado exitosamente!", "success");
-    } catch (err: any) {
-      const errStr = typeof err === "string" ? err : String(err?.message || err);
-      addLog(`Error: ${errStr}`, "error");
+  const preflight = useMemo(
+    () => buildPreflight({ image, bundle, bundleError, device, config, flashing }),
+    [image, bundle, bundleError, device, config, flashing]
+  );
 
-      if (
-        errStr.includes("Falta server_url") ||
-        errStr.includes("GNOME Keyring") ||
-        errStr.includes("Login de fabricación rechazado") ||
-        errStr.includes("credencial de fabricación")
-      ) {
-        setServerLoginError(errStr);
-        setShowServerLogin(true);
+  const activeStep = manualStep ?? currentStepId(preflight.steps);
+  const showProgress = progress !== null && progress.status !== 'idle';
+
+  // El escritor privilegiado publica su estado y el backend lo reemite: la
+  // barra avanza durante toda la escritura, no solo al terminar.
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    onFlashProgress((p) => {
+      setProgress(p);
+      // Solo se registra el cambio de fase, no cada evento de bytes escritos:
+      // eso llegaría varias veces por segundo y ahogaría el registro.
+      if (p.status !== prevProgressStatus.current) {
+        prevProgressStatus.current = p.status;
+        const level: LogLevel = p.status === 'error' ? 'error' : p.status === 'cancelled' ? 'warn' : 'info';
+        pushLog(level, p.message || `Fase de fabricación: ${p.status}`);
       }
-    } finally {
-      flashRequestActive.current = false;
-      setIsFlashing(false);
-    }
-  };
+    }).then((fn) => {
+      unlisten = fn;
+    });
+    return () => unlisten?.();
+  }, [pushLog]);
 
-  const handleCancelFlash = async () => {
+  // La imagen decide el par bundle/payload. Sin par no se fabrica.
+  useEffect(() => {
+    if (!image) {
+      setBundle(null);
+      setBundleError(null);
+      return;
+    }
+    let cancelled = false;
+    resolveBundle(image.name)
+      .then((pair) => {
+        if (cancelled) return;
+        setBundle(pair);
+        setBundleError(null);
+        pushLog('info', `Bundle resuelto: ${pair.contract_name} · ${pair.architecture}`);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setBundle(null);
+        setBundleError(String(err));
+        pushLog('error', `Error al resolver el bundle: ${String(err)}`);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [image, pushLog]);
+
+  const handleStartFlash = useCallback(async () => {
+    if (!image || !device) return;
+    setFailure(null);
+    pushLog('info', `Fabricación iniciada: ${image.name} → ${device.path}`);
     try {
-      await invoke("cancel_flash");
-      addLog("Enviando señal de cancelación...", "warning");
+      await validateConfig(config);
+      setFlashing(true);
+      const result = await startFlash(image.path, device.path, config);
+      setProgress(result);
+      if (result.status === 'error') {
+        setFailure(result.message);
+        pushLog('error', result.message);
+      }
     } catch (err) {
-      addLog(`No se pudo cancelar: ${err}`, "error");
+      setFailure(String(err));
+      pushLog('error', String(err));
+    } finally {
+      setFlashing(false);
+    }
+  }, [config, device, image, pushLog]);
+
+  const handleCancel = useCallback(async () => {
+    pushLog('warn', 'Cancelando fabricación…');
+    try {
+      await cancelFlash();
+    } catch (err) {
+      setFailure(String(err));
+      pushLog('error', String(err));
+    }
+  }, [pushLog]);
+
+  const handleRebuildPayloads = useCallback(async () => {
+    setBusy(true);
+    setFailure(null);
+    pushLog('info', 'Regenerando payloads…');
+    try {
+      await rebuildPayloads();
+      if (image) setBundle(await resolveBundle(image.name));
+      pushLog('info', 'Payloads regenerados');
+    } catch (err) {
+      setFailure(String(err));
+      pushLog('error', String(err));
+    } finally {
+      setBusy(false);
+    }
+  }, [image, pushLog]);
+
+  const handleImageSelected = useCallback(
+    (img: ImageInfo | null) => {
+      setImage(img);
+      pushLog(
+        'info',
+        img ? `Imagen seleccionada: ${img.name} (${formatBytes(img.size)})` : 'Imagen deseleccionada'
+      );
+    },
+    [pushLog]
+  );
+
+  const handleDeviceSelected = useCallback(
+    (dev: Device | null) => {
+      setDevice(dev);
+      pushLog(
+        'info',
+        dev ? `Dispositivo destino: ${dev.model} (${dev.path}, ${dev.size})` : 'Dispositivo deseleccionado'
+      );
+    },
+    [pushLog]
+  );
+
+  const blockingReason = flashing
+    ? 'Fabricando: escritura e instalación en curso'
+    : preflight.blockers[0] ?? 'Todo listo para fabricar';
+
+  const stepPanel = () => {
+    switch (activeStep) {
+      case 'image':
+        return (
+          <ImageSelector
+            selectedImage={image}
+            onImageSelected={handleImageSelected}
+            bundle={bundle}
+            bundleError={bundleError}
+            onRebuildPayloads={handleRebuildPayloads}
+            busy={busy}
+          />
+        );
+      case 'device':
+        return <DeviceSelector selectedDevice={device} onDeviceSelected={handleDeviceSelected} />;
+      case 'config':
+        return <ConfigForm config={config} onChange={setConfig} />;
+      case 'credential':
+        return (
+          <CredentialPanel
+            config={config}
+            account={factoryAccount}
+            onAccountChange={actualizarCuentaDeFabrica}
+            enrollmentReady={!!config.apiKey}
+            onEnrollmentKey={(key) => setConfig((prev) => ({ ...prev, apiKey: key }))}
+            onLog={pushLog}
+          />
+        );
     }
   };
-
-  const handleReset = () => {
-    setStep("select-image");
-    setImage(null);
-    setDevice(null);
-    setProgress(null);
-    setLogs([]);
-    setIsFlashing(false);
-    setActiveTab("vista-previa");
-    setSshEnabled(true);
-    setUsername("sigil");
-    setPassword("");
-    setPinPanel("");
-    setLogPassword("");
-    setHostname("sigil");
-    setSerialNumber("");
-    setWifiSsid("");
-    setWifiPassword("");
-  };
-
-  const isDone = step === "done";
-  const canFlash = image !== null && device !== null && !isFlashing;
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", height: "100vh", overflow: "hidden" }}>
-      <Header onOpenLoginModal={() => { setServerLoginError(null); setShowServerLogin(true); }} />
+    <div className="app">
+      <header className="app-bar">
+        <div className="brand">
+          <span className="brand-mark" aria-hidden="true">
+            ◈
+          </span>
+          <span className="brand-name">SIGIL Flash</span>
+        </div>
+        <p className="brand-tagline">Estación de fabricación offline</p>
+        <span className="env-badge">Entorno de fabricación autorizado</span>
+      </header>
 
-      <div className="app-shell" style={{ marginTop: 0 }}>
-        <Sidebar
-          image={image}
-          device={device}
-          rpiModel={rpiModel}
-          onRpiModelChange={setRpiModel}
-          onImageSelected={handleImageSelected}
-          onImageClear={() => setImage(null)}
-          onDeviceSelect={setDevice}
-          isFlashing={isFlashing}
-          isDone={isDone}
-          sshEnabled={sshEnabled} setSshEnabled={setSshEnabled}
-          username={username} setUsername={setUsername}
-          password={password} setPassword={setPassword}
-          pinPanel={pinPanel} setPinPanel={setPinPanel}
-          logPassword={logPassword} setLogPassword={setLogPassword}
-          hostname={hostname} setHostname={setHostname}
-          serialNumber={serialNumber} setSerialNumber={setSerialNumber}
-          sigilModel={sigilModel} setSigilModel={setSigilModel}
-          sigilModelVersion={sigilModelVersion} setSigilModelVersion={setSigilModelVersion}
-          wifiSsid={wifiSsid} setWifiSsid={setWifiSsid}
-          wifiPassword={wifiPassword} setWifiPassword={setWifiPassword}
-        />
+      <div className="app-body">
+        <ContextPanel image={image} bundle={bundle} device={device} config={config} />
 
-        <main className="main-content" style={{ padding: "0 16px 16px 16px", flex: 1, overflow: "hidden" }}>
-          <CenterPanel
-            image={image}
-            device={device}
-            rpiModel={rpiModel}
-            progress={progress}
-            logs={logs}
-            isFlashing={isFlashing}
-            isDone={isDone}
-            canFlash={canFlash}
-            onFlash={handleFlashClick}
-            onCancel={handleCancelFlash}
-            onReset={handleReset}
-            activeTab={activeTab}
-            setActiveTab={setActiveTab}
-            sshEnabled={sshEnabled}
-            setSshEnabled={setSshEnabled}
-            username={username}
-            setUsername={setUsername}
-            password={password}
-            setPassword={setPassword}
-            hostname={hostname}
-            setHostname={setHostname}
-            serialNumber={serialNumber}
-            setSerialNumber={setSerialNumber}
-            pinPanel={pinPanel}
-            setPinPanel={setPinPanel}
-            logPassword={logPassword}
-            setLogPassword={setLogPassword}
-            wifiSsid={wifiSsid}
-            setWifiSsid={setWifiSsid}
-            wifiPassword={wifiPassword}
-            setWifiPassword={setWifiPassword}
-          />
+        <aside className="sidebar">
+          <StepRail steps={preflight.steps} activeId={activeStep} onSelect={setManualStep} />
+
+          <div className="launch">
+            <button
+              type="button"
+              className="button button-launch"
+              onClick={handleStartFlash}
+              disabled={!preflight.canFlash}
+            >
+              Iniciar fabricación
+            </button>
+          </div>
+        </aside>
+
+        <main className="content">
+          {showProgress && <FlashProgressView progress={progress} onCancel={handleCancel} />}
+          {!showProgress && stepPanel()}
+          {failure && (
+            <p className="message-error" role="alert">
+              {failure}
+            </p>
+          )}
         </main>
       </div>
 
-      {showConfirm && image && device && (
-        <ConfirmModal
-          image={image}
-          device={device}
-          onConfirm={handleConfirmFlash}
-          onCancel={() => setShowConfirm(false)}
-        />
-      )}
+      <footer className="app-foot">
+        <div className="status-row">
+          {/* Dos regiones vivas anunciando a la vez se pisan: durante la
+              fabricación manda el mensaje del escritor, no este resumen. */}
+          <p
+            className="blocking-reason"
+            data-testid="blocking-reason"
+            role={showProgress ? undefined : 'status'}
+          >
+            <span className={`dot ${preflight.canFlash ? 'dot-ready' : 'dot-blocked'}`} aria-hidden="true" />
+            {blockingReason}
+          </p>
+          <span className="app-version">SIGIL Flash v1.0.0</span>
+        </div>
 
-      <ServerLoginModal
-        isOpen={showServerLogin}
-        onClose={() => setShowServerLogin(false)}
-        initialError={serverLoginError}
-      />
+        {preflight.blockers.length > 0 && (
+          <ul className="blocker-list">
+            {preflight.blockers.slice(0, 3).map((b) => (
+              <li key={b}>{b}</li>
+            ))}
+          </ul>
+        )}
+
+        {preflight.warnings.map((w) => (
+          <p className="message-warn" key={w}>
+            {w}
+          </p>
+        ))}
+
+        <ActivityLog entries={logs} />
+      </footer>
     </div>
   );
-}
+};
 
-interface ManufacturingInputs {
-  rpiModel: RPiModel;
-  sshEnabled: boolean;
-  username: string;
-  password: string;
-  panelPin: string;
-  hostname: string;
-  serialNumber: string;
-}
-
-export function validateManufacturingInputs(inputs: ManufacturingInputs): string | null {
-  if (inputs.rpiModel.includes("Pico")) {
-    return "El flujo de fabricación Linux no admite Raspberry Pi Pico.";
-  }
-  if (inputs.username !== "sigil") {
-    return "El usuario del sistema debe ser 'sigil'.";
-  }
-  if (!/^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$/.test(inputs.hostname)) {
-    return "El hostname debe tener entre 1 y 63 caracteres seguros.";
-  }
-  if (!/^[A-Za-z0-9._-]{1,64}$/.test(inputs.serialNumber)) {
-    return "El número de serie es obligatorio y solo admite letras, números, punto, guion y guion bajo.";
-  }
-  if (!/^\d{6,12}$/.test(inputs.panelPin)) {
-    return "El PIN del panel debe contener entre 6 y 12 dígitos.";
-  }
-  const repeatedPin = [...inputs.panelPin].every((digit) => digit === inputs.panelPin[0]);
-  const ascendingPin = "12345678901234567890".includes(inputs.panelPin);
-  const descendingPin = "98765432109876543210".includes(inputs.panelPin);
-  if (repeatedPin || ascendingPin || descendingPin) {
-    return "El PIN del panel es demasiado predecible.";
-  }
-  if (inputs.sshEnabled) {
-    if (inputs.password.length < 6 || inputs.password.length > 128) {
-      return "La contraseña SSH debe tener entre 6 y 128 caracteres.";
-    }
-    if (/[\r\n\0]/.test(inputs.password)) {
-      return "La contraseña SSH contiene caracteres no permitidos.";
-    }
-  }
-  return null;
-}
+export default App;

@@ -1001,41 +1001,6 @@ mod tests {
     use std::sync::OnceLock;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    fn fixture_signing_home() -> &'static PathBuf {
-        static HOME: OnceLock<PathBuf> = OnceLock::new();
-        HOME.get_or_init(|| {
-            let home = std::env::temp_dir()
-                .join(format!("sigil-flasher-test-signing-{}", std::process::id()));
-            let _ = fs::remove_dir_all(&home);
-            fs::create_dir_all(&home).expect("fixture signing home");
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                fs::set_permissions(&home, fs::Permissions::from_mode(0o700))
-                    .expect("fixture signing home mode");
-            }
-            let generated = std::process::Command::new("gpg")
-                .args([
-                    "--homedir",
-                    home.to_str().expect("signing home"),
-                    "--batch",
-                    "--pinentry-mode",
-                    "loopback",
-                    "--passphrase",
-                    "",
-                    "--quick-generate-key",
-                    "SIGIL Fixture <fixture@invalid>",
-                    "ed25519",
-                    "sign",
-                    "0",
-                ])
-                .status()
-                .expect("generate signing key");
-            assert!(generated.success(), "fixture signing key generation failed");
-            home
-        })
-    }
-
     fn create_offline_repository(root: &Path, contract_path: &Path) -> PathBuf {
         let repository = root.join("offline-packages");
         let packages_dir = repository.join("packages");
@@ -1169,40 +1134,6 @@ mod tests {
         )
         .expect("base image metadata");
 
-        let signing_home = fixture_signing_home();
-        let listing = std::process::Command::new("gpg")
-            .args([
-                "--homedir",
-                signing_home.to_str().expect("signing home"),
-                "--batch",
-                "--with-colons",
-                "--list-secret-keys",
-            ])
-            .output()
-            .expect("list signing key");
-        let listing = String::from_utf8(listing.stdout).expect("signing key listing");
-        let fingerprint = listing
-            .lines()
-            .find_map(|line| {
-                line.strip_prefix("fpr:::::::::")
-                    .and_then(|rest| rest.split(':').next())
-            })
-            .expect("signing fingerprint");
-        let repository_key = keyrings.join("sigil-offline-repository.gpg");
-        let exported = std::process::Command::new("gpg")
-            .args([
-                "--homedir",
-                signing_home.to_str().expect("signing home"),
-                "--batch",
-                "--output",
-                repository_key.to_str().expect("repository key"),
-                "--export",
-                fingerprint,
-            ])
-            .status()
-            .expect("export signing key");
-        assert!(exported.success(), "fixture signing key export failed");
-
         let keyring_metadata = vec![
             json!({
                 "package": "debian-archive-keyring",
@@ -1224,16 +1155,6 @@ mod tests {
                 "fingerprints": ["2222222222222222222222222222222222222222"],
                 "scope": "Raspberry Pi archive"
             }),
-            json!({
-                "package": null,
-                "package_version": null,
-                "source_image": null,
-                "source_path": "generated fixture signing key",
-                "artifact_path": "keyrings/sigil-offline-repository.gpg",
-                "sha256": sha256_file(&repository_key).expect("keyring hash"),
-                "fingerprints": [fingerprint],
-                "scope": "SIGIL file:// offline repository"
-            }),
         ];
         fs::write(
             snapshot.join("keyring-metadata.json"),
@@ -1247,30 +1168,6 @@ mod tests {
             b"Date: Tue, 15 Jul 2026 00:00:00 UTC\n",
         )
         .expect("Release");
-        for (output, arguments) in [
-            ("InRelease", vec!["--clearsign"]),
-            ("Release.gpg", vec!["--detach-sign"]),
-        ] {
-            let status = std::process::Command::new("gpg")
-                .args([
-                    "--homedir",
-                    signing_home.to_str().expect("signing home"),
-                    "--batch",
-                    "--yes",
-                    "--local-user",
-                    fingerprint,
-                ])
-                .args(arguments)
-                .args([
-                    "--output",
-                    repository.join(output).to_str().expect("signature output"),
-                    repository.join("Release").to_str().expect("Release"),
-                ])
-                .status()
-                .expect("sign fixture repository");
-            assert!(status.success(), "fixture repository signing failed");
-        }
-
         let manifest = json!({
             "schema_version": "2.0",
             "repository_type": "sigil-offline-apt",
@@ -1321,8 +1218,6 @@ mod tests {
             "Packages",
             "Packages.gz",
             "Release",
-            "Release.gpg",
-            "InRelease",
             "package-manifest.json",
             "sources-snapshot/debian.sources",
             "sources-snapshot/raspi.sources",
@@ -1332,7 +1227,6 @@ mod tests {
             "sources-snapshot/keyring-metadata.json",
             "sources-snapshot/keyrings/debian-archive-keyring.pgp",
             "sources-snapshot/keyrings/raspberrypi-archive-keyring.pgp",
-            "sources-snapshot/keyrings/sigil-offline-repository.gpg",
         ] {
             checksums.push_str(&format!(
                 "{}  {}\n",

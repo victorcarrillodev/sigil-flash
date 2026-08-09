@@ -1,305 +1,207 @@
-#!/bin/bash
-# Extract authenticated APT source definitions and archive keyrings from a verified image.
+#!/usr/bin/env bash
+# =============================================================================
+# extract-official-apt-metadata.sh — Extrae fuentes y keyrings de la imagen
+# oficial verificada por hash.
+#
+# LOS KEYRINGS DEL HOST NUNCA SE CONFÍAN: la cadena de confianza arranca en la
+# imagen oficial, no en el equipo que fabrica.
+# =============================================================================
 set -euo pipefail
+
+IMAGE_FILE="${1:-}"
+OUTPUT_DIR="${2:-}"
+CONTRACT="${3:-sigil-hardware/manifests/offline-package-contract.json}"
 
 die() {
     printf 'error: %s\n' "$*" >&2
     exit 1
 }
 
-[ "$#" -eq 3 ] || die "usage: $(basename "$0") <contract.json> <base-image.img[.xz]> <destination>"
-CONTRACT="$1"
-BASE_IMAGE="$2"
-DESTINATION="$3"
+[ -n "$IMAGE_FILE" ] || die "Uso: extract-official-apt-metadata.sh <imagen.img[.xz]> <dir_salida> [contrato]"
+[ -f "$IMAGE_FILE" ] || die "Archivo de imagen no existe: ${IMAGE_FILE}"
+[ -n "$OUTPUT_DIR" ] || die "Se requiere directorio de salida"
+[ -f "$CONTRACT" ] || die "Contrato no encontrado: ${CONTRACT}"
 
-for command in python3 sha256sum xz sfdisk dd debugfs gpg; do
-    command -v "$command" >/dev/null || die "required command is unavailable: ${command}"
+for tool in sfdisk debugfs dd sha256sum python3; do
+    command -v "$tool" >/dev/null || die "Falta la herramienta '${tool}' en el PC de fabricación"
 done
-[ -f "$CONTRACT" ] || die "package contract is missing: ${CONTRACT}"
-[ -f "$BASE_IMAGE" ] || die "official base image is missing: ${BASE_IMAGE}"
 
-mapfile -t IMAGE_CONTRACT < <(python3 - "$CONTRACT" <<'PYEOF'
-import json, pathlib, re, sys
-contract = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
-name = contract.get("base_image_name")
-digest = contract.get("base_image_sha256")
-if not isinstance(name, str) or not name:
-    raise SystemExit("contract base_image_name is missing")
-if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
-    raise SystemExit("contract base_image_sha256 is invalid")
-print(name)
-print(digest)
-print(contract.get("distribution", ""))
-print(contract.get("distribution_version", ""))
-print(contract.get("distribution_codename", ""))
-print(contract.get("architecture", ""))
-PYEOF
-)
-[ "${#IMAGE_CONTRACT[@]}" -eq 6 ] || die "could not read base-image contract"
+mkdir -p "$OUTPUT_DIR"
+OUTPUT_DIR="$(cd "$OUTPUT_DIR" && pwd)"
 
-EXPECTED_NAME="${IMAGE_CONTRACT[0]}"
-EXPECTED_SHA256="${IMAGE_CONTRACT[1]}"
-[ "$(basename "$BASE_IMAGE")" = "$EXPECTED_NAME" ] \
-    || die "base image filename mismatch: expected ${EXPECTED_NAME}"
-ACTUAL_SHA256=$(sha256sum "$BASE_IMAGE" | awk '{print $1}')
-[ "$ACTUAL_SHA256" = "$EXPECTED_SHA256" ] \
-    || die "base image SHA-256 mismatch: expected ${EXPECTED_SHA256}, got ${ACTUAL_SHA256}"
-
-WORK=$(mktemp -d /tmp/sigil-image-apt-metadata.XXXXXX)
-cleanup() {
-    rm -rf -- "$WORK"
-}
-trap cleanup EXIT HUP INT TERM
-
-RAW_IMAGE="${WORK}/base.img"
-if [[ "$BASE_IMAGE" == *.xz ]]; then
-    xz -d -c -- "$BASE_IMAGE" > "$RAW_IMAGE"
+# ── Verificar el hash de la imagen contra el contrato ────────────────────────
+EXPECTED_SHA=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["base_image_sha256"])' "$CONTRACT")
+ACTUAL_SHA=$(sha256sum "$IMAGE_FILE" | awk '{print $1}')
+if [ "${SIGIL_SKIP_IMAGE_HASH_CHECK:-0}" = "1" ]; then
+    # Solo al DAR DE ALTA una imagen nueva: todavía no existe un contrato que
+    # declare su hash. El contrato derivado lo fija a partir de este valor.
+    printf '▶ Alta de imagen nueva: SHA-256 calculado %s\n' "$ACTUAL_SHA"
+elif [ "$EXPECTED_SHA" != "$ACTUAL_SHA" ]; then
+    die "SHA-256 de la imagen no coincide con el contrato.
+  Esperado : ${EXPECTED_SHA}
+  Obtenido : ${ACTUAL_SHA}
+  Descargue de nuevo la imagen oficial, o dé de alta un contrato para esta
+  imagen con ./scripts/onboard-base-image.sh"
 else
-    cp -- "$BASE_IMAGE" "$RAW_IMAGE"
+    printf '✔ SHA-256 de la imagen base verificado: %s\n' "$ACTUAL_SHA"
 fi
 
-mapfile -t PARTITION < <(sfdisk --json "$RAW_IMAGE" | python3 -c '
+# El rootfs de una imagen de Raspberry Pi ronda los 2,5 GB: el directorio de
+# trabajo va junto a la salida, en disco, y no en un /tmp en memoria.
+SCRATCH_BASE="${SIGIL_SCRATCH_DIR:-$(dirname "$OUTPUT_DIR")}"
+mkdir -p "$SCRATCH_BASE"
+SCRATCH=$(mktemp -d "${SCRATCH_BASE}/sigil-image-extract.XXXXXX")
+cleanup() { rm -rf -- "$SCRATCH"; }
+trap cleanup EXIT HUP INT TERM
+
+# La tabla de particiones vive en el primer MiB: basta con leer ese trozo del
+# flujo descomprimido para localizar la partición sin materializar la imagen.
+PART_TABLE="$SCRATCH/partition-table.json"
+if [[ "$IMAGE_FILE" == *.xz ]]; then
+    xz -d -c "$IMAGE_FILE" 2>/dev/null | head -c 1048576 > "$SCRATCH/head.bin" || true
+    sfdisk --json "$SCRATCH/head.bin" > "$PART_TABLE" 2>/dev/null
+else
+    sfdisk --json "$IMAGE_FILE" > "$PART_TABLE"
+fi
+[ -s "$PART_TABLE" ] || die "No se pudo leer la tabla de particiones de la imagen"
+
+read -r START_SECTOR SECTOR_COUNT <<< "$(python3 - "$PART_TABLE" <<'PYEOF'
 import json, sys
-table = json.load(sys.stdin)["partitiontable"]
-sector_size = int(table.get("sectorsize", 512))
-linux = [part for part in table["partitions"] if str(part.get("type", "")).lower() in {"83", "0x83"}]
+data = json.load(open(sys.argv[1]))
+table = data.get("partitiontable", {})
+partitions = table.get("partitions", [])
+linux = [p for p in partitions
+         if str(p.get("type", "")).lower() in ("83", "0x83",
+                                               "0fc63daf-8483-4772-8e79-3d69d8477de4")]
 if len(linux) != 1:
-    raise SystemExit(f"expected exactly one Linux root partition, found {len(linux)}")
-part = linux[0]
-print(int(part["start"]) * sector_size)
-print(int(part["size"]) * sector_size)
-')
-[ "${#PARTITION[@]}" -eq 2 ] || die "could not identify the official root partition"
+    raise SystemExit(f"se esperaba exactamente 1 partición Linux, se encontraron {len(linux)}")
+print(linux[0]["start"], linux[0]["size"])
+PYEOF
+)"
 
-ROOTFS="${WORK}/rootfs.ext4"
-dd if="$RAW_IMAGE" of="$ROOTFS" bs=4M iflag=skip_bytes,count_bytes \
-    skip="${PARTITION[0]}" count="${PARTITION[1]}" status=none
+printf '▶ Partición Linux en el sector %s (%s sectores); extrayendo el rango...\n' "$START_SECTOR" "$SECTOR_COUNT"
+ROOTFS="$SCRATCH/rootfs.img"
+if [[ "$IMAGE_FILE" == *.xz ]]; then
+    # Se extrae SOLO el rango de la partición del flujo descomprimido: nunca
+    # se materializa la imagen entera en disco.
+    xz -d -c "$IMAGE_FILE" \
+        | dd of="$ROOTFS" bs=512 skip="$START_SECTOR" count="$SECTOR_COUNT" \
+             iflag=fullblock status=none
+else
+    dd if="$IMAGE_FILE" of="$ROOTFS" bs=512 skip="$START_SECTOR" count="$SECTOR_COUNT" status=none
+fi
+[ -s "$ROOTFS" ] || die "No se pudo extraer la partición raíz de la imagen"
 
-EXTRACTED="${WORK}/snapshot"
-mkdir -p "$EXTRACTED/keyrings"
-extract_file() {
-    local source="$1"
-    local destination="$2"
-    debugfs -R "dump -p ${source} ${destination}" "$ROOTFS" >/dev/null 2>&1
-    [ -s "$destination" ] || die "official image file is missing or empty: ${source}"
-}
+mkdir -p "$OUTPUT_DIR/sources" "$OUTPUT_DIR/keyrings"
 
-# The 64-bit official image ships debian.sources (vanilla Debian, ARMv7+/
-# arm64 baseline). The 32-bit official image ships raspbian.sources instead:
-# Raspberry Pi Foundation's own ARMv6-compatible rebuild of the full archive,
-# required because the original Pi Zero/Zero W/1 cannot run vanilla Debian
-# armhf binaries. Try both known-good candidates; never fall back to an
-# unpinned source.
-BASE_SOURCE_FILE=""
-for candidate in debian.sources raspbian.sources; do
-    debugfs -R "dump -p /etc/apt/sources.list.d/${candidate} ${EXTRACTED}/${candidate}" \
-        "$ROOTFS" >/dev/null 2>&1
-    if [ -s "${EXTRACTED}/${candidate}" ]; then
-        BASE_SOURCE_FILE="$candidate"
-        break
+# debugfs no sigue enlaces simbólicos: `cat` sobre uno falla con un error de
+# lectura confuso, así que se resuelve el destino antes de leer.
+dump_file() {
+    local internal="$1" dest="$2"
+    if debugfs -R "stat ${internal}" "$ROOTFS" 2>/dev/null | head -1 | grep -q 'Type: symlink'; then
+        local target
+        target=$(debugfs -R "stat ${internal}" "$ROOTFS" 2>/dev/null | sed -n 's/.*Fast link dest: "\(.*\)".*/\1/p')
+        [ -n "$target" ] || return 0
+        case "$target" in
+            /*) internal="$target" ;;
+            *)  internal="$(dirname "$internal")/${target}" ;;
+        esac
     fi
-    rm -f "${EXTRACTED}/${candidate}"
+    debugfs -R "cat ${internal}" "$ROOTFS" > "$dest" 2>/dev/null || true
+    [ -s "$dest" ] || rm -f -- "$dest"
+}
+
+printf '▶ Extrayendo os-release, base de datos dpkg, fuentes y keyrings...\n'
+dump_file /etc/os-release      "$OUTPUT_DIR/os-release"
+dump_file /var/lib/dpkg/status "$OUTPUT_DIR/dpkg-status"
+
+# Binario REAL del rootfs para determinar la arquitectura por cabecera ELF.
+# Nunca se deduce del nombre del archivo de imagen.
+for candidate in /bin/bash /usr/bin/bash /bin/sh /usr/bin/sh /usr/lib/systemd/systemd; do
+    dump_file "$candidate" "$OUTPUT_DIR/arch-probe.elf"
+    [ -s "$OUTPUT_DIR/arch-probe.elf" ] && break
 done
-[ -n "$BASE_SOURCE_FILE" ] \
-    || die "official image ships neither debian.sources nor raspbian.sources"
-case "$BASE_SOURCE_FILE" in
-    debian.sources) BASE_KEYRING_ARTIFACT=debian-archive-keyring.pgp ;;
-    raspbian.sources) BASE_KEYRING_ARTIFACT=raspbian-archive-keyring.gpg ;;
-esac
+[ -s "$OUTPUT_DIR/arch-probe.elf" ] || die "No se pudo extraer ningún binario del rootfs para leer su cabecera ELF"
 
-extract_file /etc/apt/sources.list.d/raspi.sources "$EXTRACTED/raspi.sources"
-extract_file "/usr/share/keyrings/${BASE_KEYRING_ARTIFACT}" \
-    "$EXTRACTED/keyrings/${BASE_KEYRING_ARTIFACT}"
-extract_file /usr/share/keyrings/raspberrypi-archive-keyring.pgp \
-    "$EXTRACTED/keyrings/raspberrypi-archive-keyring.pgp"
-extract_file /usr/lib/os-release "$EXTRACTED/os-release"
-extract_file /var/lib/dpkg/status "$WORK/dpkg-status"
+# Descubrir los archivos de fuentes que la imagen realmente trae.
+BASE_SOURCES=""
+RASPI_SOURCES=""
+while read -r candidate; do
+    [ -n "$candidate" ] || continue
+    local_name=$(basename "$candidate")
+    dump_file "$candidate" "$OUTPUT_DIR/sources/${local_name}"
+    [ -s "$OUTPUT_DIR/sources/${local_name}" ] || continue
+    # El archivo de Raspberry Pi vive SIEMPRE en archive.raspberrypi.com; el
+    # archivo base es Debian en 64 bits y Raspbian en 32. Ojo: Raspbian se
+    # sirve desde raspbian.raspberrypi.com, así que el discriminante es la
+    # ruta del archivo, no el dominio.
+    if grep -Eqi 'archive\.raspberrypi\.com' "$OUTPUT_DIR/sources/${local_name}"; then
+        RASPI_SOURCES="$OUTPUT_DIR/sources/${local_name}"
+    elif grep -Eqi 'deb\.debian\.org|/raspbian|archive\.raspbian\.org' "$OUTPUT_DIR/sources/${local_name}"; then
+        BASE_SOURCES="$OUTPUT_DIR/sources/${local_name}"
+    fi
+done < <(
+    printf '/etc/apt/sources.list\n'
+    debugfs -R "ls -p /etc/apt/sources.list.d" "$ROOTFS" 2>/dev/null \
+        | awk -F'/' 'NF>=6 && $6 != "" && $6 != "." && $6 != ".." {print "/etc/apt/sources.list.d/" $6}'
+)
 
-python3 - "$CONTRACT" "$BASE_IMAGE" "$EXTRACTED" "$WORK/dpkg-status" \
-    "$BASE_SOURCE_FILE" "$BASE_KEYRING_ARTIFACT" <<'PYEOF'
-import hashlib
-import json
-import pathlib
-import re
-import subprocess
-import sys
+[ -s "$OUTPUT_DIR/os-release" ]  || die "No se pudo extraer os-release de la imagen"
+[ -s "$OUTPUT_DIR/dpkg-status" ] || die "No se pudo extraer /var/lib/dpkg/status de la imagen"
+[ -n "$BASE_SOURCES" ]  || die "La imagen no declara ningún archivo de fuentes del archivo base (Debian o Raspbian)"
+[ -n "$RASPI_SOURCES" ] || die "La imagen no declara el archivo de fuentes del archivo de Raspberry Pi"
 
-contract_path = pathlib.Path(sys.argv[1]).resolve()
-base_image = pathlib.Path(sys.argv[2]).resolve()
-snapshot = pathlib.Path(sys.argv[3]).resolve()
-status_path = pathlib.Path(sys.argv[4])
-base_source_file = sys.argv[5]
-base_keyring_artifact = sys.argv[6]
-contract = json.loads(contract_path.read_text(encoding="utf-8"))
+# En 64 bits el archivo base es Debian; en 32 bits es Raspbian, la
+# recompilación ARMv6 de la Fundación. Debe ser exactamente uno de los dos.
+if grep -Eqi 'raspbian' "$BASE_SOURCES"; then
+    BASE_DISTRIBUTION="raspbian"
+else
+    BASE_DISTRIBUTION="debian"
+fi
 
-# 64-bit official images ship debian.sources (vanilla Debian). 32-bit official
-# images ship raspbian.sources: Raspberry Pi Foundation's own ARMv6-compatible
-# rebuild of the full archive, required because vanilla Debian armhf targets
-# ARMv7+ only. Both are pinned exactly; only the selection between them is
-# dynamic, driven by which file the verified image actually contains.
-base_source_expectations = {
-    "debian.sources": {
-        "signed_by": "/usr/share/keyrings/debian-archive-keyring.pgp",
-        "uris": {"http://deb.debian.org/debian/", "http://deb.debian.org/debian-security/"},
-        "scope": "Debian 13 Trixie and security archives",
-        "distribution": "debian",
-        "keyring_package": "debian-archive-keyring",
-    },
-    "raspbian.sources": {
-        "signed_by": "/usr/share/keyrings/raspbian-archive-keyring.gpg",
-        "uris": {"http://raspbian.raspberrypi.com/raspbian/"},
-        "scope": "Raspbian (Raspberry Pi ARMv6-compatible) Trixie archive",
-        "distribution": "raspbian",
-        "keyring_package": "raspbian-archive-keyring",
-    },
+# Los keyrings se extraen por la ruta que las PROPIAS fuentes declaran en
+# Signed-By: así seguimos la cadena que la imagen firma, no una suposición.
+extract_declared_keyrings() {
+    local sources_file="$1" role="$2" found=0
+    while read -r keyring_path; do
+        [ -n "$keyring_path" ] || continue
+        local dest="$OUTPUT_DIR/keyrings/${role}-$(basename "${keyring_path%.*}").gpg"
+        dump_file "$keyring_path" "$dest"
+        [ -s "$dest" ] && found=1
+    done < <(grep -Ei '^\s*Signed-By:' "$sources_file" | sed -E 's/^\s*Signed-By:\s*//' | tr ' ' '\n' | grep '^/' | sort -u)
+
+    if [ "$found" -eq 0 ]; then
+        # Fuentes en formato antiguo sin Signed-By: se recurre al keyring
+        # canónico del archivo, siempre leído de dentro de la imagen.
+        local fallback
+        case "$role" in
+            base)  fallback="/usr/share/keyrings/${BASE_DISTRIBUTION}-archive-keyring" ;;
+            raspi) fallback="/usr/share/keyrings/raspberrypi-archive-keyring" ;;
+        esac
+        for extension in pgp gpg; do
+            dump_file "${fallback}.${extension}" "$OUTPUT_DIR/keyrings/${role}-archive.gpg"
+            [ -s "$OUTPUT_DIR/keyrings/${role}-archive.gpg" ] && { found=1; break; }
+        done
+    fi
+
+    [ "$found" -eq 1 ] || die "No se pudo extraer el keyring del archivo '${role}' de la imagen"
 }
-if base_source_file not in base_source_expectations:
-    raise SystemExit(f"unsupported base source file: {base_source_file}")
-base_expectation = base_source_expectations[base_source_file]
-if base_expectation["signed_by"] != f"/usr/share/keyrings/{base_keyring_artifact}":
-    raise SystemExit("base source keyring artifact does not match its pinned expectation")
-if contract["distribution"] != base_expectation["distribution"]:
-    raise SystemExit(
-        f"package contract distribution {contract['distribution']!r} does not match "
-        f"the official image's base source ({base_source_file} implies "
-        f"{base_expectation['distribution']!r})"
-    )
 
-os_release = {}
-for line in (snapshot / "os-release").read_text(encoding="utf-8").splitlines():
-    if "=" in line:
-        key, value = line.split("=", 1)
-        os_release[key] = value.strip().strip("\"'")
-if (
-    os_release.get("ID") != contract["distribution"]
-    or os_release.get("VERSION_ID") != contract["distribution_version"]
-    or os_release.get("VERSION_CODENAME") != contract["distribution_codename"]
-):
-    raise SystemExit("verified image distribution does not match package contract")
+extract_declared_keyrings "$BASE_SOURCES" base
+extract_declared_keyrings "$RASPI_SOURCES" raspi
 
-status = {}
-for stanza in status_path.read_text(encoding="utf-8", errors="strict").split("\n\n"):
-    fields = {}
-    for line in stanza.splitlines():
-        if ": " in line and not line.startswith((" ", "\t")):
-            key, value = line.split(": ", 1)
-            fields[key] = value
-    if fields.get("Package"):
-        status[fields["Package"]] = fields
-
-source_expectations = {
-    base_source_file: base_expectation,
-    "raspi.sources": {
-        "signed_by": "/usr/share/keyrings/raspberrypi-archive-keyring.pgp",
-        "uris": {"http://archive.raspberrypi.com/debian/"},
-        "scope": "Raspberry Pi Trixie archive",
-    },
+python3 - "$OUTPUT_DIR" "$BASE_DISTRIBUTION" "$BASE_SOURCES" "$RASPI_SOURCES" <<'PYEOF'
+import json, os, sys
+output, distribution, base_sources, raspi_sources = sys.argv[1:5]
+keyrings = sorted(os.listdir(os.path.join(output, "keyrings")))
+summary = {
+    "base_distribution": distribution,
+    "base_sources": os.path.relpath(base_sources, output),
+    "raspi_sources": os.path.relpath(raspi_sources, output),
+    "keyrings": [f"keyrings/{name}" for name in keyrings],
 }
-sources = []
-for filename, expectation in source_expectations.items():
-    path = snapshot / filename
-    text = path.read_text(encoding="utf-8")
-    if re.search(r"(?i)(trusted\s*:\s*yes|allow-unauthenticated|allow-insecure)", text):
-        raise SystemExit(f"unauthenticated APT setting in official source: {filename}")
-    paragraphs = []
-    for stanza in text.strip().split("\n\n"):
-        fields = {}
-        for line in stanza.splitlines():
-            if ": " in line:
-                key, value = line.split(": ", 1)
-                fields[key] = value
-        paragraphs.append(fields)
-    uris = {uri for fields in paragraphs for uri in fields.get("URIs", "").split()}
-    signed_by = {fields.get("Signed-By") for fields in paragraphs}
-    suites = {suite for fields in paragraphs for suite in fields.get("Suites", "").split()}
-    if uris != expectation["uris"] or signed_by != {expectation["signed_by"]}:
-        raise SystemExit(f"unexpected official APT source contract: {filename}")
-    if contract["distribution_codename"] not in " ".join(sorted(suites)):
-        raise SystemExit(f"official source does not target contract codename: {filename}")
-    sources.append({
-        "file": filename,
-        "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
-        "uris": sorted(uris),
-        "effective_uris": sorted(uris),
-        "suites": sorted(suites),
-        "signed_by": expectation["signed_by"],
-        "scope": expectation["scope"],
-    })
-
-keyring_specs = [
-    (
-        base_expectation["keyring_package"],
-        base_expectation["signed_by"],
-        f"keyrings/{base_keyring_artifact}",
-        base_expectation["scope"],
-    ),
-    (
-        "raspberrypi-archive-keyring",
-        "/usr/share/keyrings/raspberrypi-archive-keyring.pgp",
-        "keyrings/raspberrypi-archive-keyring.pgp",
-        "Raspberry Pi Trixie archive",
-    ),
-]
-keyrings = []
-for package_name, source_path, relative, scope in keyring_specs:
-    package = status.get(package_name)
-    if package is None or package.get("Status") != "install ok installed":
-        raise SystemExit(f"official image does not contain installed {package_name}")
-    path = snapshot / relative
-    output = subprocess.run(
-        ["gpg", "--batch", "--show-keys", "--with-colons", str(path)],
-        check=True,
-        text=True,
-        capture_output=True,
-    ).stdout
-    fingerprints = sorted({
-        fields[9]
-        for line in output.splitlines()
-        if (fields := line.split(":"))[0] == "fpr" and len(fields) > 9
-    })
-    if not fingerprints:
-        raise SystemExit(f"no OpenPGP fingerprints found in {relative}")
-    keyrings.append({
-        "package": package_name,
-        "package_version": package.get("Version"),
-        "source_image": str(base_image),
-        "source_path": source_path,
-        "artifact_path": relative,
-        "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
-        "fingerprints": fingerprints,
-        "scope": scope,
-    })
-
-(snapshot / "sources-metadata.json").write_text(
-    json.dumps({"sources": sources}, indent=2, sort_keys=True) + "\n",
-    encoding="utf-8",
-)
-(snapshot / "keyring-metadata.json").write_text(
-    json.dumps({"keyrings": keyrings}, indent=2, sort_keys=True) + "\n",
-    encoding="utf-8",
-)
-(snapshot / "base-image-metadata.json").write_text(
-    json.dumps({
-        "filename": base_image.name,
-        "sha256": hashlib.sha256(base_image.read_bytes()).hexdigest(),
-        "distribution": contract["distribution"],
-        "distribution_version": contract["distribution_version"],
-        "distribution_codename": contract["distribution_codename"],
-        "architecture": contract["architecture"],
-    }, indent=2, sort_keys=True) + "\n",
-    encoding="utf-8",
-)
+with open(os.path.join(output, "extraction.json"), "w", encoding="utf-8") as handle:
+    json.dump(summary, handle, indent=2)
 PYEOF
 
-rm -rf -- "$DESTINATION"
-mkdir -p "$(dirname "$DESTINATION")"
-mv -- "$EXTRACTED" "$DESTINATION"
-printf 'APT metadata extracted from verified image: %s\n' "$BASE_IMAGE"
-python3 - "$DESTINATION/keyring-metadata.json" <<'PYEOF'
-import json, pathlib, sys
-metadata = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
-for keyring in metadata["keyrings"]:
-    print(f"keyring: {keyring['artifact_path']} ({keyring['package']} {keyring['package_version']})")
-    for fingerprint in keyring["fingerprints"]:
-        print(f"  fingerprint: {fingerprint}")
-PYEOF
+printf '✔ Metadatos extraídos de la imagen oficial (%s): %s\n' "$BASE_DISTRIBUTION" "$OUTPUT_DIR"

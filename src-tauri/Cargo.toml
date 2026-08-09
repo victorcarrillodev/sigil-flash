@@ -1,32 +1,35 @@
 [package]
 name = "sigil-flash"
-version = "0.1.0"
-description = "Raspberry Pi Image Flasher"
-authors = ["Sigil Flash"]
+version = "1.0.0"
+description = "SIGIL OS Manufacturing Flasher"
+authors = ["SIGIL Hardware Team"]
 edition = "2021"
 
 [build-dependencies]
-tauri-build = { version = "2", features = [] }
+tauri-build = { version = "2.0.5", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
-tauri-plugin-dialog = "2"
-tauri-plugin-shell = "2"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+tauri = { version = "2.1.1", features = [] }
+tauri-plugin-dialog = "2.2.0"
+tauri-plugin-shell = "2.2.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 tokio = { version = "1", features = ["full"] }
-thiserror = "1"
+thiserror = "1.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tracing-appender = "0.2"
-directories = "5"
+directories = "5.0"
 chrono = { version = "0.4", features = ["serde"] }
-reqwest = { version = "0.12", features = ["stream"] }
+reqwest = { version = "0.12", features = ["stream", "json"] }
 sha2 = "0.10"
 futures-util = "0.3"
 getrandom = "0.3"
 libc = "0.2"
 flasher-rs = { path = "../sigil-hardware/flasher-rs" }
+
+[dev-dependencies]
+tempfile = "3"
 
 [profile.release]
 panic = "abort"

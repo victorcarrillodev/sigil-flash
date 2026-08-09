@@ -1,14 +1,11 @@
 {
-  "$schema": "https://schema.tauri.app/config/2",
+  "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "local": true,
+  "description": "Permisos predeterminados para la estación de fabricación SIGIL Flash",
   "windows": ["main"],
   "permissions": [
     "core:default",
     "dialog:default",
-    "dialog:allow-open",
-    "shell:default",
-    "shell:allow-execute",
-    "shell:allow-open"
+    "shell:default"
   ]
 }

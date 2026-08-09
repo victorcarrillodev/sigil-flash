@@ -1,161 +1,177 @@
-// Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod commands;
-mod errors;
-mod logging;
-mod models;
-mod services;
-
-use services::config_service::ConfigService;
-use services::disk_service::DiskService;
-use services::download_service::DownloadService;
-use services::engine_service::FlasherEngineService;
-use services::flash_service::FlashService;
-use services::offline_package_service::OfflinePackageService;
-use services::verification_service::VerificationService;
-
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
-pub fn run() {
-    // 1. Initialize logging system. The returned _log_guard must remain in scope
-    // so asynchronous logging continues executing on the background thread.
-    let _log_guard = match logging::init_logging() {
-        Ok(guard) => guard,
-        Err(e) => {
-            eprintln!(
-                "Fallo crítico de arranque. No se pudieron iniciar los logs: {}",
-                e
-            );
-            std::process::exit(1);
-        }
-    };
-
-    tracing::info!("Bootstrap de Sigil Flash exitoso. Iniciando dependencias...");
-
-    // 2. Instantiate cross-platform services
-    let disk_service = DiskService::new();
-    let download_service = DownloadService::new();
-    let flash_service = FlashService::new();
-    let config_service = ConfigService::new();
-    let verification_service = VerificationService::new();
-    let offline_package_service = OfflinePackageService::new().unwrap_or_else(|error| {
-        tracing::error!("OfflinePackageService init failed: {error}");
-        std::process::exit(1);
-    });
-
-    // 2b. Instantiate flasher-rs engine adapter
-    let engine_service = match FlasherEngineService::new() {
-        Ok(svc) => {
-            tracing::info!("FlasherEngineService ready: {}", svc.engine_bin().display());
-            svc
-        }
-        Err(e) => {
-            tracing::error!("FlasherEngineService init failed: {e}");
-            // Non-fatal: the UI will surface the error when engine commands are invoked.
-            // We still need a value; create one that will fail on first use.
-            // unwrap_or_else with a dummy path handled via AppError::Validation later.
-            FlasherEngineService::new_unchecked()
-        }
-    };
-
-    // 3. Start Tauri runtime and register commands/services
-    tauri::Builder::default()
-        .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_shell::init())
-        .manage(disk_service)
-        .manage(download_service)
-        .manage(flash_service)
-        .manage(config_service)
-        .manage(verification_service)
-        .manage(offline_package_service)
-        .manage(engine_service)
-        .invoke_handler(tauri::generate_handler![
-            commands::disks::list_devices,
-            commands::flash::get_image_info,
-            commands::flash::start_flash,
-            commands::flash::cancel_flash,
-            commands::flash::get_hardware_size,
-            commands::downloads::start_download,
-            commands::downloads::cancel_download,
-            commands::downloads::verify_image,
-            commands::config::save_device_config,
-            commands::config::get_server_config,
-            commands::config::save_server_config,
-            commands::offline_packages::offline_packages_status,
-            commands::offline_packages::offline_packages_validate,
-            commands::offline_packages::offline_packages_build,
-            // flasher-rs engine adapter commands
-            commands::engine::engine_status,
-            commands::engine::engine_plan,
-            commands::engine::engine_validate,
-            commands::engine::engine_apply,
-            commands::engine::engine_build_payload,
-            commands::engine::engine_binary_path,
-            commands::engine::engine_write_provision,
-            commands::engine::engine_default_secrets_path,
-            commands::engine::engine_generate_panel_pin,
-            commands::engine::engine_write_secrets,
-        ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
-}
+use sigil_flash::logging::init_logging;
+use sigil_flash::services::flash::{execute_configure_device, execute_flash_raw};
+use std::env;
+use std::path::PathBuf;
+use std::process;
+use tracing::info;
 
 fn main() {
-    let args: Vec<String> = std::env::args().collect();
-    if args.contains(&"--configure-device".to_string()) {
-        let result = (|| {
-            let device = get_arg_value(&args, "--device")?;
-            let config_file = get_arg_value(&args, "--config-file")?;
-            services::config_service::run_config_writer_cli(&device, &config_file)
-        })();
-
-        if let Err(error) = result {
-            eprintln!("Fallo durante la configuración elevada: {error}");
-            std::process::exit(1);
+    let guard = match init_logging() {
+        Ok(g) => g,
+        Err(e) => {
+            eprintln!("FALLO CRÍTICO: No se pudo inicializar el sistema de logging: {}", e);
+            process::exit(1);
         }
-        std::process::exit(0);
-    }
+    };
+    // Mantener el guard vivo
+    let _guard = guard;
 
-    if args.contains(&"--flash-raw".to_string()) {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let progress_file_for_error = get_arg_value(&args, "--progress-file").ok();
-        if let Err(e) = rt.block_on(async {
-            let src = get_arg_value(&args, "--src")?;
-            let dest = get_arg_value(&args, "--dest")?;
-            let progress_file = get_arg_value(&args, "--progress-file")?;
-            let offline_packages = get_arg_value(&args, "--offline-packages")?;
-            let payload = get_arg_value(&args, "--payload")?;
-            let config_file = get_arg_value(&args, "--config-file")?;
-            services::flash_service::run_raw_flash_cli(
-                &src,
-                &dest,
-                &progress_file,
-                &offline_packages,
-                &payload,
-                &config_file,
-            )
-            .await
-        }) {
-            if let Some(progress_file) = progress_file_for_error {
-                services::flash_service::write_raw_flash_error(&progress_file, &e);
+    let args: Vec<String> = env::args().collect();
+
+    if args.len() > 1 {
+        match args[1].as_str() {
+            "--flash-raw" => run_mode_flash_raw(&args[2..]),
+            "--configure-device" => run_mode_configure_device(&args[2..]),
+            "--help" | "-h" => print_usage_and_exit(0),
+            other => {
+                eprintln!("Error: Argumento desconocido '{}'", other);
+                print_usage_and_exit(1);
             }
-            eprintln!("Fallo durante el flasheo directo: {}", e);
-            std::process::exit(1);
         }
-        std::process::exit(0);
+    } else {
+        // Modo GUI Tauri por defecto
+        sigil_flash::run();
     }
-
-    run();
 }
 
-fn get_arg_value(args: &[String], flag: &str) -> Result<String, crate::errors::AppError> {
-    let pos = args.iter().position(|a| a == flag).ok_or_else(|| {
-        crate::errors::AppError::Validation(format!("Parámetro requerido faltante: {}", flag))
-    })?;
-    args.get(pos + 1).cloned().ok_or_else(|| {
-        crate::errors::AppError::Validation(format!(
-            "Valor requerido faltante para parámetro: {}",
-            flag
-        ))
-    })
+fn print_usage_and_exit(code: i32) -> ! {
+    println!("Uso de SIGIL Flash:");
+    println!("  sigil-flash                           Arranca la interfaz gráfica (GUI)");
+    println!("  sigil-flash --flash-raw <args...>     Ejecutor privilegiado de flasheo (requiere root)");
+    println!("  sigil-flash --configure-device <args> Aplicador de configuración en partición BOOT");
+    process::exit(code);
+}
+
+fn run_mode_flash_raw(args: &[String]) {
+    let mut src = None;
+    let mut dest = None;
+    let mut progress_file = None;
+    let mut offline_packages = None;
+    let mut payload = None;
+    let mut config_file = None;
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--src" => {
+                i += 1;
+                if i < args.len() { src = Some(PathBuf::from(&args[i])); }
+            }
+            "--dest" => {
+                i += 1;
+                if i < args.len() { dest = Some(PathBuf::from(&args[i])); }
+            }
+            "--progress-file" => {
+                i += 1;
+                if i < args.len() { progress_file = Some(PathBuf::from(&args[i])); }
+            }
+            "--offline-packages" => {
+                i += 1;
+                if i < args.len() { offline_packages = Some(PathBuf::from(&args[i])); }
+            }
+            "--payload" => {
+                i += 1;
+                if i < args.len() { payload = Some(PathBuf::from(&args[i])); }
+            }
+            "--config-file" => {
+                i += 1;
+                if i < args.len() { config_file = Some(PathBuf::from(&args[i])); }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    if src.is_none() {
+        eprintln!("Error: Falta el parámetro obligatorio '--src'");
+        process::exit(1);
+    }
+    if dest.is_none() {
+        eprintln!("Error: Falta el parámetro obligatorio '--dest'");
+        process::exit(1);
+    }
+    if progress_file.is_none() {
+        eprintln!("Error: Falta el parámetro obligatorio '--progress-file'");
+        process::exit(1);
+    }
+    if offline_packages.is_none() {
+        eprintln!("Error: Falta el parámetro obligatorio '--offline-packages'");
+        process::exit(1);
+    }
+    if payload.is_none() {
+        eprintln!("Error: Falta el parámetro obligatorio '--payload'");
+        process::exit(1);
+    }
+    if config_file.is_none() {
+        eprintln!("Error: Falta el parámetro obligatorio '--config-file'");
+        process::exit(1);
+    }
+
+    let src = src.unwrap();
+    let dest = dest.unwrap();
+    let progress_file = progress_file.unwrap();
+    let offline_packages = offline_packages.unwrap();
+    let payload = payload.unwrap();
+    let config_file = config_file.unwrap();
+
+    info!("Iniciando ejecutor privilegiado --flash-raw en {}", dest.display());
+
+    match execute_flash_raw(&src, &dest, &progress_file, &offline_packages, &payload, &config_file) {
+        Ok(_) => {
+            info!("Flasheo completado exitosamente");
+            process::exit(0);
+        }
+        Err(e) => {
+            eprintln!("Error en --flash-raw: {}", e);
+            process::exit(1);
+        }
+    }
+}
+
+fn run_mode_configure_device(args: &[String]) {
+    let mut device = None;
+    let mut config_file = None;
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--device" => {
+                i += 1;
+                if i < args.len() { device = Some(PathBuf::from(&args[i])); }
+            }
+            "--config-file" => {
+                i += 1;
+                if i < args.len() { config_file = Some(PathBuf::from(&args[i])); }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    if device.is_none() {
+        eprintln!("Error: Falta el parámetro obligatorio '--device'");
+        process::exit(1);
+    }
+    if config_file.is_none() {
+        eprintln!("Error: Falta el parámetro obligatorio '--config-file'");
+        process::exit(1);
+    }
+
+    let device = device.unwrap();
+    let config_file = config_file.unwrap();
+
+    info!("Iniciando modo --configure-device sobre {}", device.display());
+
+    match execute_configure_device(&device, &config_file) {
+        Ok(_) => {
+            info!("Configuración de la partición de arranque completada");
+            process::exit(0);
+        }
+        Err(e) => {
+            eprintln!("Error en --configure-device: {}", e);
+            process::exit(1);
+        }
+    }
 }

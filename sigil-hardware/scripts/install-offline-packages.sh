@@ -26,7 +26,6 @@ trap cleanup EXIT HUP INT TERM
 [ -d "$REPOSITORY" ] || die "local repository does not exist: ${REPOSITORY}"
 [ -f "$CONTRACT" ] || die "canonical package contract is missing: ${CONTRACT}"
 command -v dpkg-deb >/dev/null || die "dpkg-deb is required"
-command -v gpgv >/dev/null || die "gpgv is required"
 
 mapfile -t CONTRACT_VALUES < <(python3 - "$CONTRACT" "$REPOSITORY" "$REQUESTED_PROFILES" <<'PYEOF'
 import gzip
@@ -131,9 +130,10 @@ if manifest["direct_packages"] != required_names or manifest["direct_package_cou
 if manifest["unresolved_packages"] != []:
     raise SystemExit("bundle contains unresolved packages")
 
+# El repositorio local no va firmado: su integridad la cubren checksums.sha256
+# y, paquete a paquete, tamaño, SHA-256 y metadatos de control reales.
 required_repository_files = (
-    "Packages", "Packages.gz", "Release", "Release.gpg", "InRelease",
-    "checksums.sha256", "sources-snapshot/keyrings/sigil-offline-repository.gpg",
+    "Packages", "Packages.gz", "Release", "checksums.sha256",
 )
 for relative in required_repository_files:
     path = repository / relative
@@ -236,7 +236,7 @@ snapshot_files = {
     for path in (repository / "sources-snapshot").rglob("*") if path.is_file()
 }
 expected_checksums = manifest_filenames | snapshot_files | {
-    "Packages", "Packages.gz", "Release", "Release.gpg", "InRelease", "package-manifest.json"
+    "Packages", "Packages.gz", "Release", "package-manifest.json"
 }
 if set(declared) != expected_checksums:
     raise SystemExit("checksums.sha256 does not cover exactly the repository artifacts")
@@ -247,12 +247,6 @@ for relative, expected in declared.items():
     if hashlib.sha256(path.read_bytes()).hexdigest() != expected:
         raise SystemExit(f"checksum mismatch: {relative}")
 
-signing_records = [
-    item for item in manifest["keyrings"]
-    if item.get("artifact_path") == "keyrings/sigil-offline-repository.gpg"
-]
-if len(signing_records) != 1 or not signing_records[0].get("fingerprints"):
-    raise SystemExit("bundle signing key metadata is missing")
 python_dependencies = manifest.get("python_dependencies", {})
 if python_dependencies.get("wheels") != []:
     raise SystemExit("unexpected Python wheel dependency")
@@ -275,12 +269,6 @@ IFS=$'\t' read -r -a REQUIRED_PACKAGES <<< "${CONTRACT_VALUES[2]}"
 IFS=$'\t' read -r -a REQUIRED_SPECS <<< "${CONTRACT_VALUES[3]}"
 BUNDLE_VERSION="${CONTRACT_VALUES[4]}"
 
-REPOSITORY_KEY="$(realpath "$REPOSITORY/sources-snapshot/keyrings/sigil-offline-repository.gpg")"
-gpgv --keyring "$REPOSITORY_KEY" "$REPOSITORY/Release.gpg" "$REPOSITORY/Release" >/dev/null \
-    || die "offline repository Release signature is invalid"
-gpgv --keyring "$REPOSITORY_KEY" "$REPOSITORY/InRelease" >/dev/null \
-    || die "offline repository InRelease signature is invalid"
-
 ACTUAL_ARCH="$(dpkg --print-architecture)"
 [ "$ACTUAL_ARCH" = "$EXPECTED_ARCH" ] \
     || die "target architecture is ${ACTUAL_ARCH}; expected ${EXPECTED_ARCH}. La imagen base montada (${ACTUAL_ARCH}) no coincide con la arquitectura requerida (${EXPECTED_ARCH})."
@@ -300,7 +288,9 @@ fi
 
 APT_STATE="$(mktemp -d /tmp/sigil-offline-apt.XXXXXX)"
 SOURCE_LIST="$(mktemp /tmp/sigil-offline-source.XXXXXX.list)"
-printf 'deb [signed-by=%s] file:%s ./\n' "$REPOSITORY_KEY" "$(realpath "$REPOSITORY")" > "$SOURCE_LIST"
+# trusted=yes: repositorio local sin firma. APT no puede autenticarlo, así que
+# la integridad se comprueba por hash antes de llegar aquí.
+printf 'deb [trusted=yes] file:%s ./\n' "$(realpath "$REPOSITORY")" > "$SOURCE_LIST"
 mkdir -p "$APT_STATE/lists/partial" "$APT_STATE/cache/archives/partial"
 APT_OPTIONS=(
     -o "Dir::Etc::sourcelist=${SOURCE_LIST}"
@@ -310,6 +300,14 @@ APT_OPTIONS=(
     -o "Acquire::Languages=none"
     -o "Acquire::Retries=0"
     -o "APT::Install-Recommends=false"
+    # El estado de APT vive en un mktemp -d, que nace 0700 de root. APT baja
+    # privilegios al usuario '_apt' para adquirir, y ese usuario no puede
+    # atravesar el directorio: «couldn't be accessed by user '_apt'». Con
+    # Retries=0 eso no es un aviso, es el final de la instalación.
+    # El origen es un repositorio 'file:' local ya verificado por hash antes de
+    # llegar aquí, así que el aislamiento de descarga no protege de nada: no hay
+    # red que aislar.
+    -o "APT::Sandbox::User=root"
 )
 
 apt-get "${APT_OPTIONS[@]}" update

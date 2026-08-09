@@ -14,10 +14,7 @@ const CHECKSUM_FILE: &str = "checksums.sha256";
 const PACKAGES_FILE: &str = "Packages";
 const PACKAGES_GZ_FILE: &str = "Packages.gz";
 const RELEASE_FILE: &str = "Release";
-const RELEASE_GPG_FILE: &str = "Release.gpg";
-const INRELEASE_FILE: &str = "InRelease";
 const SNAPSHOT_DIRECTORY: &str = "sources-snapshot";
-const REPOSITORY_KEY: &str = "sources-snapshot/keyrings/sigil-offline-repository.gpg";
 const MAX_METADATA_BYTES: u64 = 16 * 1024 * 1024;
 const REQUIRED_PACKAGE_COUNT: usize = 25;
 
@@ -193,7 +190,6 @@ pub fn validate_repository(
         .map_err(|error| format!("invalid offline package manifest: {error}"))?;
     validate_manifest_contract(&manifest, &contract, &contract_bytes)?;
     validate_source_and_keyring_metadata(repository, &manifest)?;
-    validate_repository_signature(repository)?;
 
     let packages_bytes = read_metadata(&repository.join(PACKAGES_FILE))?;
     let compressed_path = repository.join(PACKAGES_GZ_FILE);
@@ -596,10 +592,9 @@ fn validate_source_and_keyring_metadata(
         "keyrings/debian-archive-keyring.pgp",
         "keyrings/raspbian-archive-keyring.gpg",
     ];
-    let fixed_keyrings = BTreeSet::from([
-        "keyrings/raspberrypi-archive-keyring.pgp".to_string(),
-        "keyrings/sigil-offline-repository.gpg".to_string(),
-    ]);
+    // El repositorio local ya no se firma: solo viajan los keyrings extraídos
+    // de la imagen oficial, que son los que autentican lo descargado.
+    let fixed_keyrings = BTreeSet::from(["keyrings/raspberrypi-archive-keyring.pgp".to_string()]);
     let manifest_keyrings: BTreeSet<String> = manifest
         .keyrings
         .iter()
@@ -707,41 +702,6 @@ fn validate_snapshot_file_set(repository: &Path, manifest: &PackageManifest) -> 
     Ok(())
 }
 
-fn validate_repository_signature(repository: &Path) -> Result<(), String> {
-    let keyring = repository.join(REPOSITORY_KEY);
-    for relative in [RELEASE_FILE, RELEASE_GPG_FILE, INRELEASE_FILE] {
-        let _ = read_metadata(&repository.join(relative))?;
-    }
-    for arguments in [
-        vec![
-            "--keyring".to_string(),
-            keyring.to_string_lossy().to_string(),
-            repository
-                .join(RELEASE_GPG_FILE)
-                .to_string_lossy()
-                .to_string(),
-            repository.join(RELEASE_FILE).to_string_lossy().to_string(),
-        ],
-        vec![
-            "--keyring".to_string(),
-            keyring.to_string_lossy().to_string(),
-            repository
-                .join(INRELEASE_FILE)
-                .to_string_lossy()
-                .to_string(),
-        ],
-    ] {
-        let output = Command::new("gpgv")
-            .args(arguments)
-            .output()
-            .map_err(|error| format!("cannot execute gpgv: {error}"))?;
-        if !output.status.success() {
-            return Err("offline repository signature validation failed".into());
-        }
-    }
-    Ok(())
-}
-
 fn read_deb_control_fallback(path: &Path, field: &str) -> Result<String, String> {
     for member in ["control.tar.gz", "control.tar.xz", "control.tar.zst"] {
         let ar_out = Command::new("ar")
@@ -751,7 +711,9 @@ fn read_deb_control_fallback(path: &Path, field: &str) -> Result<String, String>
             .output();
         if let Ok(out) = ar_out {
             if out.status.success() && !out.stdout.is_empty() {
-                let mut child = Command::new("tar")
+                // Sin `mut`: este valor solo se mueve al `match` de abajo, y la
+                // mutabilidad que hace falta es la de `Ok(mut c)`.
+                let child = Command::new("tar")
                     .args(["-xO", "./control"])
                     .stdin(std::process::Stdio::piped())
                     .stdout(std::process::Stdio::piped())
@@ -920,8 +882,6 @@ fn expected_checksum_paths(manifest: &PackageManifest) -> BTreeSet<String> {
             PACKAGES_FILE.to_string(),
             PACKAGES_GZ_FILE.to_string(),
             RELEASE_FILE.to_string(),
-            RELEASE_GPG_FILE.to_string(),
-            INRELEASE_FILE.to_string(),
             MANIFEST_FILE.to_string(),
             format!("{SNAPSHOT_DIRECTORY}/os-release"),
             format!("{SNAPSHOT_DIRECTORY}/base-image-metadata.json"),

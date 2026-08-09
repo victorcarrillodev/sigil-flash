@@ -1,120 +1,117 @@
-# ⚡ Sigil Flash
+# SIGIL Flash — Estación de Fabricación y Flasheador Offline
 
-**Flasheador de imágenes para Raspberry Pi** — Tauri 2 + React + Neumorphism UI
+Aplicación de escritorio Linux (Tauri 2 + React 18 + Rust) que toma una imagen
+oficial de Raspberry Pi OS y una microSD y produce un dispositivo que arranca ya
+completamente configurado: dependencias instaladas, identidad de fábrica,
+credencial única por equipo, panel protegido y red configurada.
 
-![App Icon](./src-tauri/icons/icon.png)
+> [!IMPORTANT]
+> **DEPENDENCIA CRÍTICA DE `sigil-hardware/`**
+> Esta aplicación existe alrededor del árbol de software de dispositivo
+> `sigil-hardware/`. **No compila ni arranca sin esa carpeta en la raíz del
+> proyecto**: el backend consume su motor `flasher-rs` como crate por ruta
+> relativa, y los contratos de paquetes, manifiestos de payload e instalador se
+> leen directamente de ella.
 
-## ✨ Características
+> [!WARNING]
+> **LOS PAYLOADS SON FOTOS FIJAS.**
+> Editar cualquier script, servicio o panel de `sigil-hardware/` **no tiene
+> efecto en el flasheo** hasta ejecutar `./scripts/rebuild-payloads.sh`. Es el
+> error operativo más frecuente de este sistema.
 
-- 🖼️ **Drag & Drop** — Arrastra archivos `.img`, `.iso`, `.bin`
-- 💾 **Detección automática** de tarjetas SD y USB extraíbles
-- ⚡ **Flasheo con progreso en tiempo real** (velocidad, bytes, ETA)
-- 🔒 **Seguro** — Valida que el destino sea extraíble antes de escribir
-- 🎨 **Neumorphism UI** — Interfaz elegante con sombras suaves
-- 📋 **Consola de logs** en tiempo real
-- 🔐 **pkexec** — Solicita privilegios de admin con diálogo nativo de Polkit
-- 📦 **Dependencias offline** — Construye, valida e instala el repositorio ARM64 dentro de la imagen
+---
 
-## Fabricación sin Internet en la Raspberry
+## Restricción central
 
-`sigil-hardware` mantiene el contrato canónico de paquetes. SIGIL Flash resuelve
-y descarga su cierre transitivo, genera el repositorio APT local, valida hashes
-y arquitectura, y lo instala dentro de la imagen durante el flasheo real. El
-primer arranque no instala dependencias. Consulta
-[`docs/OFFLINE_PACKAGES.md`](docs/OFFLINE_PACKAGES.md) para el flujo y los
-prerrequisitos de fabricación.
+El primer arranque **no instala nada** y no necesita Internet para funcionar
+localmente. Toda la instalación de paquetes ocurre durante el flasheo, en el PC
+de fabricación, desde un repositorio APT local que se inyecta en la imagen y
+se consume vía chroot.
 
-## 🚀 Inicio Rápido
+## Características
 
-### 1. Instalar dependencias del sistema (solo primera vez)
+- **Instalación 100 % offline** desde un repositorio APT local.
+- **Integridad por hash**: el repositorio local no va firmado. Lo cubren
+  `checksums.sha256` sobre el conjunto exacto de artefactos y, paquete a
+  paquete, el tamaño, el SHA-256 y los metadatos de control leídos del propio
+  `.deb`. APT lo consume con `trusted=yes`.
+- **Cadena de confianza desde la imagen**: las fuentes APT y los keyrings se
+  extraen de dentro de la imagen oficial verificada por hash. Los keyrings del
+  host nunca se confían.
+- **Frontera de privilegio**: la GUI nunca corre como root; para escribir el
+  disco relanza su propio binario con `pkexec`. Doble control independiente
+  contra escribir en el disco del sistema.
+- **Red de seguridad multiarquitectura**: la arquitectura se comprueba leyendo
+  la cabecera ELF de un binario real del rootfs montado y se compara contra el
+  bundle; si no coinciden, aborta antes de tocar nada.
+- **Credenciales en el keyring del SO** (`secret-tool` / libsecret); nunca en
+  archivos, argv ni logs.
+- **Interfaz neumórfica** en CSS vainilla y TypeScript estricto.
+
+## Soporte de plataforma
+
+El flujo real de fabricación **solo está soportado en Linux**. La elevación de
+privilegios está declarada para macOS (`osascript`) y Windows
+(`Start-Process -Verb RunAs`), pero el resto del flujo —montaje, chroot,
+expansión de particiones— es específico de Linux y **no está validado en esas
+plataformas**.
+
+## Requisitos
+
+- Linux x86_64 o AArch64
+- Node.js (o Bun) y Rust (Cargo)
+- `libwebkit2gtk-4.1-dev`, `libgtk-3-dev`, `libsecret-tools`, `parted`,
+  `qemu-user-static`, `dosfstools`, `e2fsprogs`, `cloud-guest-utils`
+- Docker, solo si el host no trae las herramientas de empaquetado Debian
 
 ```bash
-bash setup.sh
+sudo ./setup.sh
 ```
 
-Detecta el gestor de paquetes (`apt`, `pacman`, `dnf`, `zypper` o `apk`) e instala
-WebKitGTK, OpenSSL, GTK3, librsvg, herramientas de compilación, utilitarios de
-disco, Polkit, QEMU estático y Rust (si falta). En distros no basadas en Debian
-también instala Docker, necesario solo para construir el repositorio APT offline
-de fabricación (ver [`docs/OFFLINE_PACKAGES.md`](docs/OFFLINE_PACKAGES.md)).
+Cubre apt, pacman, dnf, zypper y apk.
 
-### 2. Instalar dependencias de Node/Bun
+## Puesta en marcha
 
 ```bash
-bun install
+npm install
+./scripts/build-all-bundles.sh
+npx tauri dev
 ```
 
-### 3. Ejecutar en modo desarrollo
+`build-all-bundles.sh` necesita las imágenes base en `artifacts/images/` con el
+nombre exacto que declara cada contrato. Sin bundle construido, la aplicación
+lo dice y bloquea la fabricación en vez de fallar a mitad de la escritura.
+
+## Pruebas
 
 ```bash
-bun run tauri dev
+./tests/run-all.sh
 ```
 
-### 4. Compilar para producción
+Suites individuales:
 
 ```bash
-bun run tauri build
+cargo test --manifest-path src-tauri/Cargo.toml --all-targets --all-features --locked --offline
+npm test                # Vitest: lógica pura, componentes y accesibilidad
+npm run test:coverage   # con informe de cobertura
+npm run build
+bash tests/test_cli_modes.sh
+bash tests/test_identity_contract.sh
+bash tests/test_payload_integrity.sh
+bash tests/test_bundle_validation.sh
+bash tests/test_docs_match_contract.sh
 ```
 
-## 🏗️ Stack Técnico
+El frontend se desarrolla con pruebas primero: las reglas de validación, el
+cálculo de estado previo al flasheo, el formato de cifras y el contrato de
+accesibilidad de cada componente están fijados por pruebas antes de escribir la
+interfaz. Las reglas de `src/services/validation.ts` son un espejo de
+`src-tauri/src/services/config.rs`: cada caso tiene su gemelo en Rust, porque si
+divergen el operario ve un formulario en verde y el proceso elevado aborta
+veinte minutos después.
 
-| Capa | Tecnología |
-|------|-----------|
-| Desktop framework | Tauri 2.0 |
-| Frontend | React 18 + TypeScript |
-| CSS | Vanilla CSS (Neumorphism) |
-| Package manager | Bun |
-| Backend | Rust |
-| Flasheo | `dd` via `pkexec` |
+## Documentación
 
-## 📁 Estructura del Proyecto
-
-```
-sigil-flash/
-├── src/                     # Frontend React
-│   ├── App.tsx              # Componente raíz + estado global
-│   ├── main.tsx             # Entry point React
-│   ├── index.css            # Design system Neumorphism
-│   └── components/
-│       ├── Header.tsx       # Logo + título
-│       ├── ImageSelector.tsx # Drag & drop de imágenes
-│       ├── DeviceList.tsx   # Lista de dispositivos detectados
-│       ├── FlashProgress.tsx # Progreso + logs
-│       └── ConfirmModal.tsx # Confirmación antes de flashear
-├── src-tauri/
-│   ├── src/
-│   │   ├── main.rs          # Entry point Tauri
-│   │   └── flash.rs         # Comandos: list_devices, start_flash, etc.
-│   ├── Cargo.toml
-│   └── tauri.conf.json
-├── setup.sh                 # Script de instalación de dependencias
-└── package.json
-```
-
-## ⚙️ Comandos Rust/Tauri
-
-| Comando | Descripción |
-|---------|-------------|
-| `list_devices` | Lista dispositivos USB/SD via `lsblk` |
-| `get_image_info` | Retorna nombre y tamaño del archivo imagen |
-| `start_flash` | Flashea via `dd` + `pkexec` con eventos de progreso |
-| `cancel_flash` | Cancela el proceso de flasheo activo |
-
-## 🔒 Seguridad
-
-- Solo permite escribir en dispositivos **removibles** (USB, SD/MMC)
-- Rechaza automáticamente discos internos del sistema
-- Muestra diálogo de confirmación antes de flashear
-- Usa `pkexec` (Polkit) para autenticación de root de forma segura
-
-## 📋 Requisitos del Sistema
-
-- Linux — `setup.sh` detecta y soporta Debian/Ubuntu (apt), Arch/Manjaro (pacman),
-  Fedora/RHEL (dnf), openSUSE (zypper) y Alpine (apk)
-- Polkit instalado (para `pkexec`)
-- `dd` disponible (incluido en coreutils)
-- `lsblk` disponible (incluido en util-linux)
-- Rust 1.80+ (instalado automáticamente por `setup.sh` si falta `cargo`)
-- Docker — solo necesario para construir el repositorio APT offline de fabricación
-  en distros no basadas en Debian (`setup.sh` lo instala; ver
-  [`docs/OFFLINE_PACKAGES.md`](docs/OFFLINE_PACKAGES.md))
+- [Guía Operativa de Fabricación](docs/manufacturing-guide.md)
+- [Flujo de Credenciales](docs/credential-flow.md)
+- [Migración de Arquitectura y Versiones](docs/architecture-upgrade.md)

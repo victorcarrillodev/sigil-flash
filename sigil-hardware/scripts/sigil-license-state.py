@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import grp
 import json
 import os
 import sys
@@ -32,14 +33,47 @@ PENDING_PHASES = {"LICENSE_EXPIRY_PENDING_TRACK_END", "LICENSE_DENIAL_PENDING_TR
 TERMINAL_PHASES = {"LICENSE_EXPIRED_PURGED", "LICENSE_DENIED_PURGED"}
 
 
+def _share_with_sigil_group(descriptor: int) -> None:
+    """Deja el candado accesible a root y al grupo ``sigil``.
+
+    Se corrige también cuando el archivo ya existía con permisos restrictivos
+    de una versión anterior: sin esto, una tarjeta ya fabricada seguiría rota
+    aunque el código nuevo esté instalado. Cualquier fallo es tolerable —el
+    proceso sigue teniendo su propio acceso—, así que nunca aborta.
+    """
+    try:
+        os.fchmod(descriptor, 0o660)
+    except OSError:
+        return
+    try:
+        sigil_gid = grp.getgrnam("sigil").gr_gid
+    except KeyError:
+        return
+    try:
+        if os.fstat(descriptor).st_gid != sigil_gid:
+            os.fchown(descriptor, -1, sigil_gid)
+    except OSError:
+        # Sin privilegios para reasignar el grupo: lo hará el proceso de root
+        # que pase después. No es motivo para impedir la operación en curso.
+        pass
+
+
 @contextmanager
 def _state_lock():
-    """Serialize every state transition across service restart boundaries."""
+    """Serialize every state transition across service restart boundaries.
+
+    El candado lo comparten procesos de root (firstboot, instalación) y los
+    servicios de audio, que corren como el usuario ``sigil``. Con 0600 el
+    primero en crearlo dejaba fuera al otro para siempre: si lo creaba root,
+    audio-manager moría con PermissionError en cada arranque y systemd lo daba
+    por fallido tras varios reintentos. Por eso 0660 con grupo ``sigil``, igual
+    que el resto de candados de /run/sigil.
+    """
     STATE_FILE.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
     lock_path = STATE_FILE.parent / ".license-state.lock"
-    descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o660)
     try:
-        os.fchmod(descriptor, 0o600)
+        _share_with_sigil_group(descriptor)
         fcntl.flock(descriptor, fcntl.LOCK_EX)
         yield
     finally:
@@ -148,14 +182,21 @@ def _atomic_write(data: dict[str, Any]) -> None:
     data["updated_at"] = _now()
     fd, temporary = tempfile.mkstemp(prefix=".license-state.", suffix=".tmp", dir=STATE_FILE.parent)
     try:
-        os.fchmod(fd, 0o600)
+        # Mismo criterio que el candado: root y los servicios de audio (usuario
+        # ``sigil``) escriben este archivo. Con 0600, el primero en crearlo deja
+        # al otro fuera de forma permanente.
+        _share_with_sigil_group(fd)
         with os.fdopen(fd, "w", encoding="utf-8") as stream:
             json.dump(data, stream, ensure_ascii=False, sort_keys=True, indent=2)
             stream.write("\n")
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, STATE_FILE)
-        os.chmod(STATE_FILE, 0o600)
+        try:
+            with open(STATE_FILE, "r+b") as final:
+                _share_with_sigil_group(final.fileno())
+        except OSError:
+            pass
         directory = os.open(STATE_FILE.parent, os.O_DIRECTORY)
         try:
             os.fsync(directory)

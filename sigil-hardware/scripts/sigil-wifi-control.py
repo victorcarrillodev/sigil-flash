@@ -105,6 +105,45 @@ def _log_event(event_id: str, phase: str, result: str,
 
 
 # ---------------------------------------------------------------------------
+# Ejecución de órdenes externas
+# ---------------------------------------------------------------------------
+
+# Un ARMv6 monocore —Pi Zero W— con systemd todavía ocupado tarda decenas de
+# segundos en atender a systemctl. Medido en una placa real: 'systemctl unmask
+# hostapd' tardó 23,7 s. Con el plazo anterior de 5 s eso no era un fallo del
+# sistema sino una lentitud normal convertida en excepción, y la excepción
+# tumbaba el demonio: 11 reinicios seguidos y el punto de acceso nunca subía.
+SYSTEMCTL_TIMEOUT = int(os.environ.get('SIGIL_SYSTEMCTL_TIMEOUT', '90'))
+NETCMD_TIMEOUT = int(os.environ.get('SIGIL_NETCMD_TIMEOUT', '30'))
+
+# Código de salida convencional para "la orden agotó su plazo" (el que usa
+# coreutils timeout). No colisiona con los códigos de systemctl ni de ip.
+TIMEOUT_RC = 124
+
+
+def _run(cmd: list[str], timeout: int) -> subprocess.CompletedProcess:
+    """subprocess.run que NUNCA propaga.
+
+    Un plazo agotado o un binario ausente son condiciones esperables en una
+    placa lenta; ninguna debe abortar la transición ni matar al demonio. El
+    llamante decide qué hacer mirando returncode.
+    """
+    try:
+        return subprocess.run(cmd, capture_output=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        logger.warning('_run: %s agotó su plazo de %ss', cmd[0], timeout)
+        _log_event('WIFI_COMMAND_TIMEOUT', 'command', 'failure',
+                   'COMMAND_TIMEOUT', command=cmd[0], timeout_s=timeout)
+        return subprocess.CompletedProcess(cmd, TIMEOUT_RC, b'', b'timeout')
+    except OSError as exc:
+        logger.warning('_run: %s no se pudo ejecutar: %s', cmd[0], exc)
+        _log_event('WIFI_COMMAND_FAILED', 'command', 'failure',
+                   'COMMAND_EXEC_FAILED', command=cmd[0],
+                   exception=type(exc).__name__)
+        return subprocess.CompletedProcess(cmd, TIMEOUT_RC, b'', b'exec-failed')
+
+
+# ---------------------------------------------------------------------------
 # Lock management
 # ---------------------------------------------------------------------------
 
@@ -304,33 +343,19 @@ def _stop_ap_services() -> bool:
 def _start_ap_services() -> bool:
     """Start hostapd/dnsmasq for AP mode recovery."""
     _log_event('WIFI_AP_RESTORE_STARTED', 'ap_restore', 'started')
-    subprocess.run(
-        ['nmcli', 'device', 'disconnect', WIFI_INTERFACE],
-        capture_output=True, timeout=10,
-    )
-    subprocess.run(
-        ['nmcli', 'device', 'set', WIFI_INTERFACE, 'managed', 'no'],
-        capture_output=True, timeout=10,
-    )
-    subprocess.run(['ip', 'link', 'set', WIFI_INTERFACE, 'down'], capture_output=True, timeout=5)
-    subprocess.run(
-        ['ip', 'addr', 'flush', 'dev', WIFI_INTERFACE],
-        capture_output=True, timeout=5,
-    )
-    subprocess.run(['ip', 'link', 'set', WIFI_INTERFACE, 'up'], capture_output=True, timeout=5)
-    subprocess.run(['rfkill', 'unblock', 'wifi'], capture_output=True, timeout=5)
+    _run(['nmcli', 'device', 'disconnect', WIFI_INTERFACE], NETCMD_TIMEOUT)
+    _run(['nmcli', 'device', 'set', WIFI_INTERFACE, 'managed', 'no'], NETCMD_TIMEOUT)
+    _run(['ip', 'link', 'set', WIFI_INTERFACE, 'down'], NETCMD_TIMEOUT)
+    _run(['ip', 'addr', 'flush', 'dev', WIFI_INTERFACE], NETCMD_TIMEOUT)
+    _run(['ip', 'link', 'set', WIFI_INTERFACE, 'up'], NETCMD_TIMEOUT)
+    _run(['rfkill', 'unblock', 'wifi'], NETCMD_TIMEOUT)
     ap_ip = os.environ.get('SIGIL_WIFI_AP_IP', '192.168.4.1')
-    subprocess.run(
-        ['ip', 'addr', 'add', f'{ap_ip}/24', 'dev', WIFI_INTERFACE],
-        capture_output=True, timeout=5,
-    )
-    subprocess.run(['systemctl', 'unmask', 'hostapd'], capture_output=True, timeout=5)
-    rc1 = subprocess.run(
-        ['systemctl', 'start', 'hostapd'], capture_output=True, timeout=10,
-    ).returncode
-    rc2 = subprocess.run(
-        ['systemctl', 'start', 'dnsmasq'], capture_output=True, timeout=10,
-    ).returncode
+    _run(['ip', 'addr', 'add', f'{ap_ip}/24', 'dev', WIFI_INTERFACE], NETCMD_TIMEOUT)
+    # unmask/start van con el plazo largo: son las que dependen de lo ocupado
+    # que esté systemd, no de la red.
+    _run(['systemctl', 'unmask', 'hostapd'], SYSTEMCTL_TIMEOUT)
+    rc1 = _run(['systemctl', 'start', 'hostapd'], SYSTEMCTL_TIMEOUT).returncode
+    rc2 = _run(['systemctl', 'start', 'dnsmasq'], SYSTEMCTL_TIMEOUT).returncode
     if rc1 != 0 or rc2 != 0:
         _log_event('WIFI_AP_RESTORE_FAILED', 'ap_restore', 'failure',
                    'AP_SERVICE_START_FAILED', hostapd_exit=rc1,

@@ -303,7 +303,10 @@ log_ok "bluetooth: /etc/bluetooth/main.conf"
 # 7b. PulseAudio daemon
 cp "${REPO_DIR}/conf/pulse-daemon.conf" /etc/pulse/daemon.conf
 log_ok "pulseaudio: /etc/pulse/daemon.conf"
-install -o root -g sigil -m 0644 \
+# -D crea el directorio padre. /etc/sigil no existe todavía en este punto: lo
+# crea el bloque de identidad, 190 líneas más abajo. Sin esto el instalador
+# muere aquí con «cannot create regular file».
+install -D -o root -g sigil -m 0644 \
     "${REPO_DIR}/conf/pulse-runtime.env" /etc/sigil/pulse-runtime.env
 log_ok "pulseaudio: runtime persistente en /run/sigil-pulse"
 
@@ -437,6 +440,22 @@ log_ok "/var/lib/wifi-manager"
 # Phase 1: State and music directories
 mkdir -p /var/lib/sigil/download_locks
 log_ok "/var/lib/sigil/ (state directory)"
+
+# El estado de licencia lo comparten procesos de root (firstboot) y los
+# servicios de audio, que corren como ${SIGIL_USER}. Si root los crea primero
+# con permisos restrictivos, audio-manager muere con PermissionError en cada
+# arranque y systemd lo marca como fallido tras varios reintentos. Se deja la
+# propiedad al usuario del servicio: root accede igualmente por ser root.
+touch /var/lib/sigil/.license-state.lock
+chown "${SIGIL_USER}:${SIGIL_USER}" /var/lib/sigil/.license-state.lock
+chmod 660 /var/lib/sigil/.license-state.lock
+# El archivo de estado no se crea vacío: el código lo genera con su esquema
+# completo la primera vez. Aquí solo se corrige si viene de una imagen previa.
+if [ -e /var/lib/sigil/license_state.json ]; then
+    chown "${SIGIL_USER}:${SIGIL_USER}" /var/lib/sigil/license_state.json
+    chmod 660 /var/lib/sigil/license_state.json
+fi
+log_ok "/var/lib/sigil/: estado de licencia accesible para ${SIGIL_USER}"
 
 mkdir -p /home/sigil/music/active/tracks
 mkdir -p /home/sigil/music/staging/tracks
@@ -640,11 +659,37 @@ systemctl unmask hostapd dnsmasq 2>/dev/null || true
 systemctl disable hostapd dnsmasq 2>/dev/null || true
 log_ok "hostapd y dnsmasq: deshabilitados (wifi-fallback los controla)"
 
-for svc in $SERVICES; do
-    if systemctl enable "${svc}.service" 2>/dev/null; then
-        log_ok "${svc}.service habilitado"
+# userconfig.service es el asistente de primer arranque de Raspberry Pi OS: pide
+# crear un usuario por consola interactiva. Un equipo de fábrica no tiene ni
+# teclado ni pantalla, así que espera para siempre y bloquea multi-user.target.
+# Todo lo que cuelga de ese target —bluetooth-panel, wifi-fallback y el resto
+# del portal— se queda en cola detrás de él, y el equipo parece muerto.
+# Medido en una Pi Zero W: con esto habilitado, multi-user.target no se alcanza
+# nunca y systemctl tarda más de 20 s en responder porque systemd sigue ocupado.
+for wizard in userconfig.service userconf-pi.service; do
+    if systemctl disable --now "$wizard" 2>/dev/null; then
+        log_ok "${wizard}: deshabilitado (asistente interactivo sin consola)"
     else
-        log_warn "${svc}.service ya estaba habilitado"
+        log_ok "${wizard}: no presente en esta imagen"
+    fi
+done
+# El indicador que lo dispara: si existe, el asistente vuelve en el próximo
+# arranque aunque la unidad esté deshabilitada.
+rm -f /run/userconfig /boot/firmware/userconf /boot/firmware/userconf.txt \
+      /boot/userconf /boot/userconf.txt 2>/dev/null || true
+
+for svc in $SERVICES; do
+    # No se descarta stderr ni se asume el motivo del fallo. Aquí están
+    # bluetooth-panel (la app del portal) y wifi-fallback (que levanta hostapd y
+    # dnsmasq): dar por bueno un fallo como «ya estaba habilitado» entrega un
+    # equipo sin portal cautivo y sin ninguna pista de por qué.
+    if enable_output=$(systemctl enable "${svc}.service" 2>&1); then
+        log_ok "${svc}.service habilitado"
+    elif systemctl is-enabled "${svc}.service" >/dev/null 2>&1; then
+        log_ok "${svc}.service ya estaba habilitado"
+    else
+        log_err "No se pudo habilitar ${svc}.service: ${enable_output}"
+        exit 1
     fi
 done
 
