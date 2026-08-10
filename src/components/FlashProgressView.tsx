@@ -29,7 +29,23 @@ export const FlashProgressView: React.FC<FlashProgressViewProps> = ({ progress, 
   return (
     <section className={`panel progress-panel progress-${progress.status}`}>
       <div className="panel-head">
-        <h2 className="panel-title">Fabricación en curso</h2>
+        <div className="panel-title-group">
+          <svg
+            width="22"
+            height="22"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2.2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            className="panel-title-icon"
+            aria-hidden="true"
+          >
+            <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
+          </svg>
+          <h2 className="panel-title">Fabricación en curso</h2>
+        </div>
         <span className={`pill pill-${progress.status}`}>{STATUS_LABEL[progress.status]}</span>
       </div>
 

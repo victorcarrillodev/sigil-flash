@@ -92,7 +92,8 @@ export function buildPreflight(input: PreflightInput): Preflight {
   const configErrors = validateConfigLocally(config);
   let configState: StepState;
   if (configErrors.length > 0) {
-    configState = deviceState === 'complete' ? 'blocked' : 'blocked';
+    const prevStepsReady = imageState === 'complete' && deviceState === 'complete';
+    configState = prevStepsReady ? 'blocked' : 'pending';
     blockers.push(...configErrors);
   } else {
     configState = 'complete';
@@ -101,15 +102,12 @@ export function buildPreflight(input: PreflightInput): Preflight {
   // ── Paso 4: credencial de enrolamiento ────────────────────────────────────
   let credentialState: StepState;
   if (!config.apiKey) {
-    credentialState = 'active';
+    const prevStepsReady = imageState === 'complete' && deviceState === 'complete' && configState === 'complete';
+    credentialState = prevStepsReady ? 'active' : 'pending';
     blockers.push(
       'Solicite la credencial de enrolamiento: sin ella el equipo no podría enrolarse en el primer arranque'
     );
   } else {
-    // Sin ligar a una MAC a propósito: la estación fabrica tarjetas para
-    // equipos que todavía no existen, así que su MAC no se conoce aquí. No es
-    // una advertencia accionable —no hay nada que el operario pueda hacer— y
-    // repetirla en cada fabricación solo enseña a ignorar los avisos.
     credentialState = 'complete';
   }
 

@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
+  generarContrasenaSegura,
+  generarNumeroDeSerie,
+  incrementarYObtenerSiguienteSerie,
   normalizeMac,
   validateConfigLocally,
   validateHostname,
@@ -159,5 +162,30 @@ describe('validateConfigLocally', () => {
       panelPin: '111111',
     });
     expect(errores.length).toBeGreaterThanOrEqual(3);
+  });
+});
+
+describe('generarContrasenaSegura', () => {
+  it('genera una contraseña válida de 14 caracteres con alta complejidad', () => {
+    const pass = generarContrasenaSegura();
+    expect(pass).toHaveLength(14);
+    expect(validatePassword(pass)).toBeNull();
+  });
+});
+
+describe('generarNumeroDeSerie', () => {
+  it('genera el formato SIG-EMOD-000001-[MMYY] correctamente', () => {
+    const fecha = new Date(2026, 7, 9); // Agosto 2026
+    expect(generarNumeroDeSerie(1, fecha)).toBe('SIG-EMOD-000001-0826');
+    expect(generarNumeroDeSerie(42, fecha)).toBe('SIG-EMOD-000042-0826');
+  });
+
+  it('incrementa secuencialmente el contador guardado', () => {
+    const fecha = new Date(2026, 7, 9);
+    localStorage.removeItem('sigil-flash.serial-counter');
+    expect(generarNumeroDeSerie(undefined, fecha)).toBe('SIG-EMOD-000001-0826');
+
+    const siguiente = incrementarYObtenerSiguienteSerie(fecha);
+    expect(siguiente).toBe('SIG-EMOD-000002-0826');
   });
 });

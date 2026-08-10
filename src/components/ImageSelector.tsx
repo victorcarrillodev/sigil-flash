@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { BundlePair, ImageInfo } from '../types/models';
 import { pickImageFile, selectImage, verifySha256 } from '../services/tauri';
 import { formatBytes } from '../services/format';
+import { StepChecklist } from './StepChecklist';
 
 interface ImageSelectorProps {
   onImageSelected: (image: ImageInfo | null) => void;
@@ -56,78 +57,97 @@ export const ImageSelector: React.FC<ImageSelectorProps> = ({
   return (
     <section className="panel">
       <div className="panel-head">
-        <h2 className="panel-title">Imagen base y bundle</h2>
+        <div className="panel-title-group">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" className="panel-title-icon" aria-hidden="true">
+            <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z" />
+            <polyline points="13 2 13 9 20 9" />
+          </svg>
+          <h2 className="panel-title">Imagen base y bundle</h2>
+        </div>
         {bundle && <span className="pill pill-done">{bundle.architecture}</span>}
       </div>
 
-      <p className="panel-lead">
-        La imagen decide el par bundle/payload. Un payload sin su repositorio APT nunca se
-        selecciona: la fabricación se bloquea antes de escribir un solo byte.
-      </p>
+      <div className="panel-body">
+        <div className="panel-checklist-col">
+          <StepChecklist
+            items={[
+              { label: 'Elegir archivo de imagen', done: !!selectedImage },
+              { label: 'Resolver bundle y payload', done: !!bundle },
+            ]}
+          />
+        </div>
 
-      {selectedImage ? (
-        <div className="summary-grid">
-          <div className="summary-item">
-            <span className="summary-key">Archivo</span>
-            <span className="summary-value mono">{selectedImage.name}</span>
-          </div>
-          <div className="summary-item">
-            <span className="summary-key">Tamaño</span>
-            <span className="summary-value mono">{formatBytes(selectedImage.size)}</span>
-          </div>
-          {bundle && (
-            <>
+        <div className="panel-main-col">
+          <p className="panel-lead">
+            La imagen decide el par bundle/payload. Un payload sin su repositorio APT nunca se
+            selecciona: la fabricación se bloquea antes de escribir un solo byte.
+          </p>
+
+          {selectedImage ? (
+            <div className="summary-grid">
               <div className="summary-item">
-                <span className="summary-key">Contrato</span>
-                <span className="summary-value mono">{bundle.contract_name}</span>
+                <span className="summary-key">Archivo</span>
+                <span className="summary-value mono">{selectedImage.name}</span>
               </div>
               <div className="summary-item">
-                <span className="summary-key">Arquitectura</span>
-                <span className="summary-value mono">{bundle.architecture}</span>
+                <span className="summary-key">Tamaño</span>
+                <span className="summary-value mono">{formatBytes(selectedImage.size)}</span>
               </div>
-            </>
+              {bundle && (
+                <>
+                  <div className="summary-item">
+                    <span className="summary-key">Contrato</span>
+                    <span className="summary-value mono">{bundle.contract_name}</span>
+                  </div>
+                  <div className="summary-item">
+                    <span className="summary-key">Arquitectura</span>
+                    <span className="summary-value mono">{bundle.architecture}</span>
+                  </div>
+                </>
+              )}
+            </div>
+          ) : (
+            <div className="empty-state">
+              <p>Ninguna imagen seleccionada todavía.</p>
+            </div>
           )}
+
+          {bundleError && (
+            <p className="message-error" role="alert">
+              {bundleError}
+            </p>
+          )}
+
+          {verification && (
+            <p className={verification.ok ? 'message-ok' : 'message-error'}>{verification.text}</p>
+          )}
+
+          {error && (
+            <p className="message-error" role="alert">
+              {error}
+            </p>
+          )}
+
+          <div className="panel-actions">
+            <button type="button" className="button button-primary" onClick={handlePick} disabled={loading}>
+              {loading ? 'Abriendo…' : selectedImage ? 'Elegir otro archivo' : 'Elegir archivo…'}
+            </button>
+            {selectedImage && bundle && (
+              <button type="button" className="button" onClick={handleVerify} disabled={verifying}>
+                {verifying ? 'Verificando…' : 'Verificar SHA-256'}
+              </button>
+            )}
+            <button type="button" className="button button-ghost" onClick={onRebuildPayloads} disabled={busy}>
+              Regenerar payloads
+            </button>
+          </div>
+
+          <p className="hint">
+            Los payloads son fotos fijas de <code>sigil-hardware/</code>: editarlo no tiene efecto
+            hasta regenerarlos.
+          </p>
         </div>
-      ) : (
-        <div className="empty-state">
-          <p>Ninguna imagen seleccionada todavía.</p>
-        </div>
-      )}
-
-      {bundleError && (
-        <p className="message-error" role="alert">
-          {bundleError}
-        </p>
-      )}
-
-      {verification && (
-        <p className={verification.ok ? 'message-ok' : 'message-error'}>{verification.text}</p>
-      )}
-
-      {error && (
-        <p className="message-error" role="alert">
-          {error}
-        </p>
-      )}
-
-      <div className="panel-actions">
-        <button type="button" className="button button-primary" onClick={handlePick} disabled={loading}>
-          {loading ? 'Abriendo…' : selectedImage ? 'Elegir otro archivo' : 'Elegir archivo…'}
-        </button>
-        {selectedImage && bundle && (
-          <button type="button" className="button" onClick={handleVerify} disabled={verifying}>
-            {verifying ? 'Verificando…' : 'Verificar SHA-256'}
-          </button>
-        )}
-        <button type="button" className="button button-ghost" onClick={onRebuildPayloads} disabled={busy}>
-          Regenerar payloads
-        </button>
       </div>
-
-      <p className="hint">
-        Los payloads son fotos fijas de <code>sigil-hardware/</code>: editarlo no tiene efecto hasta
-        regenerarlos.
-      </p>
     </section>
   );
 };

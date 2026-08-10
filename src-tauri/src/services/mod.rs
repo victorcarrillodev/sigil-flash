@@ -8,4 +8,5 @@ pub mod flash;
 pub mod offline_package;
 pub mod progress;
 pub mod provision;
+pub mod ssh;
 pub mod verification;

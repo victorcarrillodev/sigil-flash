@@ -5,3 +5,5 @@ pub mod device;
 pub mod engine;
 pub mod flash;
 pub mod image;
+pub mod io;
+pub mod ssh;

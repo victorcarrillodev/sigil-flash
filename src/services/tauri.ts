@@ -104,3 +104,42 @@ export async function requestEnrollment(
 export async function getEngineStatus(): Promise<Record<string, unknown>> {
   return invoke<Record<string, unknown>>('get_engine_status');
 }
+
+/** Diálogo nativo de guardar: como en pickImageFile, el webview no ofrece
+ *  rutas reales del sistema de archivos. Devuelve null si el operario
+ *  cancela, nunca una cadena vacía. */
+export async function saveFileDialog(
+  defaultName: string,
+  filters: { name: string; extensions: string[] }[]
+): Promise<string | null> {
+  const { save } = await import('@tauri-apps/plugin-dialog');
+  const path = await save({ defaultPath: defaultName, filters });
+  return path ?? null;
+}
+
+export async function openFileDialog(
+  filters: { name: string; extensions: string[] }[]
+): Promise<string | null> {
+  const { open } = await import('@tauri-apps/plugin-dialog');
+  const selected = await open({ multiple: false, directory: false, filters });
+  return typeof selected === 'string' ? selected : null;
+}
+
+export async function writeTextFile(path: string, contents: string): Promise<void> {
+  return invoke<void>('write_text_file', { path, contents });
+}
+
+export async function readTextFile(path: string): Promise<string> {
+  return invoke<string>('read_text_file', { path });
+}
+
+/** El libro Excel se arma en Rust: SheetJS (el único lector/escritor de xlsx
+ *  maduro en npm) no tiene parche publicado ahí para su vulnerabilidad de
+ *  contaminación de prototipos ni la de ReDoS. `rows` incluye la cabecera. */
+export async function exportHistoryXlsx(path: string, rows: string[][]): Promise<void> {
+  return invoke<void>('export_xlsx', { path, rows });
+}
+
+export async function importHistoryXlsx(path: string): Promise<string[][]> {
+  return invoke<string[][]>('import_xlsx', { path });
+}

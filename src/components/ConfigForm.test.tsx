@@ -37,16 +37,26 @@ describe('ConfigForm', () => {
     expect(usuario).toBeDisabled();
   });
 
-  it('marca el campo inválido con aria-invalid y describe el error', async () => {
+  it('marca el campo inválido con aria-invalid y describe el error tras pasar por él', async () => {
     renderForm({ serialNumber: 'serie con espacios' });
     const serie = screen.getByLabelText(/número de serie/i);
+    await userEvent.click(serie);
+    await userEvent.tab();
     expect(serie).toHaveAttribute('aria-invalid', 'true');
     expect(serie).toHaveAccessibleDescription(/\[A-Za-z0-9._-\]/);
   });
 
-  it('un campo correcto no se marca como inválido', () => {
-    renderForm();
+  it('no adelanta el error antes de que el operario pase por el campo', () => {
+    renderForm({ serialNumber: '' });
     expect(screen.getByLabelText(/número de serie/i)).toHaveAttribute('aria-invalid', 'false');
+  });
+
+  it('un campo correcto no se marca como inválido aunque se lo toque', async () => {
+    renderForm();
+    const serie = screen.getByLabelText(/número de serie/i);
+    await userEvent.click(serie);
+    await userEvent.tab();
+    expect(serie).toHaveAttribute('aria-invalid', 'false');
   });
 
   it('la contraseña solo aparece cuando el acceso remoto está activo', async () => {

@@ -97,7 +97,13 @@ export const CredentialPanel: React.FC<CredentialPanelProps> = ({
   return (
     <section className="panel">
       <div className="panel-head">
-        <h2 className="panel-title">Credencial de fábrica</h2>
+        <div className="panel-title-group">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" className="panel-title-icon" aria-hidden="true">
+            <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+            <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+          </svg>
+          <h2 className="panel-title">Credencial de fábrica</h2>
+        </div>
         {enrollmentReady && <span className="pill pill-done">Obtenida</span>}
       </div>
 
@@ -126,7 +132,7 @@ export const CredentialPanel: React.FC<CredentialPanelProps> = ({
       </div>
 
       <ol className="credential-steps">
-        <li>
+        <li className={token ? 'credential-step-done' : undefined}>
           <div className="credential-step-text">
             <strong>Autenticar contra el servidor</strong>
             <span>El backend lee el keyring y obtiene un token de sesión de vida corta.</span>
@@ -140,7 +146,7 @@ export const CredentialPanel: React.FC<CredentialPanelProps> = ({
             {error ? 'Reintentar' : token ? 'Renovar sesión' : 'Autenticar'}
           </button>
         </li>
-        <li>
+        <li className={enrollmentReady ? 'credential-step-done' : undefined}>
           <div className="credential-step-text">
             <strong>Solicitar credencial de un solo uso</strong>
             <span>Se emite a nombre del número de serie de esta fabricación.</span>

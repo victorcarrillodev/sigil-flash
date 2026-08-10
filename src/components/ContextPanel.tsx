@@ -421,8 +421,14 @@ const BoardCard: React.FC<{ model?: string | null }> = ({ model }) => {
 const DONUT_R = 26;
 const DONUT_CIRCUMFERENCE = 2 * Math.PI * DONUT_R;
 
-/** Misma cifra que la barra plana, en forma circular: dos lecturas del mismo dato. */
-const StorageDonut: React.FC<{ percent: number; overflow: boolean }> = ({ percent, overflow }) => {
+/** Misma cifra que la barra plana, en forma circular: dos lecturas del mismo dato.
+ *  Sin unidad elegida el arco de valor mide 0 (dasharray "0 circunferencia"),
+ *  así que el track queda solo — la gráfica sigue ahí, solo vacía. */
+const StorageDonut: React.FC<{ percent: number; overflow: boolean; label?: string }> = ({
+  percent,
+  overflow,
+  label,
+}) => {
   const clamped = Math.max(0, Math.min(100, percent));
   const dash = (clamped / 100) * DONUT_CIRCUMFERENCE;
 
@@ -447,25 +453,20 @@ const StorageDonut: React.FC<{ percent: number; overflow: boolean }> = ({ percen
         transform="rotate(-90 32 32)"
       />
       <text x="32" y="37" textAnchor="middle" className="storage-donut-label">
-        {Math.round(clamped)}%
+        {label ?? `${Math.round(clamped)}%`}
       </text>
     </svg>
   );
 };
 
+/** La gráfica se dibuja siempre — con o sin unidad elegida — para que la
+ *  tarjeta no colapse a un simple aviso de texto. Sin unidad, el donut y la
+ *  barra quedan en su estado vacío (mismo hueco, sin relleno de color). */
 const StorageBreakdown: React.FC<{ device: Device | null; image: ImageInfo | null }> = ({
   device,
   image,
 }) => {
-  if (!device) {
-    return (
-      <div className="context-storage">
-        <p className="context-empty">Sin unidad seleccionada.</p>
-      </div>
-    );
-  }
-
-  const totalBytes = parseDeviceSize(device.size);
+  const totalBytes = device ? parseDeviceSize(device.size) : null;
   const imageBytes = image?.size ?? 0;
   const known = totalBytes !== null && totalBytes > 0;
   const usedPercent = known ? (imageBytes / totalBytes!) * 100 : 0;
@@ -473,53 +474,55 @@ const StorageBreakdown: React.FC<{ device: Device | null; image: ImageInfo | nul
   const freeBytes = known ? Math.max(totalBytes! - imageBytes, 0) : null;
 
   return (
-    <div className="context-storage">
+    <div className={`context-storage${device ? '' : ' context-storage-empty'}`}>
       <div className="storage-head">
-        <span className="storage-model">{device.model}</span>
-        <code className="storage-path">{device.path}</code>
+        <span className="storage-model">{device ? device.model : 'Sin unidad seleccionada'}</span>
+        {device && <code className="storage-path">{device.path}</code>}
       </div>
 
-      {known && (
-        <div className="storage-visuals">
-          <StorageDonut percent={usedPercent} overflow={overflow} />
+      <div className="storage-visuals">
+        <StorageDonut percent={known ? usedPercent : 0} overflow={overflow} label={known ? undefined : '—'} />
 
-          <div className="storage-bar-col">
-            <div
-              className={`storage-bar${overflow ? ' storage-bar-overflow' : ''}`}
-              role="img"
-              aria-label={
-                image
+        <div className="storage-bar-col">
+          <div
+            className={`storage-bar${overflow ? ' storage-bar-overflow' : ''}`}
+            role="img"
+            aria-label={
+              !device
+                ? 'Sin unidad de almacenamiento seleccionada'
+                : image
                   ? `${formatBytes(imageBytes)} de imagen sobre ${device.size} de capacidad`
                   : `Unidad de ${device.size} sin imagen asignada todavía`
-              }
-            >
-              {image && (
-                <div className="storage-bar-used" style={{ width: `${Math.min(100, usedPercent)}%` }} />
-              )}
-            </div>
+            }
+          >
+            {known && image && (
+              <div className="storage-bar-used" style={{ width: `${Math.min(100, usedPercent)}%` }} />
+            )}
+          </div>
 
-            <div className="storage-figures">
-              {image ? (
-                <>
+          <div className="storage-figures">
+            {!device ? (
+              <span className="context-empty">Elija una unidad</span>
+            ) : image ? (
+              <>
+                <span>
+                  <span className="legend-dot legend-dot-used" aria-hidden="true" />
+                  {formatBytes(imageBytes)} imagen
+                </span>
+                {freeBytes !== null && (
                   <span>
-                    <span className="legend-dot legend-dot-used" aria-hidden="true" />
-                    {formatBytes(imageBytes)} imagen
+                    <span className="legend-dot legend-dot-free" aria-hidden="true" />
+                    {formatBytes(freeBytes)} libres
                   </span>
-                  {freeBytes !== null && (
-                    <span>
-                      <span className="legend-dot legend-dot-free" aria-hidden="true" />
-                      {formatBytes(freeBytes)} libres
-                    </span>
-                  )}
-                </>
-              ) : (
-                <span className="context-empty">Elija una imagen para ver el desglose</span>
-              )}
-              <span className="storage-total">{device.size} total</span>
-            </div>
+                )}
+              </>
+            ) : (
+              <span className="context-empty">Elija una imagen</span>
+            )}
+            <span className="storage-total">{device ? `${device.size} total` : '—'}</span>
           </div>
         </div>
-      )}
+      </div>
 
       {overflow && <p className="message-error storage-warning">La imagen no cabe en esta unidad.</p>}
     </div>

@@ -1,51 +1,57 @@
 /* =============================================================================
-   SIGIL Flash — sistema visual
-   CSS vainilla, estilo neumórfico. Sin framework de UI.
-   Una estación de fabricación se usa de pie y con prisa: objetivos grandes,
-   contraste alto y el estado siempre visible.
+   SIGIL Flash — Sistema Visual Neumórfico Profesional de Alta Gama
+   CSS Vainilla — Esculpido 3D, Sombras Duales y Biselado de Luces/Sombras
    ========================================================================== */
 
 :root {
   color-scheme: dark light;
 
-  /* El relieve neumórfico nace de dos sombras opuestas sobre el mismo tono. */
-  --bg: #12161d;
-  --surface: #181d26;
-  --surface-raised: #1d2430;
-  --surface-sunken: #141922;
-  --shadow-dark: #0c0f14;
-  --shadow-light: #232b38;
+  /* --- MODO OSCURO (Predeterminado - Alta Definición y Resplandor) --- */
+  --bg: #121824;
+  --bg-gradient: radial-gradient(circle at 18% 12%, #1c2638 0%, #121824 65%, #0a0e17 100%);
 
-  --text: #e8edf5;
-  --text-soft: #a7b3c5;
-  --text-muted: #808ea4;
-  --border: #262f3d;
+  --surface: #1a2334;
+  --surface-raised: #222f46;
+  --surface-sunken: #111723;
+  --surface-overlay: rgba(26, 35, 52, 0.92);
 
-  --accent: #22d3ee;
-  --accent-strong: #7c5cff;
-  --accent-gradient: linear-gradient(135deg, #22d3ee 0%, #7c5cff 100%);
-  --accent-ink: #04121a;
+  --shadow-dark: #070a10;
+  --shadow-light: #2c3b54;
+  --contour-light: rgba(255, 255, 255, 0.16);
+  --contour-dark: rgba(0, 0, 0, 0.55);
 
-  --ok: #22c55e;
+  --text: #ecf1f8;
+  --text-soft: #a8b9d0;
+  --text-muted: #7e91ac;
+  --border: transparent;
+
+  --accent: #00d8f6;
+  --accent-strong: #6366f1;
+  --accent-gradient: linear-gradient(135deg, #00d8f6 0%, #6366f1 100%);
+  --accent-glow: rgba(0, 216, 246, 0.28);
+  --accent-ink: #030a14;
+  --accent-text: var(--accent);
+
+  --ok: #10b981;
+  --ok-glow: rgba(16, 185, 129, 0.25);
   --warn: #f59e0b;
-  --danger: #f43f5e;
+  --warn-glow: rgba(245, 158, 11, 0.25);
+  --danger: #f55873;
+  --danger-glow: rgba(244, 63, 94, 0.25);
 
-  /* Paleta fija de la placa: una Raspberry Pi se ve igual en modo claro que
-     oscuro, no sigue el tema de la app. */
+  /* Paleta fija para simulación de la placa PCB */
   --pcb-fill: #1d6b42;
   --pcb-outline: #103c26;
-  --gold: #cda866;
+  --gold: #d4af37;
   --gold-shade: #8f6f38;
-  --chip-fill: #2e2e33;
-  --chip-fill-2: #201f24;
-  --chip-ink: #eef1f3;
-  --silver: #ced1d4;
-  --silver-shade: #999ca0;
-  --slot-dark: #3c3e42;
+  --chip-fill: #2c2d33;
+  --chip-fill-2: #1e1e23;
+  --chip-ink: #f0f4f8;
+  --silver: #d1d5db;
+  --silver-shade: #9ca3af;
+  --slot-dark: #374151;
 
-  /* Escala de espaciado: todo padding y gap sale de acá — nada a mano. Ocho
-     paradas alcanzan para toda la app; menos y no hay jerarquía entre
-     compacto/estándar/espacioso, más y vuelve a ser arbitrario. */
+  /* Escala de espaciado estandarizada */
   --space-1: 4px;
   --space-2: 8px;
   --space-3: 12px;
@@ -55,75 +61,174 @@
   --space-7: 28px;
   --space-8: 32px;
 
-  --radius: 16px;
-  --radius-sm: 10px;
-  --radius-lg: 20px;
-  --gap: 18px;
+  --radius-sm: 12px;
+  --radius: 18px;
+  --radius-lg: 24px;
+  --gap: 14px;
 
-  /* Relieve neumórfico contenido a propósito: el original (offset 6px, blur
-     14px ⇒ ~20px de alcance real) se cortaba a lo bruto contra cualquier
-     borde de scroll (.content, .context-panel) que no le diera esos 20px de
-     aire. Con offset/blur más chicos el relieve se sigue leyendo — y con
-     bastante menos margen alrededor alcanza para no cortarlo. */
-  --shadow-raised: 5px 5px 12px var(--shadow-dark), -5px -5px 12px var(--shadow-light);
-  --shadow-inset: inset 3px 3px 7px var(--shadow-dark), inset -3px -3px 7px var(--shadow-light);
-  --shadow-flat: 3px 3px 7px var(--shadow-dark), -3px -3px 7px var(--shadow-light);
-  --shadow-soft: 2px 2px 5px var(--shadow-dark), -2px -2px 5px var(--shadow-light);
+  /* Sombras y relieves Neumórficos Esculpidos 3D con luz de contorno (Rim Light) */
+  --shadow-raised: 4px 4px 8px var(--shadow-dark), -4px -4px 8px var(--shadow-light), inset 1px 1px 1px var(--contour-light);
+  --shadow-raised-hover: 5px 5px 11px var(--shadow-dark), -5px -5px 11px var(--shadow-light), inset 1px 1px 1.5px var(--contour-light);
+  --shadow-inset: inset 2px 2px 4px var(--shadow-dark), inset -2px -2px 4px var(--shadow-light);
+  --shadow-flat: 3px 3px 6px var(--shadow-dark), -3px -3px 6px var(--shadow-light), inset 1px 1px 1px var(--contour-light);
+  --shadow-soft: 2px 2px 4px var(--shadow-dark), -2px -2px 4px var(--shadow-light), inset 1px 1px 1px var(--contour-light);
+  --shadow-floating: 7px 9px 16px rgba(0, 0, 0, 0.55), -4px -4px 11px var(--shadow-light);
 
-  --font: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font: 'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
   --mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
 }
 
+/* --- MODO CLARO (Gris neutro mate que hace resaltar la luz blanca de los paneles papers) --- */
 @media (prefers-color-scheme: light) {
-  :root {
-    --bg: #e9edf3;
-    --surface: #eef2f7;
-    --surface-raised: #f4f7fb;
-    --surface-sunken: #e3e8f0;
-    --shadow-dark: #c6ccd6;
+  :root:not([data-theme]) {
+    --bg: #c8ccd7;
+    --bg-gradient: radial-gradient(circle at 20% 15%, #d8dee8 0%, #c8ccd7 65%, #b6bcc9 100%);
+
+    --surface: #dfe4ee;
+    --surface-raised: #eaf0f8;
+    --surface-sunken: #cbd2e0;
+    --surface-overlay: rgba(223, 228, 238, 0.92);
+
+    --shadow-dark: #a2aebf;
     --shadow-light: #ffffff;
+    --contour-light: rgba(255, 255, 255, 0.98);
+    --contour-dark: rgba(162, 174, 191, 0.4);
 
-    --text: #1a2230;
-    --text-soft: #47536a;
-    --text-muted: #5f6b84;
-    --border: #d3dae4;
+    --text: #1e293b;
+    --text-soft: #334155;
+    --text-muted: #536073;
+    --border: transparent;
 
-    --accent: #0e7490;
-    --accent-strong: #5b21b6;
-    --accent-gradient: linear-gradient(135deg, #0e7490 0%, #5b21b6 100%);
+    --accent: #2563eb;
+    --accent-strong: #4f46e5;
+    --accent-gradient: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
+    --accent-glow: rgba(37, 99, 235, 0.28);
     --accent-ink: #ffffff;
-    --ok: #15803d;
-    --warn: #b45309;
-    --danger: #be123c;
+    --accent-text: #134ece;
+
+    --ok: #046345;
+    --ok-glow: rgba(5, 150, 105, 0.25);
+    --warn: #844804;
+    --warn-glow: rgba(217, 119, 6, 0.25);
+    --danger: #a81b1b;
+    --danger-glow: rgba(220, 38, 38, 0.25);
   }
 }
 
+:root[data-theme='light'] {
+  --bg: #c8ccd7;
+  --bg-gradient: radial-gradient(circle at 20% 15%, #d8dee8 0%, #c8ccd7 65%, #b6bcc9 100%);
+
+  --surface: #dfe4ee;
+  --surface-raised: #eaf0f8;
+  --surface-sunken: #cbd2e0;
+  --surface-overlay: rgba(223, 228, 238, 0.92);
+
+  --shadow-dark: #a2aebf;
+  --shadow-light: #ffffff;
+  --contour-light: rgba(255, 255, 255, 0.98);
+  --contour-dark: rgba(162, 174, 191, 0.4);
+
+  --text: #1e293b;
+  --text-soft: #334155;
+  --text-muted: #536073;
+  --border: transparent;
+
+  --accent: #2563eb;
+  --accent-strong: #4f46e5;
+  --accent-gradient: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
+  --accent-glow: rgba(37, 99, 235, 0.28);
+  --accent-ink: #ffffff;
+  --accent-text: #134ece;
+
+  --ok: #046345;
+  --ok-glow: rgba(5, 150, 105, 0.25);
+  --warn: #844804;
+  --warn-glow: rgba(217, 119, 6, 0.25);
+  --danger: #a81b1b;
+  --danger-glow: rgba(220, 38, 38, 0.25);
+}
+
+:root[data-theme='dark'] {
+  --bg: #121824;
+  --bg-gradient: radial-gradient(circle at 18% 12%, #1c2638 0%, #121824 65%, #0a0e17 100%);
+
+  --surface: #1a2334;
+  --surface-raised: #222f46;
+  --surface-sunken: #111723;
+  --surface-overlay: rgba(26, 35, 52, 0.92);
+
+  --shadow-dark: #070a10;
+  --shadow-light: #2c3b54;
+  --contour-light: rgba(255, 255, 255, 0.16);
+  --contour-dark: rgba(0, 0, 0, 0.55);
+
+  --text: #ecf1f8;
+  --text-soft: #a8b9d0;
+  --text-muted: #7e91ac;
+  --border: transparent;
+
+  --accent: #00d8f6;
+  --accent-strong: #6366f1;
+  --accent-gradient: linear-gradient(135deg, #00d8f6 0%, #6366f1 100%);
+  --accent-glow: rgba(0, 216, 246, 0.28);
+  --accent-ink: #030a14;
+  --accent-text: var(--accent);
+
+  --ok: #10b981;
+  --ok-glow: rgba(16, 185, 129, 0.25);
+  --warn: #f59e0b;
+  --warn-glow: rgba(245, 158, 11, 0.25);
+  --danger: #f55873;
+  --danger-glow: rgba(244, 63, 94, 0.25);
+}
+
+/* --- REGLAS GENERALES Y RESETS --- */
 *,
 *::before,
 *::after {
   box-sizing: border-box;
+  transition: background-color 0.3s ease, color 0.3s ease, border-color 0.3s ease,
+    box-shadow 0.3s ease, fill 0.3s ease, stroke 0.3s ease;
+}
+
+@keyframes panelFadeIn {
+  from {
+    opacity: 0.85;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 html,
 body,
 #root {
   height: 100%;
+  overflow: hidden;
+  overscroll-behavior: none;
 }
 
 body {
   margin: 0;
+  overflow: hidden;
   background: var(--bg);
+  background-image: var(--bg-gradient);
+  background-attachment: fixed;
   color: var(--text);
   font-family: var(--font);
   font-size: 15px;
   line-height: 1.55;
   -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
 :focus-visible {
   outline: 2px solid var(--accent);
-  outline-offset: 2px;
-  border-radius: 4px;
+  outline-offset: 3px;
+  border-radius: 6px;
 }
 
 code,
@@ -144,76 +249,203 @@ code,
   border: 0;
 }
 
-/* ── Estructura ──────────────────────────────────────────────────────────── */
+/* Scrollbars estilizadas Neumórficas */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--surface-sunken);
+  border-radius: 999px;
+  box-shadow: var(--shadow-inset);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--surface-raised);
+  border-radius: 999px;
+  box-shadow: var(--shadow-soft);
+  border: 1px solid var(--contour-light);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--accent);
+}
+
+/* ── Estructura Principal ────────────────────────────────────────────────── */
 
 .app {
   display: grid;
-  grid-template-rows: auto 1fr auto;
+  grid-template-rows: auto auto 1fr;
   height: 100%;
+  overflow: hidden;
 }
 
+/* Barra Superior Neumórfica Elevada con Bisel */
 .app-bar {
   display: flex;
   align-items: center;
   gap: var(--space-4);
   padding: var(--space-4) var(--space-6);
   background: var(--surface);
-  box-shadow: var(--shadow-flat);
+  box-shadow: 0 4px 20px var(--shadow-dark), inset 0 -1px 1px var(--contour-light);
   border-bottom: 1px solid var(--border);
-  z-index: 2;
+  z-index: 10;
+  position: relative;
 }
 
 .brand {
   display: flex;
   align-items: center;
-  gap: var(--space-3);
+  gap: var(--space-4);
+}
+
+.brand-mark-tile {
+  width: 48px;
+  height: 48px;
+  flex-shrink: 0;
+  border-radius: 14px;
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-raised);
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--contour-light);
 }
 
 .brand-mark {
-  display: grid;
-  place-items: center;
-  width: 36px;
-  height: 36px;
-  border-radius: var(--radius-sm);
-  background: var(--accent-gradient);
-  color: var(--accent-ink);
-  font-size: 1.1rem;
-  box-shadow: var(--shadow-flat);
+  width: 32px;
+  height: 32px;
+  filter: drop-shadow(1px 2px 3px rgba(0, 0, 0, 0.2));
+}
+
+.brand-text-col {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
 }
 
 .brand-name {
-  font-size: 1.12rem;
-  font-weight: 700;
-  letter-spacing: -0.01em;
+  font-size: 1.35rem;
+  font-weight: 900;
+  letter-spacing: -0.02em;
+  color: var(--accent);
+  background: var(--accent-gradient);
+  background-clip: text;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
 }
 
 .brand-tagline {
   margin: 0;
-  color: var(--text-soft);
-  font-size: 0.86rem;
+  color: var(--text-muted);
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
 }
 
+/* Badge Neumórfica Inset */
 .env-badge {
   margin-left: auto;
-  padding: var(--space-1) var(--space-3);
+  padding: var(--space-2) var(--space-4);
   border-radius: 999px;
   background: var(--surface-sunken);
   box-shadow: var(--shadow-inset);
   color: var(--text-soft);
   font-size: 0.74rem;
-  letter-spacing: 0.03em;
+  font-weight: 700;
+  letter-spacing: 0.06em;
   text-transform: uppercase;
   white-space: nowrap;
+  border: 1px solid var(--contour-dark);
 }
 
+/* Botón Interruptor de Tema Neumórfico */
+.theme-toggle {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  flex-shrink: 0;
+  border: 0;
+  border-radius: 50%;
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-raised);
+  color: var(--text-soft);
+  cursor: pointer;
+  transition: color 0.2s ease, transform 0.2s ease, box-shadow 0.35s ease;
+}
+
+.theme-toggle:hover {
+  color: var(--accent);
+  box-shadow: var(--shadow-raised-hover);
+  transform: translateY(-2px);
+}
+
+.theme-toggle:active {
+  transform: translateY(0) scale(0.95);
+  box-shadow: var(--shadow-inset);
+}
+
+/* ── Conmutador de Vistas (Flasheo / Historial) ──────────────────────────── */
+
+.view-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-6) 0;
+}
+
+.view-tab {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-5);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  box-shadow: var(--shadow-soft);
+  color: var(--text-soft);
+  font: inherit;
+  font-size: 0.86rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background-color 0.2s ease, color 0.2s ease, box-shadow 0.2s ease, transform 0.15s ease;
+}
+
+.view-tab:hover {
+  color: var(--text);
+  box-shadow: var(--shadow-raised-hover);
+  transform: translateY(-1px);
+}
+
+.view-tab-active {
+  background: var(--surface-raised);
+  color: var(--text);
+  box-shadow: var(--shadow-raised), inset 0 0 0 1.5px var(--accent), 0 0 16px var(--accent-glow);
+}
+
+.view-tab-badge {
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  font-weight: 700;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--surface-sunken);
+  box-shadow: var(--shadow-inset);
+  color: var(--text-soft);
+}
+
+.view-tab-active .view-tab-badge {
+  color: var(--accent-text);
+}
+
+/* Cuerpo de la Aplicación */
 .app-body {
   display: grid;
-  grid-template-columns: 268px 1fr;
-  /* Contexto y panel del paso activo se reparten el alto disponible mitad y
-     mitad; el raíl de pasos ocupa las dos filas de su columna, así que ese
-     reparto no lo mueve. */
-  grid-template-rows: 1fr 1fr;
-  grid-template-areas: 'sidebar context' 'sidebar content';
+  grid-template-columns: 280px 340px 1fr;
+  grid-template-rows: 1fr;
+  grid-template-areas: 'sidebar context content-column';
   gap: var(--gap);
   padding: var(--gap);
   min-height: 0;
@@ -225,27 +457,54 @@ code,
   flex-direction: column;
   gap: var(--gap);
   min-height: 0;
+  padding: 10px;
 }
 
-.content {
-  grid-area: content;
+/* El registro de actividad vive aquí, no en una franja de ancho completo:
+   así el sidebar y el contexto pueden ocupar todo el alto disponible. */
+.content-column {
+  grid-area: content-column;
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap);
   min-height: 0;
+  padding: 10px;
+}
+
+/* Sin relieve propio: el .panel de adentro (o .progress-panel) ya es la
+   superficie neumórfica — duplicarlo aquí apilaba dos cajas idénticas. */
+.content {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
   overflow-y: auto;
   overflow-x: hidden;
-  /* El relieve de .panel necesita aire alrededor: con overflow:auto y sin
-     padding, la sombra se cortaba a lo bruto contra este mismo borde en
-     lugar de desvanecerse. */
-  padding: var(--space-5);
+  overscroll-behavior: contain;
+  padding: 10px;
   scrollbar-gutter: stable;
 }
 
+.step-panel-wrapper {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+}
+
+/* Pie de Página Neumórfico: ahora es una tarjeta propia junto al panel del
+   paso, no una franja de ancho completo — por eso lleva su propio relieve
+   en vez de la sombra "adosada por arriba" de cuando corría abajo de todo. */
 .app-foot {
+  flex-shrink: 0;
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
-  padding: var(--space-3) var(--space-6) var(--space-4);
+  padding: var(--space-4) var(--space-5);
   background: var(--surface);
-  border-top: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-raised);
   font-size: 0.83rem;
   color: var(--text-soft);
 }
@@ -260,50 +519,344 @@ code,
 .blocking-reason {
   display: flex;
   align-items: center;
-  gap: var(--space-2);
+  gap: var(--space-3);
   margin: 0;
   min-width: 0;
+  font-weight: 500;
 }
 
 .dot {
-  width: 9px;
-  height: 9px;
+  width: 10px;
+  height: 10px;
   border-radius: 50%;
   flex-shrink: 0;
 }
 
 .dot-ready {
   background: var(--ok);
-  box-shadow: 0 0 9px var(--ok);
+  box-shadow: 0 0 12px var(--ok), 0 0 4px var(--ok);
 }
 
 .dot-blocked {
   background: var(--warn);
+  box-shadow: 0 0 8px var(--warn);
 }
 
 .app-version {
   margin: 0;
   color: var(--text-muted);
+  font-family: var(--mono);
+  font-size: 0.78rem;
   white-space: nowrap;
 }
 
-/* ── Consola de actividad ────────────────────────────────────────────────── */
+/* ── Vista de Historial ──────────────────────────────────────────────────── */
+
+/* Ocupa las tres columnas del grid de .app-body: a diferencia de la vista de
+   flasheo, aquí no hay raíl de pasos ni panel de contexto que mostrar. */
+.history-view {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  gap: var(--space-4);
+  background: var(--surface);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-raised);
+  padding: var(--space-4) var(--space-5);
+  animation: panelFadeIn 0.2s ease-out;
+}
+
+/* Independiente de .panel-head a propósito: esa clase trae
+   `.panel-head .button { margin-left: auto }` para el botón único de
+   cabeceras de paso, y aquí conviven tres botones agrupados en su propio
+   `.history-toolbar` — compartir la clase los habría desperdigado. */
+.history-head {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  justify-content: space-between;
+  margin-bottom: var(--space-3);
+}
+
+.history-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-left: auto;
+}
+
+.button-small {
+  padding: var(--space-2) var(--space-4);
+  font-size: 0.82rem;
+}
+
+.history-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  list-style: none;
+  margin: 0;
+  padding: 2px 2px 2px 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  scrollbar-gutter: stable;
+}
+
+.history-entry {
+  flex-shrink: 0;
+  background: var(--surface-raised);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-flat);
+  padding: var(--space-4);
+}
+
+.history-entry-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-3) var(--space-4);
+  margin-bottom: var(--space-3);
+}
+
+.history-entry-title {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.history-entry-hostname {
+  font-size: 1rem;
+  font-weight: 800;
+  color: var(--text);
+}
+
+.history-entry-serial {
+  font-size: 0.76rem;
+  color: var(--text-muted);
+}
+
+.history-entry-time {
+  margin-left: auto;
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+/* ── Vista SSH ───────────────────────────────────────────────────────────── */
+
+/* La terminal vive montada siempre (ver App.tsx): estas dos reglas son el
+   interruptor visual. `display: contents` hace que el wrapper desaparezca
+   del árbol de caja, así el .ssh-view de adentro sigue siendo hijo directo
+   de .app-body y `grid-column: 1 / -1` funciona igual que en .history-view. */
+.ssh-view-wrapper {
+  display: contents;
+}
+
+.ssh-view-wrapper.ssh-view-hidden {
+  display: none;
+}
+
+.ssh-view {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: 300px 1fr;
+  gap: var(--gap);
+  min-height: 0;
+}
+
+.ssh-devices {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--surface);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-raised);
+  padding: var(--space-4);
+}
+
+.ssh-devices-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding-right: 4px;
+}
+
+.ssh-host-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.ssh-host-item {
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-flat);
+  overflow: hidden;
+}
+
+.ssh-host-item.ssh-host-active {
+  box-shadow: var(--shadow-flat), inset 0 0 0 1.5px var(--accent), 0 0 12px var(--accent-glow);
+}
+
+.ssh-host-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--space-3);
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+  transition: background-color 0.2s ease;
+}
+
+.ssh-host-main:hover:not(:disabled) {
+  background: var(--surface-sunken);
+}
+
+.ssh-host-main:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.ssh-host-label {
+  font-weight: 700;
+  font-size: 0.9rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ssh-host-meta {
+  font-size: 0.74rem;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ssh-host-actions {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 4px;
+  padding: var(--space-2);
+}
+
+.ssh-host-actions .input-btn {
+  width: 26px;
+  height: 26px;
+}
+
+.ssh-add-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding-top: var(--space-3);
+  margin-top: var(--space-1);
+  border-top: 1px dashed var(--border);
+}
+
+.ssh-form-row {
+  display: grid;
+  grid-template-columns: 2fr 1fr;
+  gap: var(--space-3);
+}
+
+.ssh-terminal-col {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-height: 0;
+}
+
+.ssh-terminal-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: 0 var(--space-1);
+}
+
+.ssh-target {
+  color: var(--text-muted);
+  font-size: 0.82rem;
+}
+
+.ssh-disconnect-btn {
+  margin-left: auto;
+}
+
+.ssh-terminal-container {
+  flex: 1;
+  min-height: 0;
+  background: var(--surface-sunken);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-inset);
+  padding: var(--space-3);
+  overflow: hidden;
+}
+
+/* xterm.js dimensiona su propio lienzo a partir del contenedor: sin esto, el
+   `.xterm` interno se queda con la altura natural de un div (auto) en vez de
+   llenar el hueco flexible, y `fit()` mide mal en el primer render. */
+.ssh-terminal-container .xterm,
+.ssh-terminal-container .xterm-viewport {
+  height: 100%;
+}
+
+.ssh-status-idle {
+  color: var(--text-muted);
+}
+
+.ssh-status-connecting {
+  color: var(--warn);
+}
+
+.ssh-status-connected {
+  color: var(--ok);
+}
+
+.ssh-status-ended {
+  color: var(--danger);
+}
+
+/* ── Consola de Actividad Neumórfica ─────────────────────────────────────── */
 
 .log-console {
   border-top: 1px dashed var(--border);
-  padding-top: var(--space-2);
+  padding-top: var(--space-3);
+  margin-top: var(--space-1);
 }
 
 .log-console-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  font-size: 0.7rem;
+  font-size: 0.72rem;
   font-weight: 700;
   text-transform: uppercase;
-  letter-spacing: 0.05em;
+  letter-spacing: 0.06em;
   color: var(--text-muted);
-  margin-bottom: var(--space-1);
+  margin-bottom: var(--space-2);
 }
 
 .log-count {
@@ -311,34 +864,38 @@ code,
   background: var(--surface-sunken);
   box-shadow: var(--shadow-inset);
   border-radius: 999px;
-  padding: 2px var(--space-2);
+  padding: 2px var(--space-3);
+  color: var(--text);
 }
 
 .log-list {
   list-style: none;
   margin: 0;
-  padding: 0;
-  max-height: 96px;
+  padding: var(--space-2);
+  max-height: 76px;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
   gap: 2px;
-  scrollbar-width: thin;
+  background: var(--surface-sunken);
+  box-shadow: var(--shadow-inset);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--contour-dark);
 }
 
 .log-entry {
   display: flex;
   gap: var(--space-2);
-  padding: var(--space-1) var(--space-2);
-  border-radius: var(--radius-sm);
-  font-size: 0.78rem;
-  line-height: 1.5;
+  padding: 2px var(--space-2);
+  border-radius: 6px;
+  font-size: 0.76rem;
+  line-height: 1.3;
 }
 
 .log-time {
   flex-shrink: 0;
   color: var(--text-muted);
-  font-size: 0.72rem;
+  font-size: 0.74rem;
 }
 
 .log-message {
@@ -351,7 +908,8 @@ code,
 }
 
 .log-warn {
-  background: color-mix(in srgb, var(--warn) 9%, transparent);
+  background: color-mix(in srgb, var(--warn) 12%, transparent);
+  border-left: 3px solid var(--warn);
 }
 
 .log-warn .log-message {
@@ -359,7 +917,8 @@ code,
 }
 
 .log-error {
-  background: color-mix(in srgb, var(--danger) 9%, transparent);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  border-left: 3px solid var(--danger);
 }
 
 .log-error .log-message {
@@ -367,43 +926,25 @@ code,
 }
 
 .log-empty {
-  padding: var(--space-1);
+  padding: var(--space-2);
   color: var(--text-muted);
   font-style: italic;
 }
 
-/* ── Panel de contexto ───────────────────────────────────────────────────── */
+/* ── Panel de Contexto (Tarjetas 3D) ─────────────────────────────────────── */
 
 .context-panel {
   grid-area: context;
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-  /* Una sola fila que ocupa TODO el alto fijo del panel (1fr, no auto): así
-     las tres tarjetas miden siempre lo mismo, sin importar cuánto contenido
-     tenga cada una. Con "auto" el alto de la fila dependía del dibujo de la
-     placa elegida — al cambiar a un modelo con ícono más bajo, la fila entera
-     se encogía con él y le cortaba el contenido a las otras dos tarjetas.
-     grid-auto-rows repite el mismo 1fr por si ALGUNA vez hace falta una fila
-     de más (ventana angosta, fuente grande): esa fila también queda fija en
-     vez de depender otra vez del contenido — la causa raíz del mismo bug. */
-  grid-template-rows: 1fr;
-  grid-auto-rows: 1fr;
+  display: flex;
+  flex-direction: column;
   gap: var(--gap);
   min-height: 0;
   overflow-y: auto;
-  /* overflow:auto recorta cualquier cosa que sobrepase esta caja, todo el
-     tiempo, no solo mientras se hace scroll — sin este padding, el relieve
-     de las tarjetas se cortaba contra este mismo borde en las cuatro
-     direcciones. Se mantiene angosto porque esta fila mide 50% del alto fijo
-     de la pantalla: cada px de padding es un px menos para las tarjetas. */
-  padding: var(--space-2);
-  /* Sin scrollbar-gutter: reservaba ~15px de ancho SIEMPRE, se usara la
-     barra o no, y ese ancho de menos era lo que tiraba la grilla de 3 a 2
-     columnas (ver grid-auto-rows arriba: ahora ese caso ya no se rompe, así
-     que no hace falta pagar el ancho por adelantado para evitarlo). */
+  padding: 10px;
 }
 
 .context-card {
+  flex: 1;
   min-width: 0;
   min-height: 0;
   display: flex;
@@ -412,66 +953,58 @@ code,
   background: var(--surface);
   border-radius: var(--radius);
   box-shadow: var(--shadow-raised);
-  padding: var(--space-4);
+  padding: var(--space-4) var(--space-5);
+  position: relative;
+  /* Red de seguridad: a la ventana mínima el contenido puede pedir más alto
+     del que la tarjeta recibe. Mejor scroll propio que corte sin acceso. */
+  overflow-y: auto;
 }
 
 .context-card-title {
-  font-size: 0.72rem;
-  font-weight: 700;
+  font-size: 0.74rem;
+  font-weight: 800;
   text-transform: uppercase;
-  letter-spacing: 0.05em;
+  letter-spacing: 0.08em;
   color: var(--text-muted);
 }
 
 .context-empty {
   margin: 0;
   color: var(--text-muted);
-  font-size: 0.82rem;
+  font-size: 0.84rem;
   font-style: italic;
 }
 
-/* Placa */
-
+/* Placa PCB */
 .context-board {
-  /* En columna: el dibujo usa TODO el ancho de la tarjeta (así puede ser
-     grande de verdad) y la etiqueta va debajo, no compitiendo por sitio a su
-     lado. */
   flex: 1;
   min-height: 0;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 10px;
+  gap: 12px;
 }
 
 .board-icon {
-  /* La proporción real viene del viewBox de cada variante (distinto entre
-     placa completa y Zero) como aspect-ratio en línea, no fija aquí. Con
-     height:100% + width:auto se deriva SIEMPRE del alto disponible — si la
-     tarjeta lo aprieta, encoge manteniendo la proporción en vez de
-     desbordarla como pasaba con flex-shrink:0 y un max-height fijo. */
   width: auto;
   height: 100%;
   max-height: 260px;
+  filter: drop-shadow(4px 6px 12px rgba(0, 0, 0, 0.35));
 }
 
-/* Paleta fija de la placa: verde, dorado, plata, gris chip. No sigue el tema
-   de la app — una Raspberry Pi es igual de verde en modo claro que oscuro. */
 .board-pcb {
   fill: var(--pcb-fill);
   stroke: var(--pcb-outline);
   stroke-width: 2;
 }
 
-/* Pines dorados: cabecera GPIO y cabecera PoE. */
 .board-pin {
   fill: var(--gold);
   stroke: var(--gold-shade);
   stroke-width: 0.3;
 }
 
-/* Agujero de montaje: anillo dorado con el centro perforado. */
 .board-hole-ring {
   fill: var(--gold);
 }
@@ -480,8 +1013,6 @@ code,
   fill: var(--pcb-outline);
 }
 
-/* Conector de cinta (cámara/pantalla): cuerpo oscuro con los "dientes" del
-   flex visibles, como se ve de frente en la placa real. */
 .board-ribbon {
   fill: var(--chip-fill);
   stroke: var(--pcb-outline);
@@ -494,21 +1025,18 @@ code,
   opacity: 0.85;
 }
 
-/* Chip secundario (memoria/alimentación, o inalámbrico sin blindaje). */
 .board-chip-secondary {
   fill: var(--chip-fill);
   stroke: var(--pcb-outline);
   stroke-width: 1;
 }
 
-/* Lata de blindaje metálico sobre el módulo inalámbrico (3B+ en adelante). */
 .board-shield {
   fill: var(--silver);
   stroke: var(--silver-shade);
   stroke-width: 1;
 }
 
-/* Antena de PCB de la Zero: un rastro grabado en la placa, solo trazo. */
 .board-antenna {
   fill: none;
   stroke: var(--gold);
@@ -518,24 +1046,22 @@ code,
   opacity: 0.8;
 }
 
-/* Botón de encendido (Pi 5). */
 .board-button {
   fill: var(--silver);
   stroke: var(--silver-shade);
   stroke-width: 1.2;
 }
 
-/* LEDs de estado: rojo de encendido, verde de actividad — colores reales,
-   no ligados al tema. */
 .board-led-power {
-  fill: #e0383f;
+  fill: #f43f5e;
+  filter: drop-shadow(0 0 4px #f43f5e);
 }
 
 .board-led-act {
-  fill: #3fbf5f;
+  fill: #10b981;
+  filter: drop-shadow(0 0 4px #10b981);
 }
 
-/* Puerto de dos tonos: carcasa plateada, ranura oscura adentro. */
 .board-port {
   fill: var(--silver);
   stroke: var(--silver-shade);
@@ -546,9 +1072,8 @@ code,
   fill: var(--slot-dark);
 }
 
-/* El azul es el color real de una ranura USB3, no un acento de marca. */
 .board-port-slot-usb3 {
-  fill: #2f6fc4;
+  fill: #2563eb;
 }
 
 .board-chip-label {
@@ -573,24 +1098,25 @@ code,
 }
 
 .context-board-name {
-  font-size: 1.08rem;
+  font-size: 1.1rem;
   font-weight: 700;
+  color: var(--text);
 }
 
 .context-board-bits {
   font-size: 0.84rem;
   color: var(--text-soft);
+  font-weight: 500;
 }
 
 /* Almacenamiento */
-
 .context-storage {
   flex: 1;
   min-height: 0;
   display: flex;
   flex-direction: column;
   justify-content: center;
-  gap: 10px;
+  gap: 8px;
 }
 
 .storage-head {
@@ -602,45 +1128,39 @@ code,
 }
 
 .storage-model {
+  font-weight: 700;
+  font-size: 1rem;
+}
+
+.context-storage-empty .storage-model {
+  color: var(--text-muted);
   font-weight: 600;
-  font-size: 0.96rem;
+  font-style: italic;
 }
 
 .storage-path {
-  font-size: 0.72rem;
+  font-size: 0.76rem;
   color: var(--text-muted);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-/* Dos lecturas del mismo dato: la circular da el vistazo, la plana da el
-   detalle exacto de qué queda libre. */
 .storage-visuals {
-  /* Ocupa el resto de la tarjeta: sin esto el donut se queda a tamaño de
-     contenido y toda la caja de más se va en relleno vacío.
-     Sin flex-wrap a propósito: el salto de línea se decide con el tamaño
-     ANTES de encoger, así que con el donut y la barra pidiendo sitio de
-     sobra saltaba a una "segunda línea" invisible que desbordaba la tarjeta,
-     aunque después hubiera espacio de sobra encogiendo la barra. */
   flex: 1;
   min-height: 0;
   display: flex;
-  align-items: stretch;
-  gap: 18px;
+  align-items: center;
+  gap: 20px;
 }
 
 .storage-donut {
-  /* width:100% reclamaba TODO el ancho de la fila y empujaba la barra a una
-     "segunda línea" invisible que desbordaba la tarjeta — igual bug que tuvo
-     el ícono de la placa. Cuadrado real vía aspect-ratio a partir del alto,
-     sin pelearse por ancho con la barra que tiene al lado. flex-shrink:0
-     para que sea la barra la que cede espacio, no el donut deformándose. */
   flex-shrink: 0;
   aspect-ratio: 1;
   width: auto;
   height: 100%;
-  max-height: 160px;
+  max-height: 100px;
+  filter: drop-shadow(2px 4px 8px var(--shadow-dark));
 }
 
 .storage-donut-track {
@@ -649,62 +1169,67 @@ code,
 
 .storage-donut-value {
   stroke: url(#storageDonutGrad);
-  transition: stroke-dasharray 0.35s ease;
+  transition: stroke-dasharray 0.4s ease, stroke 0.35s ease;
+  filter: drop-shadow(0 0 6px var(--accent-glow));
 }
 
 .storage-donut-value-overflow {
   stroke: var(--danger);
+  filter: drop-shadow(0 0 6px var(--danger-glow));
 }
 
 .storage-donut-label {
   font-family: var(--mono);
-  font-size: 13px;
-  font-weight: 700;
+  font-size: 14px;
+  font-weight: 800;
   fill: var(--text);
 }
 
 .storage-bar-col {
-  /* La barra no necesita estirarse tan alto como el donut: se centra sola
-     dentro de la fila en vez de heredar el estirado. */
   align-self: center;
   flex: 1 1 160px;
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 6px;
 }
 
 .storage-bar {
-  height: 18px;
+  height: 14px;
   border-radius: 999px;
   background: var(--surface-sunken);
   box-shadow: var(--shadow-inset);
   overflow: hidden;
+  padding: 2px;
+  border: 1px solid var(--contour-dark);
 }
 
 .storage-bar-used {
   height: 100%;
   border-radius: 999px;
   background: var(--accent-gradient);
-  transition: width 0.35s ease;
+  box-shadow: 0 0 10px var(--accent-glow);
+  transition: width 0.4s cubic-bezier(0.4, 0, 0.2, 1), background 0.35s ease;
 }
 
 .storage-bar-overflow .storage-bar-used {
   background: var(--danger);
+  box-shadow: 0 0 10px var(--danger-glow);
 }
 
 .storage-figures {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 10px;
-  font-size: 0.83rem;
+  gap: 4px 10px;
+  font-size: 0.76rem;
   color: var(--text-soft);
 }
 
 .storage-total {
   margin-left: auto;
   color: var(--text-muted);
+  font-weight: 600;
 }
 
 .storage-warning {
@@ -716,11 +1241,12 @@ code,
   width: 10px;
   height: 10px;
   border-radius: 50%;
-  margin-right: 5px;
+  margin-right: 6px;
 }
 
 .legend-dot-used {
   background: var(--accent);
+  box-shadow: 0 0 6px var(--accent-glow);
 }
 
 .legend-dot-free {
@@ -728,10 +1254,9 @@ code,
   box-shadow: var(--shadow-inset);
 }
 
-/* Características */
-
+/* Características Grid */
 .context-card-details {
-  gap: 6px;
+  gap: 8px;
 }
 
 .context-detail-grid {
@@ -739,42 +1264,86 @@ code,
   min-height: 0;
   align-content: center;
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(80px, 1fr));
-  gap: 10px 14px;
+  /* Fijo a 2, no auto-fit: con 6 datos, auto-fit encajaba 5 por fila según
+     el ancho disponible y dejaba el 6.º solo, descompensado. 2 columnas dan
+     siempre 3 filas parejas de 2 — por eso el tile va más compacto que con 3
+     columnas, y el grid conserva scroll propio por si el contenido crece. */
+  grid-template-columns: repeat(2, 1fr);
+  gap: 4px 12px;
+  overflow-y: auto;
 }
 
 .context-detail {
   display: flex;
   flex-direction: column;
-  gap: 1px;
+  gap: 0;
   min-width: 0;
+  padding: 3px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-sunken);
+  box-shadow: var(--shadow-inset);
 }
 
 .context-detail-key {
-  font-size: 0.68rem;
+  font-size: 0.64rem;
+  font-weight: 700;
   text-transform: uppercase;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.05em;
   color: var(--text-muted);
+  line-height: 1.2;
 }
 
 .context-detail-value {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 0.82rem;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--text);
+  line-height: 1.25;
 }
 
-/* ── Raíl de pasos ───────────────────────────────────────────────────────── */
+/* ── Raíl de Pasos (Step Rail Neumórfico Unificado) ───────────────────────── */
 
 .step-rail {
-  /* Crece para llenar el hueco hasta el botón de fabricar: sin esto la
-     tarjeta se encoge a su contenido y deja un vacío antes del lanzador. */
   flex: 1 1 auto;
   min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
   background: var(--surface);
   border-radius: var(--radius);
   box-shadow: var(--shadow-raised);
-  padding: var(--space-4);
+  padding: var(--space-5);
+  position: relative;
+}
+
+.step-rail-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-bottom: var(--space-2);
+  border-bottom: 1px solid var(--border);
+}
+
+.step-rail-heading {
+  font-size: 0.76rem;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+}
+
+.step-rail-badge {
+  font-family: var(--mono);
+  font-size: 0.74rem;
+  font-weight: 700;
+  padding: 2px 10px;
+  border-radius: 999px;
+  background: var(--surface-sunken);
+  box-shadow: var(--shadow-inset);
+  color: var(--accent);
+  border: 1px solid var(--contour-dark);
 }
 
 .step-rail-list {
@@ -783,65 +1352,89 @@ code,
   padding: 0;
   display: flex;
   flex-direction: column;
+  gap: var(--space-3);
+}
+
+.step-rail-divider {
+  height: 1px;
+  background: var(--border);
+  margin: var(--space-1) 0;
+}
+
+.step-rail-launch {
+  margin-top: auto;
+  display: flex;
+  flex-direction: column;
   gap: var(--space-2);
 }
 
 .step-item {
   display: flex;
   align-items: center;
-  gap: var(--space-3);
+  gap: var(--space-4);
   width: 100%;
   padding: var(--space-3) var(--space-4);
   border: 0;
   border-radius: var(--radius-sm);
-  background: transparent;
+  background: var(--surface);
+  box-shadow: var(--shadow-soft);
   color: var(--text-soft);
   font: inherit;
   text-align: left;
   cursor: pointer;
-  transition: background 0.18s ease, color 0.18s ease, box-shadow 0.18s ease;
+  position: relative;
+  transition: background 0.2s ease, color 0.2s ease, box-shadow 0.2s ease, transform 0.15s ease;
 }
 
 .step-item:hover {
   background: var(--surface-raised);
   color: var(--text);
+  box-shadow: var(--shadow-raised-hover);
+  transform: translateX(4px);
 }
 
 .step-current {
   background: var(--surface-raised);
   color: var(--text);
-  box-shadow: var(--shadow-flat);
+  box-shadow: var(--shadow-raised), inset 0 0 0 1.5px var(--accent), 0 0 16px var(--accent-glow);
 }
 
 .step-marker {
   position: relative;
   display: grid;
   place-items: center;
-  width: 30px;
-  height: 30px;
+  width: 36px;
+  height: 36px;
   flex-shrink: 0;
   border-radius: 50%;
   background: var(--surface-sunken);
   box-shadow: var(--shadow-inset);
-  font-size: 0.82rem;
-  font-weight: 600;
+  border: 0;
+  font-size: 0.92rem;
+  font-weight: 800;
   font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+
+.step-current .step-marker {
+  color: var(--accent-text);
+  box-shadow: var(--shadow-inset), 0 0 12px var(--accent-glow);
 }
 
 .step-complete .step-marker {
   background: var(--accent-gradient);
   color: var(--accent-ink);
-  box-shadow: none;
+  box-shadow: 0 4px 14px var(--accent-glow);
+  border: 0;
 }
 
 .step-blocked .step-marker {
-  background: var(--danger);
-  color: var(--accent-ink);
-  box-shadow: none;
+  background: linear-gradient(135deg, #f43f5e 0%, #dc2626 100%);
+  color: #ffffff;
+  box-shadow: 0 4px 14px var(--danger-glow);
+  border: 0;
 }
 
-/* El número sigue en el DOM para poder nombrar el paso, pero cede el sitio
-   al glifo de estado cuando lo hay. */
 .step-complete .step-number,
 .step-blocked .step-number {
   opacity: 0;
@@ -852,74 +1445,91 @@ code,
   inset: 0;
   display: grid;
   place-items: center;
-  font-size: 0.9rem;
+  font-size: 1rem;
+  font-weight: 800;
 }
 
 .step-body {
   display: flex;
   flex-direction: column;
+  gap: 1px;
   min-width: 0;
+  flex: 1;
 }
 
 .step-title {
-  font-size: 0.92rem;
-  font-weight: 600;
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: var(--text);
 }
 
 .step-detail {
   font-family: var(--mono);
-  font-size: 0.72rem;
-  color: var(--text-muted);
+  font-size: 0.74rem;
+  color: var(--text-soft);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  opacity: 0.85;
 }
 
-/* ── Zona de lanzamiento ─────────────────────────────────────────────────── */
-
-.launch {
-  margin-top: auto;
-  background: var(--surface);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow-raised);
-  padding: var(--space-5);
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-3);
+.step-arrow {
+  margin-left: auto;
+  color: var(--accent);
+  flex-shrink: 0;
+  filter: drop-shadow(0 0 4px var(--accent-glow));
 }
 
 .blocker-list {
   margin: 0;
-  padding-left: 17px;
-  font-size: 0.79rem;
+  padding-left: 18px;
+  font-size: 0.8rem;
   color: var(--text-muted);
   display: flex;
   flex-direction: column;
-  gap: 5px;
+  gap: 6px;
 }
 
-/* ── Paneles ─────────────────────────────────────────────────────────────── */
+/* ── Paneles de Contenido ────────────────────────────────────────────────── */
 
 .panel {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
   background: var(--surface);
   border-radius: var(--radius);
   box-shadow: var(--shadow-raised);
-  padding: var(--space-6);
-  margin-bottom: var(--gap);
+  padding: var(--space-4) var(--space-5);
+  position: relative;
+  animation: panelFadeIn 0.2s ease-out;
+  overflow-y: auto;
 }
 
 .panel-head {
   display: flex;
   align-items: center;
   gap: var(--space-3);
-  margin-bottom: var(--space-2);
+  margin-bottom: var(--space-3);
+}
+
+.panel-title-group {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.panel-title-icon {
+  color: var(--text);
+  flex-shrink: 0;
 }
 
 .panel-title {
   margin: 0;
-  font-size: 1.06rem;
-  font-weight: 700;
+  font-size: 1.18rem;
+  font-weight: 800;
   letter-spacing: -0.01em;
+  color: var(--text);
 }
 
 .panel-head .button {
@@ -927,28 +1537,115 @@ code,
 }
 
 .panel-lead {
-  margin: 0 0 18px;
+  margin: 0 0 20px;
   color: var(--text-soft);
-  font-size: 0.86rem;
-  max-width: 62ch;
+  font-size: 0.88rem;
+  max-width: 65ch;
+  line-height: 1.6;
 }
 
 .panel-actions {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--space-2);
-  margin-top: var(--space-4);
+  gap: var(--space-3);
+  margin-top: var(--space-5);
 }
 
+/* ── Cuerpo del panel en dos columnas: requisitos + contenido ────────────── */
+
+.panel-body {
+  display: grid;
+  grid-template-columns: 148px 1fr;
+  gap: var(--space-6);
+  align-items: start;
+}
+
+/* En Configuración el formulario ya es denso: el field-grid interno cede
+   ancho al checklist bajando su columna mínima, en vez de perder sus dos
+   columnas y duplicar de largo. */
+.panel-main-col-tight .field-grid {
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--space-4);
+}
+
+.panel-main-col {
+  min-width: 0;
+}
+
+/* Checklist vertical: qué falta en ESTE paso, no en el flujo entero (eso ya
+   lo cuenta el step-rail). Ocupa el espacio que quedaba vacío en pasos con
+   poco contenido, como Dispositivo o Imagen antes de elegir nada. */
+.step-checklist {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.step-checklist li {
+  position: relative;
+  padding-left: 30px;
+  padding-bottom: 24px;
+  font-size: 0.82rem;
+  font-weight: 600;
+  line-height: 1.3;
+  color: var(--text-muted);
+}
+
+.step-checklist li:last-child {
+  padding-bottom: 0;
+}
+
+.step-checklist li::before {
+  content: '';
+  position: absolute;
+  left: 9px;
+  top: 20px;
+  bottom: -4px;
+  width: 2px;
+  background: var(--border);
+}
+
+.step-checklist li:last-child::before {
+  display: none;
+}
+
+.step-checklist-marker {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--surface-sunken);
+  box-shadow: var(--shadow-inset);
+  border: 1px solid var(--contour-dark);
+  display: grid;
+  place-items: center;
+  color: var(--accent-ink);
+}
+
+.step-checklist-done {
+  color: var(--text);
+}
+
+.step-checklist-done .step-checklist-marker {
+  background: var(--accent-gradient);
+  border-color: transparent;
+  box-shadow: 0 2px 8px var(--accent-glow);
+}
+
+/* Pill Neumórfica Inset */
 .pill {
   margin-left: auto;
-  padding: var(--space-1) var(--space-3);
+  padding: var(--space-1) var(--space-4);
   border-radius: 999px;
   background: var(--surface-sunken);
   box-shadow: var(--shadow-inset);
   font-family: var(--mono);
-  font-size: 0.72rem;
+  font-size: 0.74rem;
+  font-weight: 700;
   color: var(--text-soft);
+  border: 1px solid var(--contour-dark);
 }
 
 .pill-done {
@@ -962,43 +1659,52 @@ code,
 
 .pill-running,
 .pill-verifying {
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
-/* ── Botones ─────────────────────────────────────────────────────────────── */
+/* ── Botones Neumórficos 3D ──────────────────────────────────────────────── */
 
 .button {
-  padding: var(--space-3) var(--space-5);
+  padding: var(--space-3) var(--space-6);
   border: 0;
   border-radius: var(--radius-sm);
   background: var(--surface-raised);
   box-shadow: var(--shadow-flat);
   color: var(--text);
   font: inherit;
-  font-size: 0.88rem;
-  font-weight: 600;
+  font-size: 0.9rem;
+  font-weight: 700;
   cursor: pointer;
-  transition: transform 0.12s ease, box-shadow 0.18s ease, opacity 0.18s ease;
+  position: relative;
+  transition: transform 0.15s ease, box-shadow 0.2s ease, opacity 0.2s ease,
+    background-color 0.35s ease, color 0.35s ease;
 }
 
 .button:hover:not(:disabled) {
-  transform: translateY(-1px);
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-raised-hover);
 }
 
 .button:active:not(:disabled) {
-  transform: translateY(0);
+  transform: translateY(1px);
   box-shadow: var(--shadow-inset);
 }
 
 .button:disabled {
-  opacity: 0.45;
+  opacity: 0.6;
   cursor: not-allowed;
-  box-shadow: none;
+  box-shadow: var(--shadow-flat);
+  background: var(--surface-sunken);
 }
 
 .button-primary {
   background: var(--accent-gradient);
   color: var(--accent-ink);
+  box-shadow: var(--shadow-flat), 0 4px 14px var(--accent-glow);
+}
+
+.button-primary:hover:not(:disabled) {
+  box-shadow: var(--shadow-raised-hover), 0 6px 20px var(--accent-glow);
 }
 
 .button-ghost {
@@ -1006,124 +1712,337 @@ code,
   box-shadow: none;
   color: var(--text-soft);
   text-decoration: underline;
-  text-underline-offset: 3px;
-  padding: var(--space-3) var(--space-2);
+  text-underline-offset: 4px;
+  padding: var(--space-3) var(--space-3);
+}
+
+.button-ghost:hover:not(:disabled) {
+  color: var(--accent-text);
+  background: var(--surface-sunken);
+  box-shadow: var(--shadow-inset);
+  text-decoration: none;
 }
 
 .button-danger {
   background: var(--danger);
-  color: var(--accent-ink);
+  color: #ffffff;
+  box-shadow: var(--shadow-flat), 0 4px 14px var(--danger-glow);
 }
 
 .button-launch {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-3);
   width: 100%;
   padding: var(--space-4);
-  font-size: 0.98rem;
+  font-size: 1.02rem;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  border-radius: var(--radius-sm);
+  border: 0;
+  transition: all 0.2s ease;
+}
+
+.button-launch-ready {
   background: var(--accent-gradient);
   color: var(--accent-ink);
-  letter-spacing: 0.01em;
+  box-shadow: var(--shadow-flat), 0 6px 20px var(--accent-glow);
+  cursor: pointer;
 }
 
-.button-launch:not(:disabled) {
-  box-shadow: var(--shadow-flat), 0 0 22px rgba(34, 211, 238, 0.28);
+.button-launch-ready:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-raised-hover), 0 8px 26px var(--accent-glow);
 }
 
-/* ── Campos ──────────────────────────────────────────────────────────────── */
+.button-launch-ready:active {
+  transform: translateY(1px);
+  box-shadow: var(--shadow-inset);
+}
+
+.button-launch-disabled,
+.button-launch:disabled {
+  background: var(--surface-sunken) !important;
+  box-shadow: var(--shadow-inset) !important;
+  border: 1px solid var(--contour-dark) !important;
+  color: var(--text-soft) !important;
+  font-weight: 700;
+  opacity: 0.9 !important;
+  cursor: not-allowed;
+}
+
+.button-launch-disabled .button-icon,
+.button-launch:disabled .button-icon {
+  color: var(--text-muted);
+}
+
+.launch-hint {
+  margin: var(--space-1) 0 0;
+  font-size: 0.76rem;
+  color: var(--warn);
+  text-align: center;
+  font-weight: 600;
+  line-height: 1.4;
+  padding: 0 var(--space-2);
+}
+
+/* ── Campos de Entrada Hundidos (Neumorphic Inset Inputs) ─────────────────── */
 
 .field-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-  gap: var(--space-4);
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--space-5);
 }
 
 .field {
   display: flex;
   flex-direction: column;
+  justify-content: flex-end;
   gap: var(--space-2);
   min-width: 0;
 }
 
 .field-label {
-  font-size: 0.79rem;
-  font-weight: 600;
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-2);
+  min-height: 32px;
+  padding-bottom: 2px;
+  font-size: 0.74rem;
+  font-weight: 800;
   color: var(--text-soft);
-  letter-spacing: 0.01em;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  line-height: 1.25;
+}
+
+.field-tooltip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 17px;
+  height: 17px;
+  border-radius: 50%;
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-soft);
+  color: var(--accent);
+  cursor: help;
+  position: relative;
+  border: 1px solid var(--contour-light);
+  transition: all 0.2s ease;
+  flex-shrink: 0;
+}
+
+.field-tooltip:hover,
+.field-tooltip:focus {
+  background: var(--accent);
+  color: var(--accent-ink);
+  box-shadow: 0 0 10px var(--accent-glow);
 }
 
 .input {
   width: 100%;
-  padding: var(--space-3);
-  border: 1px solid transparent;
+  padding: var(--space-3) var(--space-4);
+  border: 0;
   border-radius: var(--radius-sm);
   background: var(--surface-sunken);
   box-shadow: var(--shadow-inset);
   color: var(--text);
   font: inherit;
-  font-size: 0.9rem;
-  transition: border-color 0.18s ease;
+  font-size: 0.92rem;
+  font-weight: 500;
+  transition: border-color 0.2s ease, background-color 0.35s ease, color 0.35s ease, box-shadow 0.2s ease;
+}
+
+.input-group {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+}
+
+.input-group .input {
+  flex: 1;
+  min-width: 0;
+}
+
+.input-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: var(--surface-sunken);
+  box-shadow: var(--shadow-inset);
+  color: var(--text-soft);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background-color 0.25s ease, color 0.25s ease, transform 0.15s ease, box-shadow 0.2s ease;
+}
+
+.input-btn:hover {
+  color: var(--accent);
+  box-shadow: var(--shadow-soft);
+}
+
+.input-btn:active {
+  transform: scale(0.94);
+  box-shadow: var(--shadow-inset);
+}
+
+select.input {
+  width: 100%;
+  padding: var(--space-3) 42px var(--space-3) var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background-color: var(--surface-sunken);
+  box-shadow: var(--shadow-inset);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.92rem;
+  font-weight: 600;
+  appearance: none;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%2300d8f6' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 14px center;
+  background-size: 16px 16px;
+  cursor: pointer;
+  transition: border-color 0.2s ease, background-color 0.35s ease, color 0.35s ease, box-shadow 0.2s ease;
+}
+
+select.input option {
+  background-color: var(--surface-raised);
+  color: var(--text);
+  padding: 10px;
 }
 
 .input::placeholder {
   color: var(--text-muted);
 }
 
+.input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: var(--shadow-inset), 0 0 0 3px var(--accent-glow);
+}
+
 .input:disabled {
   color: var(--text-muted);
   cursor: not-allowed;
+  opacity: 0.6;
 }
 
 .input[aria-invalid='true'] {
   border-color: var(--danger);
+  box-shadow: var(--shadow-inset), 0 0 0 2px var(--danger-glow);
 }
 
 .field-error {
   margin: 0;
   color: var(--danger);
-  font-size: 0.76rem;
+  font-size: 0.78rem;
+  font-weight: 600;
 }
 
 .field-hint {
   margin: 0;
   color: var(--text-muted);
-  font-size: 0.74rem;
+  font-size: 0.76rem;
 }
 
 .fieldset {
-  margin: var(--space-6) 0 0;
-  padding: var(--space-4);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
+  margin: var(--space-3) 0 0;
+  padding: var(--space-3) var(--space-4);
+  border: 0;
+  border-radius: var(--radius);
+  background: var(--surface-sunken);
+  box-shadow: var(--shadow-inset);
+  position: relative;
 }
 
 .fieldset legend {
-  padding: 0 var(--space-2);
-  font-size: 0.78rem;
-  font-weight: 700;
-  color: var(--text-soft);
+  padding: 3px 14px;
+  font-size: 0.76rem;
+  font-weight: 800;
+  color: var(--accent);
   text-transform: uppercase;
-  letter-spacing: 0.05em;
+  letter-spacing: 0.08em;
+  background: var(--surface-raised);
+  border-radius: 999px;
+  box-shadow: var(--shadow-soft);
+  border: 0;
 }
 
 .switch-row {
   display: flex;
   align-items: center;
-  gap: var(--space-3);
-  font-size: 0.88rem;
+  gap: var(--space-4);
+  font-size: 0.9rem;
+  font-weight: 600;
 }
 
 .switch-row label {
   cursor: pointer;
 }
 
-input[type='checkbox'],
-input[type='radio'] {
-  width: 17px;
-  height: 17px;
-  accent-color: var(--accent);
+/* Interruptor Neumórfico 3D Real */
+.switch {
+  appearance: none;
+  -webkit-appearance: none;
+  flex: 0 0 auto;
+  width: 48px;
+  height: 26px;
+  margin: 0;
+  border-radius: 999px;
+  background: var(--surface-sunken);
+  box-shadow: var(--shadow-inset);
   cursor: pointer;
+  position: relative;
+  border: 0;
+  transition: background 0.25s ease, box-shadow 0.35s ease;
 }
 
-/* ── Dispositivos ────────────────────────────────────────────────────────── */
+.switch::before {
+  content: '';
+  position: absolute;
+  inset: -9px -3px;
+}
+
+.switch::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--text-soft);
+  box-shadow: 2px 2px 5px var(--shadow-dark), -1px -1px 3px var(--shadow-light);
+  transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1), background 0.25s ease;
+}
+
+.switch:checked {
+  background: var(--accent-gradient);
+  box-shadow: var(--shadow-inset), 0 0 12px var(--accent-glow);
+}
+
+.switch:checked::after {
+  transform: translateX(22px);
+  background: var(--accent-ink);
+}
+
+.switch:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+/* ── Dispositivos y Opciones ─────────────────────────────────────────────── */
 
 .device-list {
   display: flex;
@@ -1137,51 +2056,59 @@ input[type='radio'] {
 .device-option {
   display: flex;
   align-items: center;
-  gap: var(--space-3);
-  padding: var(--space-3) var(--space-4);
+  gap: var(--space-4);
+  padding: var(--space-4) var(--space-5);
   border-radius: var(--radius-sm);
   background: var(--surface-raised);
   box-shadow: var(--shadow-flat);
-  transition: box-shadow 0.18s ease;
+  cursor: pointer;
+  transition: box-shadow 0.2s ease, transform 0.15s ease, background-color 0.35s ease;
+}
+
+.device-option:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-raised-hover);
 }
 
 .device-option label {
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: 4px;
   cursor: pointer;
   min-width: 0;
   flex: 1;
 }
 
 .device-selected {
-  box-shadow: var(--shadow-flat), 0 0 0 2px var(--accent) inset;
+  box-shadow: var(--shadow-raised), 0 0 0 2px var(--accent), 0 0 16px var(--accent-glow);
+  background: var(--surface-raised);
 }
 
 .device-model {
-  font-weight: 600;
-  font-size: 0.92rem;
+  font-weight: 700;
+  font-size: 0.96rem;
 }
 
 .device-meta {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--space-3);
-  font-size: 0.78rem;
+  gap: var(--space-4);
+  font-size: 0.8rem;
   color: var(--text-muted);
 }
 
 .device-transport {
   text-transform: uppercase;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.05em;
+  font-weight: 600;
 }
 
-/* ── Resúmenes y mensajes ────────────────────────────────────────────────── */
+/* ── Resúmenes y Tarjetas Secundarias ────────────────────────────────────── */
 
 .summary-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
-  gap: var(--space-3);
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: var(--space-4);
 }
 
 .summary-item {
@@ -1197,8 +2124,9 @@ input[type='radio'] {
 
 .summary-key {
   font-size: 0.72rem;
+  font-weight: 700;
   text-transform: uppercase;
-  letter-spacing: 0.05em;
+  letter-spacing: 0.06em;
   color: var(--text-muted);
 }
 
@@ -1206,15 +2134,18 @@ input[type='radio'] {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 0.85rem;
+  font-size: 0.88rem;
+  font-weight: 600;
 }
 
 .empty-state {
   padding: var(--space-7) var(--space-5);
   border-radius: var(--radius-sm);
-  border: 1px dashed var(--border);
+  background: var(--surface-sunken);
+  box-shadow: var(--shadow-inset);
   text-align: center;
   color: var(--text-muted);
+  border: 1px dashed var(--border);
 }
 
 .empty-state p {
@@ -1224,72 +2155,104 @@ input[type='radio'] {
 .hint {
   margin: var(--space-4) 0 0;
   color: var(--text-muted);
-  font-size: 0.76rem;
+  font-size: 0.78rem;
 }
 
 .message-error,
 .message-ok,
 .message-warn {
   margin: var(--space-4) 0 0;
-  padding: var(--space-3) var(--space-4);
+  padding: var(--space-3) var(--space-5);
   border-radius: var(--radius-sm);
-  font-size: 0.83rem;
-  border-left: 3px solid;
+  font-size: 0.85rem;
+  font-weight: 500;
+  border-left: 4px solid;
+  box-shadow: var(--shadow-flat);
 }
 
 .message-error {
-  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  background: color-mix(in srgb, var(--danger) 14%, var(--surface));
   border-color: var(--danger);
   color: var(--danger);
 }
 
 .message-ok {
-  background: color-mix(in srgb, var(--ok) 12%, transparent);
+  background: color-mix(in srgb, var(--ok) 14%, var(--surface));
   border-color: var(--ok);
   color: var(--ok);
 }
 
 .message-warn {
-  background: color-mix(in srgb, var(--warn) 12%, transparent);
+  background: color-mix(in srgb, var(--warn) 14%, var(--surface));
   border-color: var(--warn);
   color: var(--warn);
 }
 
-/* ── Credencial ──────────────────────────────────────────────────────────── */
+/* ── Pasos de Credenciales ───────────────────────────────────────────────── */
 
+/* Misma idea que .step-checklist — línea vertical conectando los subpasos —
+   pero cada uno trae su propio botón de acción, así que el marcador vive
+   posicionado sobre el borde en vez de ser parte del checklist genérico. */
 .credential-steps {
   list-style: none;
   counter-reset: credential;
-  margin: 0;
+  margin: var(--space-4) 0 0;
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: var(--space-3);
 }
 
 .credential-steps li {
   counter-increment: credential;
+  position: relative;
   display: flex;
   align-items: center;
   gap: var(--space-4);
-  padding: var(--space-4);
-  border-radius: var(--radius-sm);
-  background: var(--surface-sunken);
-  box-shadow: var(--shadow-inset);
+  padding: var(--space-3) var(--space-4) var(--space-6) 48px;
+}
+
+.credential-steps li:last-child {
+  padding-bottom: var(--space-3);
 }
 
 .credential-steps li::before {
   content: counter(credential);
+  position: absolute;
+  left: 0;
+  top: var(--space-3);
   display: grid;
   place-items: center;
-  width: 26px;
-  height: 26px;
+  width: 32px;
+  height: 32px;
   flex-shrink: 0;
   border-radius: 50%;
-  background: var(--surface-raised);
-  box-shadow: var(--shadow-flat);
-  font-size: 0.78rem;
-  font-weight: 700;
+  background: var(--surface-sunken);
+  box-shadow: var(--shadow-inset);
+  border: 1px solid var(--contour-dark);
+  font-size: 0.86rem;
+  font-weight: 800;
+  color: var(--text-muted);
+}
+
+.credential-steps li::after {
+  content: '';
+  position: absolute;
+  left: 15px;
+  top: calc(var(--space-3) + 34px);
+  bottom: 2px;
+  width: 2px;
+  background: var(--border);
+}
+
+.credential-steps li:last-child::after {
+  display: none;
+}
+
+.credential-steps li.credential-step-done::before {
+  background: var(--accent-gradient);
+  color: var(--accent-ink);
+  border-color: transparent;
+  box-shadow: 0 2px 8px var(--accent-glow);
 }
 
 .credential-step-text {
@@ -1301,18 +2264,18 @@ input[type='radio'] {
 }
 
 .credential-step-text strong {
-  font-size: 0.89rem;
+  font-size: 0.92rem;
 }
 
 .credential-step-text span {
-  font-size: 0.78rem;
+  font-size: 0.8rem;
   color: var(--text-muted);
 }
 
 .credential-state {
-  margin: var(--space-4) 0 0;
-  font-size: 0.85rem;
-  font-weight: 600;
+  margin: var(--space-5) 0 0;
+  font-size: 0.88rem;
+  font-weight: 700;
 }
 
 .state-ok {
@@ -1323,72 +2286,76 @@ input[type='radio'] {
   color: var(--warn);
 }
 
-/* ── Progreso ────────────────────────────────────────────────────────────── */
+/* ── Vista de Progreso de Fabricación ────────────────────────────────────── */
 
 .progress-figure {
   display: flex;
   align-items: baseline;
   justify-content: center;
   gap: var(--space-1);
-  margin: var(--space-2) 0 var(--space-4);
+  margin: var(--space-3) 0 var(--space-5);
 }
 
 .progress-percent {
   font-family: var(--mono);
-  font-size: 4.2rem;
-  font-weight: 700;
+  font-size: 4.8rem;
+  font-weight: 800;
   line-height: 1;
   font-variant-numeric: tabular-nums;
   background: var(--accent-gradient);
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
+  filter: drop-shadow(0 4px 12px var(--accent-glow));
 }
 
 .progress-percent-unit {
-  font-size: 1.3rem;
+  font-size: 1.5rem;
+  font-weight: 700;
   color: var(--text-muted);
 }
 
 .progress-track {
-  height: 13px;
+  height: 16px;
   border-radius: 999px;
   background: var(--surface-sunken);
   box-shadow: var(--shadow-inset);
   overflow: hidden;
+  padding: 2px;
+  border: 1px solid var(--contour-dark);
 }
 
 .progress-fill {
   height: 100%;
   border-radius: 999px;
   background: var(--accent-gradient);
-  transition: width 0.35s ease;
+  box-shadow: 0 0 14px var(--accent-glow);
+  transition: width 0.35s ease, background 0.35s ease;
 }
 
 .progress-error .progress-fill,
 .progress-cancelled .progress-fill {
   background: var(--danger);
+  box-shadow: 0 0 14px var(--danger-glow);
 }
 
 .progress-done .progress-fill {
   background: var(--ok);
+  box-shadow: 0 0 14px var(--ok-glow);
 }
 
 .progress-message {
-  margin: var(--space-4) 0 0;
-  font-size: 0.88rem;
+  margin: var(--space-5) 0 0;
+  font-size: 0.92rem;
+  font-weight: 600;
   color: var(--text-soft);
   text-align: center;
-}
-
-.progress-message.message-error {
-  text-align: left;
 }
 
 .progress-metrics {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
-  gap: var(--space-3);
+  gap: var(--space-4);
   margin: var(--space-5) 0 0;
 }
 
@@ -1402,29 +2369,30 @@ input[type='radio'] {
 }
 
 .progress-metrics dt {
-  font-size: 0.71rem;
+  font-size: 0.72rem;
+  font-weight: 700;
   text-transform: uppercase;
-  letter-spacing: 0.05em;
+  letter-spacing: 0.06em;
   color: var(--text-muted);
 }
 
 .progress-metrics dd {
-  margin: 3px 0 0;
+  margin: 4px 0 0;
   font-family: var(--mono);
-  font-size: 0.95rem;
-  font-weight: 600;
+  font-size: 0.98rem;
+  font-weight: 700;
 }
 
 .metric-total {
   color: var(--text-muted);
-  font-weight: 400;
+  font-weight: 500;
 }
 
 .progress-actions {
   display: flex;
   align-items: center;
   gap: var(--space-4);
-  margin-top: var(--space-5);
+  margin-top: var(--space-6);
 }
 
 .progress-actions .hint {
@@ -1432,16 +2400,85 @@ input[type='radio'] {
   flex: 1;
 }
 
-/* ── Ventanas estrechas (el mínimo declarado es 800×560) ─────────────────── */
+.progress-panel {
+  gap: var(--space-6);
+}
+
+.progress-panel.progress-done {
+  box-shadow: var(--shadow-raised), 0 0 30px var(--ok-glow);
+}
+
+.progress-panel.progress-error {
+  box-shadow: var(--shadow-raised), 0 0 30px var(--danger-glow);
+}
+
+.progress-panel.progress-cancelled {
+  box-shadow: var(--shadow-raised), 0 0 30px var(--warn-glow);
+}
+
+/* ── Fallos y Comandos de Remedio ────────────────────────────────────────── */
+
+.failure {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin-top: var(--space-4);
+}
+
+.remedy {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: var(--space-4);
+  background: var(--surface-sunken);
+  box-shadow: var(--shadow-inset);
+}
+
+.remedy-lead {
+  margin: 0 0 var(--space-2);
+  font-size: 0.82rem;
+  color: var(--text-muted);
+}
+
+.remedy-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.remedy-command {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-x: auto;
+  white-space: pre;
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  line-height: 1.6;
+  padding: var(--space-3);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  box-shadow: var(--shadow-inset);
+  color: var(--accent-text);
+  user-select: all;
+}
+
+/* ── Adaptabilidad Responsiva ───────────────────────────────────────────── */
 
 @media (max-width: 900px) {
-  /* Apilado: la tira de pasos ocupa lo que necesita, fija justo bajo la
-     cabecera. El resto del alto se reparte mitad y mitad entre el contexto y
-     el panel del paso activo, igual que en escritorio. */
   .app-body {
     grid-template-columns: 1fr;
-    grid-template-rows: auto 1fr 1fr;
-    grid-template-areas: 'sidebar' 'context' 'content';
+    grid-template-rows: auto minmax(160px, 1fr) minmax(220px, 1.6fr);
+    grid-template-areas: 'sidebar' 'context' 'content-column';
+    overflow-y: auto;
+  }
+
+  /* En desktop el contexto va vertical junto al panel del paso; aquí no hay
+     ancho para eso, así que las 3 tarjetas vuelven a repartirse en fila. */
+  .context-panel {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    grid-template-rows: 1fr;
+    grid-auto-rows: 1fr;
   }
 
   .sidebar {
@@ -1459,11 +2496,8 @@ input[type='radio'] {
     flex-direction: row;
     flex-wrap: nowrap;
     overflow-x: auto;
-    /* overflow-x:auto computa overflow-y a auto también: sin este padding
-       vertical, la sombra de .step-current (el paso activo) se cortaba
-       arriba y abajo contra este mismo borde. */
-    padding: var(--space-1);
-    gap: var(--space-2);
+    padding: var(--space-2);
+    gap: var(--space-3);
     scrollbar-width: thin;
   }
 
@@ -1471,8 +2505,6 @@ input[type='radio'] {
     flex: 0 0 auto;
   }
 
-  /* En la tira horizontal el número y el estado bastan: el título completo
-     se lee en la cabecera del panel activo. */
   .step-detail,
   .step-title {
     display: none;
@@ -1482,8 +2514,9 @@ input[type='radio'] {
     display: block;
   }
 
-  .launch {
+  .button-launch {
     margin-top: 0;
+    width: auto;
     flex: 0 0 auto;
     min-width: 200px;
   }
@@ -1492,14 +2525,23 @@ input[type='radio'] {
     display: none;
   }
 
-  /* En la ventana mínima declarada (800×560) la consola no puede comerse el
-     alto de los pasos ni del panel activo. */
-  .log-list {
-    max-height: 64px;
+  /* En mobile el espacio vertical es escaso y el formulario del paso manda:
+     el registro de actividad queda para pantallas con más aire. */
+  .log-console {
+    display: none;
+  }
+
+  /* Mismo criterio: el checklist es un extra, no el formulario en sí. */
+  .panel-body {
+    grid-template-columns: 1fr;
+  }
+
+  .panel-checklist-col {
+    display: none;
   }
 
   .progress-percent {
-    font-size: 3rem;
+    font-size: 3.2rem;
   }
 }
 
@@ -1509,136 +2551,5 @@ input[type='radio'] {
   *::after {
     transition-duration: 0.01ms !important;
     animation-duration: 0.01ms !important;
-  }
-}
-
-/* Remedio accionable cuando el servidor o el keyring rechazan la cuenta.
-   Antes usaba variables (--border-strong, --surface-code, --accent-cyan) que
-   no existían en :root: caía siempre al valor de reserva. Con tokens reales
-   además respeta el tema claro, que antes ignoraba por completo. */
-.failure {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-3);
-  margin-top: var(--space-4);
-}
-
-.remedy {
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  padding: var(--space-3) var(--space-4);
-  background: var(--surface-sunken);
-}
-
-.remedy-lead {
-  margin: 0 0 var(--space-2);
-  font-size: 0.8rem;
-  color: var(--text-muted);
-}
-
-.remedy-row {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  flex-wrap: wrap;
-}
-
-.remedy-command {
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow-x: auto;
-  white-space: pre;
-  font-family: var(--mono);
-  font-size: 0.76rem;
-  line-height: 1.6;
-  padding: var(--space-2) var(--space-3);
-  border-radius: var(--radius-sm);
-  background: var(--bg);
-  box-shadow: var(--shadow-inset);
-  color: var(--accent);
-  user-select: all;
-}
-
-/* ── Piezas que faltaban por vestir ─────────────────────────────────────── */
-
-/* Un campo inválido se marca por color Y por relieve: el color solo no basta
-   para quien no lo distingue. */
-.field-invalid .input,
-.field-invalid .select {
-  border-color: var(--danger);
-  box-shadow: var(--shadow-inset), 0 0 0 1px var(--danger);
-}
-
-.field-invalid .field-label {
-  color: var(--danger);
-}
-
-/* Interruptor neumórfico nativo: se mantiene <input type="checkbox"> para
-   conservar el rol y el teclado; solo se reviste. */
-.switch {
-  appearance: none;
-  -webkit-appearance: none;
-  flex: 0 0 auto;
-  width: 42px;
-  height: 24px;
-  margin: 0;
-  border-radius: 999px;
-  background: var(--surface-sunken);
-  box-shadow: var(--shadow-inset);
-  cursor: pointer;
-  position: relative;
-  transition: background 160ms ease;
-}
-
-.switch::after {
-  content: '';
-  position: absolute;
-  top: 3px;
-  left: 3px;
-  width: 18px;
-  height: 18px;
-  border-radius: 50%;
-  background: var(--text-muted);
-  box-shadow: var(--shadow-flat);
-  transition: transform 160ms ease, background 160ms ease;
-}
-
-.switch:checked {
-  background: var(--accent-gradient);
-}
-
-.switch:checked::after {
-  transform: translateX(18px);
-  background: var(--accent-ink);
-}
-
-.switch:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 3px;
-}
-
-/* El progreso ocupa el panel entero y cambia de acento según su estado. */
-.progress-panel {
-  gap: var(--space-6);
-}
-
-/* Los paneles no llevan borde: el relieve es sombra. El estado terminal se
-   señala con un halo del mismo lenguaje, no con un borde que no existe. */
-.progress-panel.progress-done {
-  box-shadow: var(--shadow-raised), 0 0 26px -8px color-mix(in srgb, var(--ok) 70%, transparent);
-}
-
-.progress-panel.progress-error {
-  box-shadow: var(--shadow-raised), 0 0 26px -8px color-mix(in srgb, var(--danger) 75%, transparent);
-}
-
-.progress-panel.progress-cancelled {
-  box-shadow: var(--shadow-raised), 0 0 26px -8px color-mix(in srgb, var(--warn) 70%, transparent);
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .switch,
-  .switch::after {
-    transition: none;
   }
 }

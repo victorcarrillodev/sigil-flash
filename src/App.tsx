@@ -8,22 +8,114 @@ import { FlashProgressView } from './components/FlashProgressView';
 import { StepRail } from './components/StepRail';
 import { ContextPanel } from './components/ContextPanel';
 import { ActivityLog, LogEntry, LogLevel } from './components/ActivityLog';
+import { HistoryView } from './components/HistoryView';
+import { SshView } from './components/SshView';
+import { AppView, ViewTabs } from './components/ViewTabs';
 import { buildPreflight, currentStepId, StepId } from './services/preflight';
 import { formatBytes } from './services/format';
 import {
+  agregarEntradaHistorial,
+  construirEntradaHistorial,
+  fusionarHistorial,
+  FlashHistoryEntry,
+  leerHistorial,
+} from './services/history';
+import { csvToRows, entriesToRows, rowsToCsv, rowsToEntries } from './services/historyIO';
+import {
   cancelFlash,
+  exportHistoryXlsx,
+  importHistoryXlsx,
   listFactoryAccounts,
   onFlashProgress,
+  openFileDialog,
   rebuildPayloads,
+  readTextFile,
   resolveBundle,
+  saveFileDialog,
   startFlash,
   validateConfig,
+  writeTextFile,
 } from './services/tauri';
+import {
+  generarContrasenaSegura,
+  generarNumeroDeSerie,
+  incrementarYObtenerSiguienteSerie,
+} from './services/validation';
+
+type Tema = 'dark' | 'light';
+
+const CLAVE_TEMA = 'sigil-flash.theme';
+
+// Sin elección previa, sigue al sistema operativo. Con una ya guardada, esa
+// gana siempre — el toggle no tendría sentido si el próximo arranque la
+// pisara con la preferencia del SO otra vez.
+const leerTemaInicial = (): Tema => {
+  try {
+    const guardado = localStorage.getItem(CLAVE_TEMA);
+    if (guardado === 'dark' || guardado === 'light') return guardado;
+  } catch {
+    // Sin almacenamiento persistente, se sigue al sistema en cada arranque.
+  }
+  return window.matchMedia?.('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+};
+
+/** Ojo entre dos hexágonos superpuestos: uno relleno en degradé, el otro solo
+ *  contorno. El hueco del ojo es una máscara, no blanco a mano — así se ve
+ *  bien tanto en modo claro como oscuro, no solo sobre fondo blanco. */
+const BrandMark: React.FC = () => (
+  <svg className="brand-mark" viewBox="0 0 1000 1000" aria-hidden="true">
+    <defs>
+      <linearGradient id="brandGrad" x1="0%" y1="15%" x2="100%" y2="85%">
+        <stop offset="0%" stopColor="#2f8f74" />
+        <stop offset="100%" stopColor="#123a45" />
+      </linearGradient>
+      <mask id="brandEyeCut">
+        <rect x="0" y="0" width="1000" height="1000" fill="#fff" />
+        <path d="M250,500 L510,400 L770,500 L510,600 Z" fill="#000" />
+      </mask>
+    </defs>
+    <path
+      d="M380,200 L639.8,350 L639.8,650 L380,800 L120.2,650 L120.2,350 Z"
+      fill="url(#brandGrad)"
+      mask="url(#brandEyeCut)"
+    />
+    <path
+      d="M640,200 L899.8,350 L899.8,650 L640,800 L380.2,650 L380.2,350 Z"
+      fill="none"
+      stroke="#123a45"
+      strokeWidth="16"
+    />
+    <path d="M250,500 L510,400 L770,500 L510,600 Z" fill="none" stroke="#123a45" strokeWidth="12" />
+    <circle cx="510" cy="500" r="52" fill="#123a45" />
+  </svg>
+);
+
+const SunIcon: React.FC = () => (
+  <svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true">
+    <circle cx="12" cy="12" r="4.6" fill="currentColor" />
+    <g stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+      <line x1="12" y1="1.5" x2="12" y2="4" />
+      <line x1="12" y1="20" x2="12" y2="22.5" />
+      <line x1="1.5" y1="12" x2="4" y2="12" />
+      <line x1="20" y1="12" x2="22.5" y2="12" />
+      <line x1="4.4" y1="4.4" x2="6.1" y2="6.1" />
+      <line x1="17.9" y1="17.9" x2="19.6" y2="19.6" />
+      <line x1="4.4" y1="19.6" x2="6.1" y2="17.9" />
+      <line x1="17.9" y1="6.1" x2="19.6" y2="4.4" />
+    </g>
+  </svg>
+);
+
+const MoonIcon: React.FC = () => (
+  <svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true">
+    <path fill="currentColor" d="M20.7 14.9A8.5 8.5 0 1 1 9.1 3.3a8.5 8.5 0 0 0 11.6 11.6Z" />
+  </svg>
+);
 
 const CONFIG_INICIAL: DeviceConfig = {
   hostname: 'sigil-device',
   username: 'sigil',
-  serialNumber: '',
+  serialNumber: generarNumeroDeSerie(),
   sshEnabled: false,
   rpiModel: 'raspberry-pi-zero-2-w',
   serverUrl: 'https://sigil-server.sphinx-pickerel.ts.net',
@@ -49,6 +141,24 @@ const leerCuentaDeFabrica = (): string | null => {
 };
 
 export const App: React.FC = () => {
+  const [theme, setTheme] = useState<Tema>(leerTemaInicial);
+
+  // El atributo en <html> es lo que el CSS lee (:root[data-theme=...]); el
+  // estado de React es solo quién lo decide.
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    try {
+      localStorage.setItem(CLAVE_TEMA, theme);
+    } catch {
+      // Sin almacenamiento persistente, el toggle sigue funcionando dentro
+      // de la sesión; solo no sobrevive al reinicio.
+    }
+  }, [theme]);
+
+  const alternarTema = useCallback(() => {
+    setTheme((actual) => (actual === 'dark' ? 'light' : 'dark'));
+  }, []);
+
   const [image, setImage] = useState<ImageInfo | null>(null);
   const [bundle, setBundle] = useState<BundlePair | null>(null);
   const [bundleError, setBundleError] = useState<string | null>(null);
@@ -62,6 +172,20 @@ export const App: React.FC = () => {
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const logSeq = useRef(0);
   const prevProgressStatus = useRef<FlashProgress['status']>('idle');
+
+  const [view, setView] = useState<AppView>('flash');
+  const [history, setHistory] = useState<FlashHistoryEntry[]>(() => leerHistorial());
+
+  // Qué se estaba fabricando cuando arrancó ESTE intento, para poder anotar
+  // la entrada del historial cuando llegue el estado final: para entonces el
+  // operario ya pudo haber cambiado la imagen o el dispositivo seleccionado.
+  const flashSnapshot = useRef<{
+    startedAt: string;
+    image: ImageInfo;
+    device: Device;
+    bundle: BundlePair | null;
+    config: DeviceConfig;
+  } | null>(null);
 
   // Historial de acciones y errores para el operario, no para depuración: cada
   // línea es una frase que explica qué pasó, no un volcado técnico. Se acota a
@@ -136,6 +260,33 @@ export const App: React.FC = () => {
         prevProgressStatus.current = p.status;
         const level: LogLevel = p.status === 'error' ? 'error' : p.status === 'cancelled' ? 'warn' : 'info';
         pushLog(level, p.message || `Fase de fabricación: ${p.status}`);
+
+        // Una sola entrada por intento: este efecto ve cada transición de
+        // estado exactamente una vez (por el guardado de arriba), a
+        // diferencia del `then` de startFlash, que también recibe el estado
+        // final y duplicaría el registro si se enganchara ahí también.
+        if (p.status === 'done' || p.status === 'error' || p.status === 'cancelled') {
+          const snapshot = flashSnapshot.current;
+          if (snapshot) {
+            const entry = construirEntradaHistorial({ ...snapshot, progress: p });
+            setHistory((prev) => agregarEntradaHistorial(prev, entry));
+            flashSnapshot.current = null;
+          }
+        }
+
+        if (p.status === 'done') {
+          const siguienteSerie = incrementarYObtenerSiguienteSerie();
+          setConfig((prev) => {
+            const nuevaClaveSsh = prev.sshEnabled ? generarContrasenaSegura() : prev.password;
+            return {
+              ...prev,
+              serialNumber: siguienteSerie,
+              password: nuevaClaveSsh,
+            };
+          });
+          pushLog('info', `Número de serie avanzado automáticamente a ${siguienteSerie}`);
+          pushLog('info', 'Contraseña SSH de administración regenerada automáticamente para el siguiente equipo');
+        }
       }
     }).then((fn) => {
       unlisten = fn;
@@ -171,6 +322,7 @@ export const App: React.FC = () => {
 
   const handleStartFlash = useCallback(async () => {
     if (!image || !device) return;
+    flashSnapshot.current = { startedAt: new Date().toISOString(), image, device, bundle, config };
     setFailure(null);
     pushLog('info', `Fabricación iniciada: ${image.name} → ${device.path}`);
     try {
@@ -181,6 +333,18 @@ export const App: React.FC = () => {
       if (result.status === 'error') {
         setFailure(result.message);
         pushLog('error', result.message);
+      } else if (result.status === 'done') {
+        const siguienteSerie = incrementarYObtenerSiguienteSerie();
+        setConfig((prev) => {
+          const nuevaClaveSsh = prev.sshEnabled ? generarContrasenaSegura() : prev.password;
+          return {
+            ...prev,
+            serialNumber: siguienteSerie,
+            password: nuevaClaveSsh,
+          };
+        });
+        pushLog('info', `Número de serie avanzado automáticamente a ${siguienteSerie}`);
+        pushLog('info', 'Contraseña SSH de administración regenerada automáticamente para el siguiente equipo');
       }
     } catch (err) {
       setFailure(String(err));
@@ -188,7 +352,7 @@ export const App: React.FC = () => {
     } finally {
       setFlashing(false);
     }
-  }, [config, device, image, pushLog]);
+  }, [bundle, config, device, image, pushLog]);
 
   const handleCancel = useCallback(async () => {
     pushLog('warn', 'Cancelando fabricación…');
@@ -196,6 +360,65 @@ export const App: React.FC = () => {
       await cancelFlash();
     } catch (err) {
       setFailure(String(err));
+      pushLog('error', String(err));
+    }
+  }, [pushLog]);
+
+  const nombreArchivoHistorial = (extension: string) =>
+    `sigil-flash-historial-${new Date().toISOString().slice(0, 10)}.${extension}`;
+
+  const handleExportHistoryCsv = useCallback(async () => {
+    try {
+      const path = await saveFileDialog(nombreArchivoHistorial('csv'), [
+        { name: 'CSV', extensions: ['csv'] },
+      ]);
+      if (!path) return; // el operario cerró el diálogo sin elegir ruta
+      await writeTextFile(path, rowsToCsv(entriesToRows(history)));
+      pushLog('info', `Historial exportado a ${path}`);
+    } catch (err) {
+      // No usa setFailure: ese aviso vive en el pie de la vista de Flasheo y
+      // un fallo de exportación no tiene nada que ver con si se puede
+      // fabricar. El registro de actividad (visible en las dos vistas) ya
+      // avisa aquí mismo.
+      pushLog('error', String(err));
+    }
+  }, [history, pushLog]);
+
+  const handleExportHistoryXlsx = useCallback(async () => {
+    try {
+      const path = await saveFileDialog(nombreArchivoHistorial('xlsx'), [
+        { name: 'Excel', extensions: ['xlsx'] },
+      ]);
+      if (!path) return;
+      await exportHistoryXlsx(path, entriesToRows(history));
+      pushLog('info', `Historial exportado a ${path}`);
+    } catch (err) {
+      pushLog('error', String(err));
+    }
+  }, [history, pushLog]);
+
+  const handleImportHistory = useCallback(async () => {
+    try {
+      const path = await openFileDialog([{ name: 'Historial (CSV o Excel)', extensions: ['csv', 'xlsx'] }]);
+      if (!path) return;
+
+      const esXlsx = path.toLowerCase().endsWith('.xlsx');
+      const rows = esXlsx ? await importHistoryXlsx(path) : csvToRows(await readTextFile(path));
+      const { entries: importadas, skipped } = rowsToEntries(rows);
+
+      if (importadas.length === 0) {
+        pushLog('error', 'El archivo no contenía filas de historial reconocibles');
+        return;
+      }
+
+      setHistory((prev) => fusionarHistorial(prev, importadas));
+      pushLog(
+        'info',
+        `Historial importado: ${importadas.length} fabricación(es)${
+          skipped > 0 ? `, ${skipped} fila(s) omitida(s) por datos incompletos` : ''
+        }`
+      );
+    } catch (err) {
       pushLog('error', String(err));
     }
   }, [pushLog]);
@@ -277,75 +500,110 @@ export const App: React.FC = () => {
     <div className="app">
       <header className="app-bar">
         <div className="brand">
-          <span className="brand-mark" aria-hidden="true">
-            ◈
-          </span>
-          <span className="brand-name">SIGIL Flash</span>
+          <div className="brand-mark-tile">
+            <BrandMark />
+          </div>
+          <div className="brand-text-col">
+            <span className="brand-name">SIGIL Flash</span>
+            <p className="brand-tagline">ESTACIÓN DE FABRICACIÓN OFFLINE</p>
+          </div>
         </div>
-        <p className="brand-tagline">Estación de fabricación offline</p>
         <span className="env-badge">Entorno de fabricación autorizado</span>
+        <button
+          type="button"
+          className="theme-toggle"
+          onClick={alternarTema}
+          aria-label={theme === 'dark' ? 'Cambiar a modo claro' : 'Cambiar a modo oscuro'}
+        >
+          {theme === 'dark' ? <SunIcon /> : <MoonIcon />}
+        </button>
       </header>
 
+      <ViewTabs active={view} onChange={setView} historyCount={history.length} />
+
       <div className="app-body">
-        <ContextPanel image={image} bundle={bundle} device={device} config={config} />
-
-        <aside className="sidebar">
-          <StepRail steps={preflight.steps} activeId={activeStep} onSelect={setManualStep} />
-
-          <div className="launch">
-            <button
-              type="button"
-              className="button button-launch"
-              onClick={handleStartFlash}
-              disabled={!preflight.canFlash}
-            >
-              Iniciar fabricación
-            </button>
-          </div>
-        </aside>
-
-        <main className="content">
-          {showProgress && <FlashProgressView progress={progress} onCancel={handleCancel} />}
-          {!showProgress && stepPanel()}
-          {failure && (
-            <p className="message-error" role="alert">
-              {failure}
-            </p>
-          )}
-        </main>
-      </div>
-
-      <footer className="app-foot">
-        <div className="status-row">
-          {/* Dos regiones vivas anunciando a la vez se pisan: durante la
-              fabricación manda el mensaje del escritor, no este resumen. */}
-          <p
-            className="blocking-reason"
-            data-testid="blocking-reason"
-            role={showProgress ? undefined : 'status'}
-          >
-            <span className={`dot ${preflight.canFlash ? 'dot-ready' : 'dot-blocked'}`} aria-hidden="true" />
-            {blockingReason}
-          </p>
-          <span className="app-version">SIGIL Flash v1.0.0</span>
-        </div>
-
-        {preflight.blockers.length > 0 && (
-          <ul className="blocker-list">
-            {preflight.blockers.slice(0, 3).map((b) => (
-              <li key={b}>{b}</li>
-            ))}
-          </ul>
+        {view === 'history' && (
+          <HistoryView
+            entries={history}
+            onExportCsv={handleExportHistoryCsv}
+            onExportXlsx={handleExportHistoryXlsx}
+            onImport={handleImportHistory}
+            logs={logs}
+          />
         )}
 
-        {preflight.warnings.map((w) => (
-          <p className="message-warn" key={w}>
-            {w}
-          </p>
-        ))}
+        {/* Montada siempre, oculta por CSS cuando no es la pestaña activa: a
+            diferencia de Historial, la terminal SSH tiene estado propio (el
+            scrollback de xterm.js) que un desmontaje destruiría sin forma de
+            reconstruirlo, aunque la sesión real siga viva en el backend. */}
+        <div className={`ssh-view-wrapper${view === 'ssh' ? '' : ' ssh-view-hidden'}`}>
+          <SshView active={view === 'ssh'} theme={theme} history={history} />
+        </div>
 
-        <ActivityLog entries={logs} />
-      </footer>
+        {view === 'flash' && (
+          <>
+            <ContextPanel image={image} bundle={bundle} device={device} config={config} />
+
+            <aside className="sidebar">
+              <StepRail
+                steps={preflight.steps}
+                activeId={activeStep}
+                onSelect={setManualStep}
+                canFlash={preflight.canFlash}
+                onStartFlash={handleStartFlash}
+              />
+            </aside>
+
+            <div className="content-column">
+              <main className="content">
+                {showProgress && <FlashProgressView progress={progress} onCancel={handleCancel} />}
+                {!showProgress && (
+                  <div key={activeStep} className="step-panel-wrapper">
+                    {stepPanel()}
+                  </div>
+                )}
+                {failure && (
+                  <p className="message-error" role="alert">
+                    {failure}
+                  </p>
+                )}
+              </main>
+
+              <footer className="app-foot">
+                <div className="status-row">
+                  {/* Dos regiones vivas anunciando a la vez se pisan: durante la
+                      fabricación manda el mensaje del escritor, no este resumen. */}
+                  <p
+                    className="blocking-reason"
+                    data-testid="blocking-reason"
+                    role={showProgress ? undefined : 'status'}
+                  >
+                    <span className={`dot ${preflight.canFlash ? 'dot-ready' : 'dot-blocked'}`} aria-hidden="true" />
+                    {blockingReason}
+                  </p>
+                  <span className="app-version">SIGIL Flash v1.0.0</span>
+                </div>
+
+                {preflight.blockers.length > 0 && (
+                  <ul className="blocker-list">
+                    {preflight.blockers.slice(0, 3).map((b) => (
+                      <li key={b}>{b}</li>
+                    ))}
+                  </ul>
+                )}
+
+                {preflight.warnings.map((w) => (
+                  <p className="message-warn" key={w}>
+                    {w}
+                  </p>
+                ))}
+
+                <ActivityLog entries={logs} />
+              </footer>
+            </div>
+          </>
+        )}
+      </div>
     </div>
   );
 };
